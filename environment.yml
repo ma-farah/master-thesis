@@ -1,0 +1,22 @@
+
+# name of enviroment for this project
+name: mt26
+channels:
+  - conda-forge
+
+# libraries used in this project
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - catboost
+  - phik
+  - pyod
+  
+  # last updated 05.01.2025
