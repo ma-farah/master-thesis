@@ -13,6 +13,9 @@ data/*
 *.xlsx
 *.xls
 
+# ignore TableReports
+table_report.html
+
 # DS file
 **/.DS_Store
 
