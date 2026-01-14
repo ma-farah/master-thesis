@@ -14,7 +14,7 @@ data/*
 *.xls
 
 # ignore TableReports
-table_report.html
+TableReport.html
 
 # DS file
 **/.DS_Store
