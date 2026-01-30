@@ -30,8 +30,10 @@ df_cl = pd.read_excel(
 
 # Patient IDs from 1 to 276. 
 
+
 # %%################ RAW CLINICAL DATASET #############################
 from skrub import TableReport
+import scikit_na as na
 
 # Table report of clinical dataset
 print("TableReport of raw clinical dataset:")
@@ -42,8 +44,12 @@ TableReport(df_cl, max_plot_columns=138)
 # Need to structure data based on timepoints 1,2,3,4...
 # Patients with missing treatment/ response information - remove
 # Patients with "Ausschluss/ Exclude" - remove
-# Patients with less than x? measure-timepoints - remove
+# Patients with only 1 measured timepoint - remove
 # Combine Survey questions/columns ?
+
+# na analysis of clinical dataset
+print("Na analysis of clinical dataset:")
+na.altair.plot_heatmap(df_cl)
 
 
 
@@ -58,26 +64,65 @@ TableReport(df_im, max_plot_columns=138)
 # also 6 missing values for patient IDs, maybe it is the same patients? 
 # Not all patients have been measured at all timepoints 1-5. Which ones are that?
 
+# na analysis of immunological dataset
+print("Na analysis of immunological dataset:")
+na.altair.plot_heatmap(df_im)
 
+
+# checking rows with missing values, and patient ids: 
 rows_with_na = df_im[df_im.isna().any(axis=1)]
 print("patient id-s with missing values:")
 rows_with_na["Patient"].value_counts()
 
 # Patient Ids : 30, 223, 224, 226, 227, 228, 229 and 230 have missing values in one row/timepoint each.
 
-# Patients that has only one timepoints measured:
-patient_counts = df_im["Patient"].value_counts()
-single_timepoint_patients = patient_counts[patient_counts == 1].index
-single_timepoint_rows = df_im[df_im["Patient"].isin(single_timepoint_patients)]
-print("Amount of patients with only one measured timepoint:", len(single_timepoint_patients))
-print(single_timepoint_rows[["Patient", "Timepoint"]])
 
+
+#%%################# Patients and number of timepoint measurements ###################
+
+group_sizes = df_im.groupby("Patient").size()
+
+for n_timepoints, patients in group_sizes.groupby(group_sizes):
+    rows = df_im[df_im["Patient"].isin(patients.index)]
+
+    print(f"Amount of patients with {n_timepoints} measured timepoints: {len(patients)}")
+    print(rows[["Patient", "Timepoint"]])
+
+#%% Num. Patients with 1-5 timepoints:
+    
+tp_per_patient = (
+df_im.groupby("Patient")["Timepoint"].apply(lambda x: sorted(set(x)))
+)
+
+def max_tp(tps):
+    count = 0
+    for tp in tps:
+        if tp == count + 1:
+            count += 1
+        else:
+            break
+    return count
+
+max_tp = tp_per_patient.apply(max_tp)
+
+summary = (
+    max_tp.value_counts()
+          .sort_index()
+          .rename_axis("tp    n")
+          .rename("n_patients")
+)
+
+print(summary)
 
 
 #%%#############  CLEANING DATASET ####################################
 
-# Removing columns that can be exlcuded (marked yellow in dataset): 43 columns
+
+# Removing columns that can be exlcuded (marked yellow in dataset): 43 columns + Id Subset
+# + columns with more than 25 % missing values:
+
 dropped_columns = [
+    "ID_Subset",
     "CD123lo Bas.1",
     "T cells.1",
     "TH.1",
@@ -125,11 +170,326 @@ dropped_columns = [
 
 df_im_raw = df_im.copy()  # copy of raw dataset
 
-# transform feature types to correct types
-
 df_im = df_im.drop(columns=dropped_columns)
-print("TableReport of im. dataset, after removing columns:")
+
+# Changing columns with incorrect datatypes
+# changing into date/time type
+df_im["Messdatum"] = pd.to_datetime(
+    df_im["Messdatum"], errors="coerce")
+
+# All columns should be Float type except for "Messdatum" 
+exclude_cols = ["Messdatum"]
+float_cols = df_im.columns.difference(exclude_cols)
+df_im[float_cols] = df_im[float_cols].apply(
+    pd.to_numeric, errors="coerce"
+)
+
+
+# Removing empty rows from row 823 to 829
+df_im = df_im.drop(index=range(823, 829))
+
+# Removing columns with more than 25% missing values:
+na_frac = df_im.isna().mean()
+cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
+df_im = df_im.drop(columns=cols_to_drop).copy()
+
+"""
+Dropped Columns: 
+['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 'NK_HLADRhi', 
+'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 'TH naive_PD1+', 
+'TH eff_PD1+', 'TC naive_PD1+'
+
+"""
+
+# New Tablereport
 TableReport(df_im, max_plot_columns=138)
+
+
+
+#%%################ Imputing missing values using miceforest ###########
+
+# handling name issues - mice forest does not take symbols
+import re
+
+id_cols = ["Patient", "Timepoint", "Messdatum"]
+feature_cols = df_im.columns.difference(id_cols)
+
+def clean_colname(col):
+    col = col.strip()
+    col = re.sub(r"[^\w]", "_", col)
+    col = re.sub(r"_+", "_", col)
+    return col
+
+# map
+rename_map = {c: clean_colname(c) for c in feature_cols}
+
+# rename
+df_im2 = df_im.rename(columns=rename_map)
+
+# miceforsest with renamed columns
+X_im = df_im2[list(rename_map.values())]
+
+import miceforest as mf
+
+kernel = mf.ImputationKernel(
+    data=X_im,
+    num_datasets=1,
+    random_state=42
+)
+
+kernel.mice(iterations=5)
+
+X_imputed_renamed = kernel.complete_data(dataset=0)
+
+# changing back to original names
+reverse_rename_map = {v: k for k, v in rename_map.items()}
+
+X_imputed = X_imputed_renamed.rename(columns=reverse_rename_map)
+
+# final imputation
+df_im_imputed = pd.concat(
+    [
+        df_im[id_cols].reset_index(drop=True),
+        X_imputed.reset_index(drop=True)
+    ],
+    axis=1
+)
+
+# New tablereport of imputed data
+TableReport(df_im_imputed, max_plot_columns=138)
+
+
+#%%  Array matrix RV / RV2
+
+import hoggorm as ho
+import seaborn as sns
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+#NB! Patient ID 83 has two timepoint 4 measurements (take average)
+# Needs to be the same shape in order to to RV2 analysis.
+# patient ID 137 have two t4 and two t3 measurements.
+# Only use the average of both entries for now:
+
+# print duplicated timepoint-measurements:
+df_im_imputed[
+    df_im_imputed.duplicated(subset=["Patient", "Timepoint"], keep=False)
+].sort_values(["Patient", "Timepoint"])
+
+# use the average of duplicated entries 
+df_im_imputed_avg = (
+    df_im_imputed
+    .groupby(["Patient", "Timepoint"], as_index=False)
+    .mean(numeric_only=True)
+)
+
+
+# dataframes for each time-point t1, t2, t3, t4, t5
+df_t1 = df_im_imputed_avg[df_im_imputed_avg["Timepoint"] == 1]
+df_t2 = df_im_imputed_avg[df_im_imputed_avg["Timepoint"] == 2]
+df_t3 = df_im_imputed_avg[df_im_imputed_avg["Timepoint"] == 3]
+df_t4 = df_im_imputed_avg[df_im_imputed_avg["Timepoint"] == 4]
+df_t5 = df_im_imputed_avg[df_im_imputed_avg["Timepoint"] == 5]
+
+# checking size of each dataframe:
+print("T1 shape:", df_t1.shape)
+print("T2 shape:", df_t2.shape)
+print("T3 shape:", df_t3.shape)
+print("T4 shape:", df_t4.shape)
+print("T5 shape:", df_t5.shape)
+
+dfs = {
+    1: df_t1,
+    2: df_t2,
+    3: df_t3,
+    4: df_t4,
+    5: df_t5
+}
+
+id_cols = ["Patient", "Timepoint"]
+timepoints = [1, 2, 3, 4, 5]
+
+
+# find the common patients between two timepoints:
+def common_patients(df_a, df_b, id_col="Patient"):
+    common = np.intersect1d(df_a[id_col], df_b[id_col])
+    # first dataframe
+    A = (
+        df_a[df_a[id_col].isin(common)]
+        .sort_values(id_col)
+        .reset_index(drop=True)
+    )
+    # second dataframe
+    B = (
+        df_b[df_b[id_col].isin(common)]
+        .sort_values(id_col)
+        .reset_index(drop=True)
+    )
+
+    return A, B
+
+
+# calculating rv2 for all combinations of timepoints t1 to t5 (10 combinations)
+n = len(timepoints)
+rv2_matrix = np.zeros((n, n))
+n_common = np.zeros((n, n), dtype=int)
+
+
+for i, ti in enumerate(timepoints):
+    for j, tj in enumerate(timepoints):
+
+        if i == j:     # if we are comparing the same dataframe with itself
+            rv2_matrix[i, j] = 1.0       # correlation = 1
+            n_common[i, j] = dfs[ti].shape[0]  
+           
+        else:
+            A, B = common_patients(dfs[ti], dfs[tj])   # exctract common patients
+            n_common[i, j] = A.shape[0]
+
+            X = ho.standardise(
+                A.drop(columns=id_cols).values,
+                mode=0
+            )
+
+            Y = ho.standardise(
+                B.drop(columns=id_cols).values,
+                mode=0
+            )
+
+            rv2 = ho.RV2coeff([X, Y])[0, 1]     # calculating RV2
+            rv2_matrix[i, j] = rv2
+
+
+
+# number of common patients inbetween comparisons:
+n_common_df = pd.DataFrame(
+    n_common,
+    index=[f"T{t}" for t in timepoints],
+    columns=[f"T{t}" for t in timepoints]
+)
+n_common_df.style.set_caption(
+    "Number of common patients between timepoint comparisons")
+
+
+# convert results to dataframe before plotting       
+rv2_df = pd.DataFrame(
+    rv2_matrix,
+    index=[f"T{t}" for t in timepoints],
+    columns=[f"T{t}" for t in timepoints]
+)
+
+
+# plotting heatmap of rv2 values
+plt.figure(figsize=(8, 6))
+sns.heatmap(
+    rv2_df,
+    annot=True,
+    fmt=".2f",
+    cmap="coolwarm",
+    vmin=-1,
+    vmax=1,
+    square=True
+)
+
+plt.title("RV2 similarity across timepoints T1 to T5")
+plt.tight_layout()
+plt.show()
+
+
+"""
+201 patients have measurements in both T1 and T2
+130 patients have both T1 and T3
+123 patients have both T1 and T4
+76 patients have both T1 and T5
+"""
+
+
+# check rv2 for seperate datatsets: what we would like to see change vs not.
+# lekocytes stable - mDC downregulate, m1,m3 and m3
+
+
+#%%############ MFA for timepoints 1, 2 and 3
+import prince as ps
+
+# finding common patients with measuements at t1, t2 and t3 all to together
+patients_t123 = (
+    set(df_t1["Patient"])
+    & set(df_t2["Patient"])
+    & set(df_t3["Patient"])
+)
+
+patients_t123 = sorted(patients_t123)
+# number patients with measuements at time 1, 2 and 3 = 121 patients out of 250
+
+def sortdfs(df, patients):
+    return (
+        df[df["Patient"].isin(patients)]
+        .sort_values("Patient")
+        .reset_index(drop=True)
+    )
+
+df1 = sortdfs(df_t1, patients_t123)
+df2 = sortdfs(df_t2, patients_t123)
+df3 = sortdfs(df_t3, patients_t123)
+
+# Dropping patient id and timepoint columns from analysis
+X1 = df1.drop(columns=id_cols)
+X2 = df2.drop(columns=id_cols)
+X3 = df3.drop(columns=id_cols)
+
+# need to define group name to get multi-index formated dataset
+def group_name(df, group_name):
+    df = df.copy()
+    df.columns = pd.MultiIndex.from_product(
+        [[group_name], df.columns]
+    )
+    return df
+
+X1_m = group_name(X1, "T1")
+X2_m = group_name(X2, "T2")
+X3_m = group_name(X3, "T3")
+
+dataset = pd.concat([X1_m, X2_m, X3_m], axis=1)
+groups = dataset.columns.levels[0].tolist()
+
+mfa = ps.MFA(
+    n_components=3,
+    n_iter=3,
+    copy=True,
+    engine='sklearn',
+    check_input=True,
+    random_state=42
+)
+
+mfa = mfa.fit(dataset, groups=groups, supplementary_groups=None)
+
+# plotting results of MFA 
+mfa.plot(
+    dataset,
+    show_partial_rows=True
+)
+# mappe tilbake index med pasient id?
+
+# Finding the patient-ids for "outlier observations" in MFA plot
+# index 102 at t2, 68 at t1 adn t3, 73 at t3, 
+df1.iloc[[102, 68, 73]]["Patient"]
+# Patient IDs 221, 150 and 165
+
+# Eigenvalues for Dim 0, 1 and 2 (explained variance pc 1, 2 and 3)
+mfa.eigenvalues_summary
+
+# Scores (coordinates) for each patient at different timepoints-groups
+mfa.partial_row_coordinates(dataset)
+
+#%% PCA (prince)
+
+"""
+Sette T1 and T2 oppå hverandre - kjør PCA (prince)
+sjekk scores og loadings.
+
+"""
+
 
 
 #%% ############## Exploratory PCA analysis ########################
@@ -143,7 +503,7 @@ pca_exclude = ["Patient", "Timepoint"]
 df_meta = df_im[pca_exclude].copy()
 
 X_pca =(
-    df_im
+    df_im_imputed_avg
     .select_dtypes(include="number")
     .drop(columns=pca_exclude)
 )
@@ -183,7 +543,7 @@ for tp in timepoints:
 
 plt.xlabel("PC1")
 plt.ylabel("PC2")
-plt.title("PCA of raw immunological data, colored by timepoint 1-5")
+plt.title("PCA of immunological data, colored by timepoint 1-5")
 plt.legend(title="Timepoint")
 plt.axhline(0)
 plt.axvline(0)
