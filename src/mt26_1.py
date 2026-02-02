@@ -1,5 +1,7 @@
 # Loading and exploring raw datasets
 
+# Lag Klasse med funksjoner - lese, rense, imputere 
+
 #%%
 import pandas as pd
 from pathlib import Path
@@ -173,6 +175,7 @@ df_im_raw = df_im.copy()  # copy of raw dataset
 df_im = df_im.drop(columns=dropped_columns)
 
 # Changing columns with incorrect datatypes
+# husk å skrive opp alle kolonner som har blitt endretn
 # changing into date/time type
 df_im["Messdatum"] = pd.to_datetime(
     df_im["Messdatum"], errors="coerce")
@@ -486,7 +489,8 @@ mfa.partial_row_coordinates(dataset)
 
 """
 Sette T1 and T2 oppå hverandre - kjør PCA (prince)
-sjekk scores og loadings.
+sjekk scores og loadings
+sette t2+t3, t1 + t3
 
 """
 

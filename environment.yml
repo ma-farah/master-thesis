@@ -10,7 +10,11 @@ dependencies:
   - numpy
   - pandas
   - scipy
+  - scrub
   - scikit-learn
+  - prince
+  - miceforest
+  - hoggorm
   - matplotlib
   - seaborn
   - jupyterlab
@@ -18,5 +22,8 @@ dependencies:
   - catboost
   - phik
   - pyod
+  - pip
+  - pip:
+      - scikit-na
   
-  # last updated 05.01.2025
+  # last updated 02.02.2026
