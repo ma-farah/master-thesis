@@ -373,7 +373,7 @@ for i, ti in enumerate(timepoints):
 n_common_df = pd.DataFrame(
     n_common,
     index=[f"T{t}" for t in timepoints],        # row labels
-    columns=[f"T{t}" for t in timepoints].      # column labels
+    columns=[f"T{t}" for t in timepoints]      # column labels
 )
 n_common_df.style.set_caption(
     "Number of common patients between timepoint comparisons")
@@ -826,6 +826,8 @@ plt.title('Consensus Outliers by Timepoint', fontsize=14, fontweight='bold')
 plt.grid(axis='y', alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+
 
 
 #%%############ Cleaning clinical dataset #############################
