@@ -411,14 +411,85 @@ plt.show()
 76 patients have both T1 and T5
 """
 
-
 # check rv2 for seperate datatsets: what we would like to see change vs not.
 # lekocytes stable - mDC downregulate, m1,m3 and m3?
+
+
+#%%########## Correlation analysis between features for immunological dataset
+
+import phik
+
+# phik correlation matrix for immunological dataset
+df_features = df_im_imputed.drop(columns=id_cols)
+phik_matrix = df_features.phik_matrix(interval_cols=None)
+
+# Extract top correlated pairs
+# Get upper triangle of correlation matrix (avoid duplicates and diagonal)
+upper_triangle = np.triu(phik_matrix, k=1)
+upper_triangle_df = pd.DataFrame(
+    upper_triangle,
+    index=phik_matrix.index,
+    columns=phik_matrix.columns
+)
+
+# Convert to long format and sort by correlation
+correlations = []
+for i in range(len(upper_triangle_df)):
+    for j in range(i+1, len(upper_triangle_df.columns)):
+        correlations.append({
+            'Feature_1': upper_triangle_df.index[i],
+            'Feature_2': upper_triangle_df.columns[j],
+            'Phik_Correlation': upper_triangle_df.iloc[i, j]
+        })
+
+correlations_df = pd.DataFrame(correlations)
+correlations_df = correlations_df.sort_values('Phik_Correlation', ascending=False)
+
+# Display top 20 correlated pairs
+print("\nTop 20 Most Correlated Feature Pairs:")
+print("="*80)
+print(correlations_df.head(20).to_string(index=False))
+print("\n")
+
+
+# Focused heatmap: only features that appear in top 20 correlations
+top_features = set()
+for _, row in correlations_df.head(20).iterrows():
+    top_features.add(row['Feature_1'])
+    top_features.add(row['Feature_2'])
+top_features = sorted(list(top_features))
+
+print(f"\nNumber of features involved in top 20 correlations: {len(top_features)}")
+print("Features:", top_features)
+
+# Create focused heatmap
+focused_phik = phik_matrix.loc[top_features, top_features]
+
+plt.figure(figsize=(14, 12))
+sns.heatmap(
+    focused_phik,
+    annot=True,
+    fmt='.2f',
+    cmap="coolwarm",
+    vmin=0,
+    vmax=1,
+    square=True,
+    cbar_kws={"label": "Phik Correlation Coefficient"},
+    xticklabels=top_features,
+    yticklabels=top_features
+)
+plt.title(f'Phik Correlation Matrix - Top {len(top_features)} Most Correlated Features',
+          fontsize=14, fontweight='bold')
+plt.xticks(rotation=90, fontsize=9)
+plt.yticks(rotation=0, fontsize=9)
+plt.tight_layout()
+plt.show()
+
 
 #%% ############## PCA analysis immu dataset ########################
 # using prince package for pca analysis:
 
-# scale data before?
+# automatic scaling.
 
 # Pca for timepoint 1 - 5 individually
 for t in timepoints:
@@ -630,7 +701,7 @@ X_pyod = df_im_imputed.drop(columns=id_cols).values
 patient_ids = df_im_imputed["Patient"].values
 timepoints = df_im_imputed["Timepoint"].values
 
-contamination = 0.05  # assuming 5% outliers in dataset
+contamination = 0.1  # standard contamination fraction pyod
 models = {
     'IsolationForest': IForest(
         contamination=contamination,
@@ -680,13 +751,20 @@ for name, model in models.items():
     # Count outliers
     n_outliers = np.sum(predictions == 1)
     outlier_counts[name] = n_outliers
-    
     print(f" Found {n_outliers} outliers ({n_outliers/len(X_pyod)*100:.2f}%)\n")
 
-# Plot for each model the outlier scores
-# dimensionality reduction with PCA to 2D for visualization
+# Summary table
+summary_df = pd.DataFrame({
+    'Algorithm': list(outlier_counts.keys()),
+    'Outliers Found': list(outlier_counts.values()),
+    'Percentage of Dataset': [f"{(count/len(X_pyod)*100):.2f}%" for count in outlier_counts.values()]
+})
+print("\nOutlier Detection Summary:")
+print(summary_df.to_string(index=False))
+print("\n")
 
-# scale data before
+# Plot for each model 
+# scale data before!
 scaler = StandardScaler()
 X_pyod_scaled = scaler.fit_transform(X_pyod)
 
@@ -703,7 +781,7 @@ for idx, (name, data) in enumerate(results.items()):
         'PC1': X_2d[:, 0],
         'PC2': X_2d[:, 1],
         'Outlier': ['Outlier' if pred == 1 else 'Inlier' for pred in data['predictions']],
-        'Score': data['scores_normalized'],
+        'Score': data['scores_normalized'], # use normalized scores
         'Patient': patient_ids,
         'Timepoint': timepoints
     })
@@ -745,7 +823,7 @@ plt.suptitle('PyOD Outlier Detection - Immunological Dataset', fontsize=16, font
 plt.show()
 
 
-# Consensesous analysis
+#%%############## Consensesous analysis ############
 
 # Create consensus matrix
 consensus_matrix = np.column_stack([
@@ -811,22 +889,28 @@ print(consensus_df.to_string(index=False))
 
 
 # Displaying the top 10 consensus outliers (first 10 columns from dataset)
-top_10_consensus = df_im_imputed.iloc[high_consensus_indices].head(10)
+# Get top 10 by consensus count (already sorted in consensus_df)
+top_10_indices = consensus_df['Dataset index'].head(10).values
+top_10_consensus = df_im_imputed.iloc[top_10_indices]
 print("\nMeasurements for Top 10 Consensus Outliers (first ten columns):")
 print(top_10_consensus.iloc[:, :10].to_string(index=False))
 
 
 # Bar plot of number of consensus outliers per timepoint
-timepoint_outliers = consensus_df.groupby('Timepoint').size().reset_index(name='Count')
-plt.figure(figsize=(10, 6))
-sns.barplot(data=timepoint_outliers, x='Timepoint', y='Count', palette='viridis')
-plt.xlabel('Timepoint', fontsize=12, fontweight='bold')
-plt.ylabel('Number of Consensus Outliers (≥3 flags)', fontsize=12, fontweight='bold')
-plt.title('Consensus Outliers by Timepoint', fontsize=14, fontweight='bold')
-plt.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-plt.show()
+if len(consensus_df) > 0:
+    timepoint_outliers = consensus_df.groupby('Timepoint').size().reset_index(name='Count')
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=timepoint_outliers, x='Timepoint', y='Count', palette='viridis')
+    plt.xlabel('Timepoint', fontsize=12, fontweight='bold')
+    plt.ylabel('Number of Consensus Outliers (≥3 flags)', fontsize=12, fontweight='bold')
+    plt.title('Consensus Outliers by Timepoint', fontsize=14, fontweight='bold')
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No samples flagged by 3 or more algorithms - skipping bar plot")
 
+#%%########## Correlation analysis between features for immunological dataset
 
 
 
