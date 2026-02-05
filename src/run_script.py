@@ -1,6 +1,6 @@
 # File for running and testing code
 
-# imports
+#%% imports
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -221,6 +221,7 @@ TableReport(df_im, max_plot_columns=138)
 
 #%% Imputing missing values using miceforest and median
 
+
 # handling name issues - mice forest does not take symbols
 
 feature_cols = df_im.columns.difference(exclude_cols)
@@ -254,6 +255,9 @@ X_imputed_renamed = kernel.complete_data(dataset=1) # get the 1st completed data
 reverse_rename_map = {v: k for k, v in rename_map.items()}
 X_imputed = X_imputed_renamed.rename(columns=reverse_rename_map)
 
+# reindex to preserve original column order
+X_imputed = X_imputed.reindex(columns=feature_cols)
+
 # final imputation
 df_im_imputed = pd.concat(
     [
@@ -263,17 +267,133 @@ df_im_imputed = pd.concat(
     axis=1
 )
 
+# ensure final dataframe has columns in same order as original
+df_im_imputed = df_im_imputed[df_im.columns]
+
 # New tablereport of imputed data
 TableReport(df_im_imputed, max_plot_columns=138)
 
 
-# compare with median imputation.....?
+# Comparing with median imputation:
 df_im_median = df_im.copy()
 for col in feature_cols:
     median_value = df_im_median[col].median()
     df_im_median[col] = df_im_median[col].fillna(median_value)  
 
 TableReport(df_im_median, max_plot_columns=138)
+
+
+#%%############# Comparing miceforest vs median imputation ##########################
+
+# Create mask of originally missing values in df_im
+missing_mask = df_im[feature_cols].isna()
+
+# Extract only the imputed values (originally missing) from both methods
+mice_imputed_values = df_im_imputed[feature_cols][missing_mask]
+median_imputed_values = df_im_median[feature_cols][missing_mask]
+
+# Flatten to 1D arrays for overall comparison
+mice_flat = mice_imputed_values.values.flatten()
+mice_flat = mice_flat[~np.isnan(mice_flat)]  # Remove any NaN
+
+median_flat = median_imputed_values.values.flatten()
+median_flat = median_flat[~np.isnan(median_flat)]
+
+# Calculate differences
+differences = mice_flat - median_flat
+
+print("\n" + "="*80)
+print("COMPARISON OF MICEFOREST VS MEDIAN IMPUTATION")
+print("="*80)
+print(f"\nTotal number of imputed values: {len(differences)}")
+print(f"Mean absolute difference: {np.abs(differences).mean():.4f}")
+print(f"Median absolute difference: {np.median(np.abs(differences)):.4f}")
+print(f"Max absolute difference: {np.abs(differences).max():.4f}")
+print(f"Std of differences: {np.std(differences):.4f}")
+
+
+# Feature-wise comparison: which features have largest imputation differences?
+feature_differences = {}
+
+for col in feature_cols:
+    # Get originally missing values for this feature
+    col_mask = missing_mask[col]
+
+    if col_mask.sum() > 0:  # If there were missing values
+        mice_vals = df_im_imputed.loc[col_mask, col].values
+        median_vals = df_im_median.loc[col_mask, col].values
+
+        # Calculate metrics
+        mae = np.mean(np.abs(mice_vals - median_vals))
+        rmse = np.sqrt(np.mean((mice_vals - median_vals)**2))
+        max_diff = np.max(np.abs(mice_vals - median_vals))
+        n_missing = col_mask.sum()
+
+        feature_differences[col] = {
+            'MAE': mae,
+            'RMSE': rmse,
+            'Max_Diff': max_diff,
+            'N_Missing': n_missing
+        }
+
+# Create dataframe and sort by MAE
+feature_diff_df = pd.DataFrame(feature_differences).T
+feature_diff_df = feature_diff_df.sort_values('MAE', ascending=False)
+
+print("\n" + "="*80)
+print("TOP 20 FEATURES WITH LARGEST IMPUTATION DIFFERENCES (sorted by MAE)")
+print("="*80)
+print(feature_diff_df.head(20).to_string())
+print("\n")
+
+
+# Correlation between MICE and median imputed values
+# Scatter plot with hexbin for density
+fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+# Scatter plot with transparency
+axes[0].scatter(median_flat, mice_flat, alpha=0.3, s=10, color='steelblue', edgecolors='none')
+axes[0].plot([median_flat.min(), median_flat.max()],
+             [median_flat.min(), median_flat.max()],
+             'r--', linewidth=2, label='Perfect agreement (y=x)')
+
+# Calculate correlation
+correlation = np.corrcoef(median_flat, mice_flat)[0, 1]
+axes[0].text(0.05, 0.95, f'Correlation: {correlation:.4f}',
+             transform=axes[0].transAxes, fontsize=12,
+             verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+axes[0].set_xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
+axes[0].set_ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
+axes[0].set_title('Correlation Between Imputation Methods\n(Scatter Plot)',
+                  fontsize=14, fontweight='bold')
+axes[0].legend()
+axes[0].grid(alpha=0.3)
+
+# Hexbin plot for density visualization
+hexbin = axes[1].hexbin(median_flat, mice_flat, gridsize=50, cmap='YlOrRd', mincnt=1)
+axes[1].plot([median_flat.min(), median_flat.max()],
+             [median_flat.min(), median_flat.max()],
+             'b--', linewidth=2, label='Perfect agreement (y=x)')
+
+axes[1].set_xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
+axes[1].set_ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
+axes[1].set_title('Correlation Between Imputation Methods\n(Density Hexbin)',
+                  fontsize=14, fontweight='bold')
+axes[1].legend()
+cbar = plt.colorbar(hexbin, ax=axes[1])
+cbar.set_label('Count', fontsize=11)
+
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*80)
+print(f"Overall correlation between MICE and Median imputed values: {correlation:.4f}")
+print("="*80)
+print("\n")
+
+
 
 
 #%%############# RV / RV2 analysis across timepoints ##########################
