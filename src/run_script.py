@@ -87,10 +87,9 @@ print("Raw immunological dataset statistics:")
 print('shape of dataset:', df_im.shape)
 print("unique patients:", df_im["Patient"].nunique())
 print("timepoints:", df_im["Timepoint"].nunique())
+print("\n")
 print("measurements per timepoint:")
 print(df_im["Timepoint"].value_counts().sort_index())
-print("number of patients per timepoint:")
-print(df_im.groupby("Timepoint")["Patient"].nunique().sort_index())
 print("\n")
 
 # Patients with measurements from t1 through t5
@@ -100,26 +99,23 @@ patients_t3 = set(df_im[df_im["Timepoint"] == 3]["Patient"])
 patients_t4 = set(df_im[df_im["Timepoint"] == 4]["Patient"])
 patients_t5 = set(df_im[df_im["Timepoint"] == 5]["Patient"])    
 
+
+print("Patients with measurements at only timepoint 1:", len(patients_t1 - (patients_t2 | patients_t3 | patients_t4 | patients_t5)))
 print("Patients with measurements at timepoint 1 and 2:", len(patients_t1 & patients_t2))
 print("Patients with measurements at timepoint 1,2 and 3:", len(patients_t1 & patients_t2 & patients_t3))
 print("Patients with measurements at timepoint 1,2,3 and 4:", len(patients_t1 & patients_t2 & patients_t3 & patients_t4))
 print("Patients with measurements at timepoint 1,2,3,4 and 5:", len(patients_t1 & patients_t2 & patients_t3 & patients_t4 & patients_t5))   
 
-# Bar plot of measurements per timepoint
-plt.figure(figsize=(8, 5))
-sns.countplot(x="Timepoint", data=df_im, order=sorted(df_im["Timepoint"].unique()))
-plt.title("Number of measurements per Timepoint")
-plt.xlabel("Timepoint")
-plt.ylabel("Number of measurements")
-plt.show()
 
 # Bar plot of number of unique patients per timepoint
 plt.figure(figsize=(8, 5))
+patient_counts = df_im.groupby("Timepoint")["Patient"].nunique()
 sns.barplot(
-    x=df_im.groupby("Timepoint")["Patient"].nunique().index,
-    y=df_im.groupby("Timepoint")["Patient"].nunique().values
+    x=patient_counts.index,
+    y=patient_counts.values,
+    color="teal"
 )
-plt.title("Number of unique patients per Timepoint")
+plt.title("Number of Patients per Timepoint (Immunological Dataset)")
 plt.xlabel("Timepoint")
 plt.ylabel("Number of unique patients")
 plt.show()  
@@ -188,6 +184,10 @@ df_im = df_im.drop(columns=dropped_columns)
 df_im["Messdatum"] = pd.to_datetime(
     df_im["Messdatum"], errors="coerce")
 
+# Change Patient and Timepoint to integer type
+df_im["Patient"] = pd.to_numeric(df_im["Patient"], errors="coerce").astype("Int64")
+df_im["Timepoint"] = pd.to_numeric(df_im["Timepoint"], errors="coerce").astype("Int64")
+
 # All other columns should be Float type (except Messdatum, Patient and Timepoint)
 exclude_cols = ["Messdatum", "Patient", "Timepoint"]
 float_cols = df_im.columns.difference(exclude_cols)
@@ -195,11 +195,22 @@ df_im[float_cols] = df_im[float_cols].apply(
     pd.to_numeric, errors="coerce"
 )
 
-# Removing empty rows from row 829 tto 834
-df_im = df_im.drop(index=range(823, 829)) #is this correct?
+# Removing empty rows in the bottom of excel file (row 829 to 834 in excel file)
 
-# remove empty measurement row at index 84?
-df_im = df_im.drop(index=77)
+# check if rows 822-830 are empty:
+empty_rows = df_im.loc[822:830].isna().all(axis=1)
+print("Empty rows in range 822-830:")
+print(empty_rows)
+
+# Row 78 (row 84 in excel file) has no measurements except for patient, timepoint and date
+# check first:
+print("Row 78 has measurements:")
+print(df_im.loc[78].notna().sum(), "non-null values out of", len(df_im.loc[78]))
+print(df_im.loc[78])
+
+# removing empty rows
+df_im = df_im.drop(index=range(823, 829)) 
+df_im = df_im.drop(index=78)
 
 # Removing columns with more than 25% missing values:
 na_frac = df_im.isna().mean()
@@ -211,19 +222,16 @@ Dropped Columns:
 ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 'NK_HLADRhi', 
 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 'TH naive_PD1+', 
 'TH eff_PD1+', 'TC naive_PD1+'
-
 """
 
 # New Tablereport
 TableReport(df_im, max_plot_columns=138)
 
 
-
-#%% Imputing missing values using miceforest and median
+#%%########### Imputing missing values using miceforest and median
 
 
 # handling name issues - mice forest does not take symbols
-
 feature_cols = df_im.columns.difference(exclude_cols)
 
 def clean_colname(col):
@@ -236,20 +244,26 @@ def clean_colname(col):
 rename_map = {c: clean_colname(c) for c in feature_cols}
 
 # rename columns
-df_im2 = df_im.rename(columns=rename_map)
+df_im2 = df_im.reset_index(drop=True).rename(columns=rename_map)
 
 # imputing with miceforest with renamed columns
-X_im = df_im2[list(rename_map.values())]
+X_im = df_im2[list(rename_map.values())].copy()
 
+import miceforest as mf
+
+# MICE imputation with mean matching
 kernel = mf.ImputationKernel(
-    data=X_im,
-    datasets=3,   # 3 imputed datasets to create
+    X_im,
+    num_datasets=5,
+    mean_match_candidates=5,  # impute from 5 nearest observed values
     random_state=42
 )
 
-kernel.mice(5) # 5 iterations
+kernel.mice(10)    # 10 iterations
 
-X_imputed_renamed = kernel.complete_data(dataset=1) # get the 1st completed dataset
+# Average imputed values across all 5 datasets
+imputed_datasets = [kernel.complete_data(dataset=i) for i in range(5)]
+X_imputed_renamed = sum(imputed_datasets) / len(imputed_datasets)
 
 # changing back to original column names
 reverse_rename_map = {v: k for k, v in rename_map.items()}
@@ -274,13 +288,12 @@ df_im_imputed = df_im_imputed[df_im.columns]
 TableReport(df_im_imputed, max_plot_columns=138)
 
 
-# Comparing with median imputation:
+# Median imputation:
 df_im_median = df_im.copy()
 for col in feature_cols:
     median_value = df_im_median[col].median()
     df_im_median[col] = df_im_median[col].fillna(median_value)  
 
-TableReport(df_im_median, max_plot_columns=138)
 
 
 #%%############# Comparing miceforest vs median imputation ##########################
@@ -294,10 +307,12 @@ median_imputed_values = df_im_median[feature_cols][missing_mask]
 
 # Flatten to 1D arrays for overall comparison
 mice_flat = mice_imputed_values.values.flatten()
-mice_flat = mice_flat[~np.isnan(mice_flat)]  # Remove any NaN
-
 median_flat = median_imputed_values.values.flatten()
-median_flat = median_flat[~np.isnan(median_flat)]
+
+# Create mask for positions where BOTH methods have valid (non-NaN) values
+valid_mask = ~np.isnan(mice_flat) & ~np.isnan(median_flat)
+mice_flat = mice_flat[valid_mask]
+median_flat = median_flat[valid_mask]
 
 # Calculate differences
 differences = mice_flat - median_flat
@@ -317,24 +332,30 @@ feature_differences = {}
 
 for col in feature_cols:
     # Get originally missing values for this feature
-    col_mask = missing_mask[col]
+    col_mask = missing_mask[col].values  # Convert to numpy array for index-independent masking
 
     if col_mask.sum() > 0:  # If there were missing values
-        mice_vals = df_im_imputed.loc[col_mask, col].values
-        median_vals = df_im_median.loc[col_mask, col].values
+        mice_vals = df_im_imputed[col].values[col_mask]
+        median_vals = df_im_median[col].values[col_mask]
 
-        # Calculate metrics
-        mae = np.mean(np.abs(mice_vals - median_vals))
-        rmse = np.sqrt(np.mean((mice_vals - median_vals)**2))
-        max_diff = np.max(np.abs(mice_vals - median_vals))
-        n_missing = col_mask.sum()
+        # Only compare positions where BOTH have valid values
+        valid = ~np.isnan(mice_vals) & ~np.isnan(median_vals)
+        if valid.sum() > 0:
+            mice_valid = mice_vals[valid]
+            median_valid = median_vals[valid]
 
-        feature_differences[col] = {
-            'MAE': mae,
-            'RMSE': rmse,
-            'Max_Diff': max_diff,
-            'N_Missing': n_missing
-        }
+            # Calculate metrics
+            mae = np.mean(np.abs(mice_valid - median_valid))
+            rmse = np.sqrt(np.mean((mice_valid - median_valid)**2))
+            max_diff = np.max(np.abs(mice_valid - median_valid))
+            n_missing = valid.sum()
+
+            feature_differences[col] = {
+                'MAE': mae,
+                'RMSE': rmse,
+                'Max_Diff': max_diff,
+                'N_Missing': n_missing
+            }
 
 # Create dataframe and sort by MAE
 feature_diff_df = pd.DataFrame(feature_differences).T
@@ -346,53 +367,66 @@ print("="*80)
 print(feature_diff_df.head(20).to_string())
 print("\n")
 
+# Lets look at the distrubution of the the high-difference features, top 10:
+# Are these features normally distributed or heavily skewed?
+high_mae_features = ['B_HLADR+', 'TC_PD1+', 'TH_PD1+', 'Mo_HLADRhi', 'Mo1_HLADRhi', 'Mo3_HLADRhi', 'Mo3_HLADR+', 'TC eff_PD1+', 'TH CM_PD1+', 'Mo2_HLADR+', 'TC_HLADR+']
 
-# Correlation between MICE and median imputed values
-# Scatter plot with hexbin for density
-fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-# Scatter plot with transparency
-axes[0].scatter(median_flat, mice_flat, alpha=0.3, s=10, color='steelblue', edgecolors='none')
-axes[0].plot([median_flat.min(), median_flat.max()],
-             [median_flat.min(), median_flat.max()],
-             'r--', linewidth=2, label='Perfect agreement (y=x)')
-
-# Calculate correlation
-correlation = np.corrcoef(median_flat, mice_flat)[0, 1]
-axes[0].text(0.05, 0.95, f'Correlation: {correlation:.4f}',
-             transform=axes[0].transAxes, fontsize=12,
-             verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-
-axes[0].set_xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
-axes[0].set_ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
-axes[0].set_title('Correlation Between Imputation Methods\n(Scatter Plot)',
-                  fontsize=14, fontweight='bold')
-axes[0].legend()
-axes[0].grid(alpha=0.3)
-
-# Hexbin plot for density visualization
-hexbin = axes[1].hexbin(median_flat, mice_flat, gridsize=50, cmap='YlOrRd', mincnt=1)
-axes[1].plot([median_flat.min(), median_flat.max()],
-             [median_flat.min(), median_flat.max()],
-             'b--', linewidth=2, label='Perfect agreement (y=x)')
-
-axes[1].set_xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
-axes[1].set_ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
-axes[1].set_title('Correlation Between Imputation Methods\n(Density Hexbin)',
-                  fontsize=14, fontweight='bold')
-axes[1].legend()
-cbar = plt.colorbar(hexbin, ax=axes[1])
-cbar.set_label('Count', fontsize=11)
-
+fig, axes = plt.subplots(1, len(high_mae_features), figsize=(20, 4))
+for ax, col in zip(axes, high_mae_features):
+    df_im[col].dropna().hist(ax=ax, bins=30)
+    ax.axvline(df_im[col].median(), color='r', linestyle='--', label='Median')
+    ax.set_title(col)
 plt.tight_layout()
 plt.show()
 
-print("\n" + "="*80)
-print(f"Overall correlation between MICE and Median imputed values: {correlation:.4f}")
-print("="*80)
-print("\n")
+# Most seem very skewed. 
+# Lets see at the immputed values, side by side:
 
+ #for top 10 features, show what each method imputed:
+
+for col in high_mae_features:
+    col_mask = missing_mask[col].values
+    if col_mask.sum() > 0:
+        comparison = pd.DataFrame({
+            'MICE': df_im_imputed[col].values[col_mask],
+            'Median': df_im_median[col].values[col_mask],
+            'Diff': df_im_imputed[col].values[col_mask] - df_im_median[col].values[col_mask]
+        })
+        print(f"\n{col} (median of non-missing: {df_im[col].median():.2f}):")
+        print(comparison.to_string())
+
+
+# Seems like MICE is imputing pretty high values, compared to the median. for example for TC_PD1+, 
+# mice imputes extremely high values. Mice seems to overfit to correlations in that specific row?
+# adding mean-matching in the kernel to only impute values that are observed in the original data, choosing 5 neighbours. might help with this issue.
+# and adding more datasets to the kernel, to get more stable imputations. 
+# lets try 5 datasets, with 10 iterations, + updating miceforest  from 5.2.6 to 6.0.5 and specifing num neigbours =5 instead of 1 dataset.
+
+
+# Now we have less extreme differences, but still some features have qute high differences compared to median.
+# max differene before was 49. Now it is 20.
+
+# Correlation between imputed values only
+corr_imputed = np.corrcoef(median_flat, mice_flat)[0, 1]
+
+plt.figure(figsize=(8, 6))
+plt.scatter(median_flat, mice_flat, alpha=0.5, s=20, color='steelblue', edgecolors='none')
+plt.plot([median_flat.min(), median_flat.max()],
+         [median_flat.min(), median_flat.max()],
+         'r--', linewidth=2, label='Perfect agreement (y=x)')
+plt.text(0.05, 0.95, f'Correlation: {corr_imputed:.4f}\n(n={len(mice_flat)} imputed values)',
+         transform=plt.gca().transAxes, fontsize=11,
+         verticalalignment='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+plt.xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
+plt.ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
+plt.title('Imputed Values Comparison: Median vs MICE', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f"\nCorrelation (imputed values only): {corr_imputed:.4f}")
 
 
 
@@ -513,7 +547,7 @@ sns.heatmap(
     rv2_df,
     annot=True,
     fmt=".2f",
-    cmap="coolwarm",
+    cmap="viridis",
     vmin=-1,
     vmax=1,
     square=True
@@ -566,20 +600,22 @@ correlations_df = pd.DataFrame(correlations)
 correlations_df = correlations_df.sort_values('Phik_Correlation', ascending=False)
 
 # Display top 20 correlated pairs
-print("\nTop 20 Most Correlated Feature Pairs:")
+print("\nTop 40 Most Correlated Feature Pairs:")
 print("="*80)
-print(correlations_df.head(20).to_string(index=False))
+print(correlations_df.head(40).to_string(index=False))
 print("\n")
 
+# Parent categories such as T-cells, Monocytes, Eosinophils, Basophils, B-cells, NK-cells.. have high correlation with their subcategories, which is expected. 
+# Does T-cell represent the total amount, and their subtypes are percentages of these? if so - might be redundant?
 
 # Focused heatmap: only features that appear in top 20 correlations
 top_features = set()
-for _, row in correlations_df.head(20).iterrows():
+for _, row in correlations_df.head(30).iterrows():
     top_features.add(row['Feature_1'])
     top_features.add(row['Feature_2'])
 top_features = sorted(list(top_features))
 
-print(f"\nNumber of features involved in top 20 correlations: {len(top_features)}")
+print(f"\nNumber of features involved in top 30 correlations: {len(top_features)}")
 print("Features:", top_features)
 
 # Create focused heatmap
@@ -590,7 +626,7 @@ sns.heatmap(
     focused_phik,
     annot=True,
     fmt='.2f',
-    cmap="coolwarm",
+    cmap="viridis",
     vmin=0,
     vmax=1,
     square=True,
@@ -609,12 +645,13 @@ plt.show()
 #%% ############## PCA analysis immu dataset ########################
 # using prince package for pca analysis:
 
-# automatic scaling.
+# has automatic scaling
 
 # Pca for timepoint 1 - 5 individually
 for t in timepoints:
     df_t = dfs[t]
-    X_t = df_t.drop(columns=id_cols)
+    # Set Patient ID as index so it shows in the plot
+    X_t = df_t.set_index('Patient').drop(columns=['Timepoint', 'Messdatum'])
 
     pca = ps.PCA(
         n_components=3,
@@ -627,35 +664,41 @@ for t in timepoints:
 
     pca = pca.fit(X_t)
 
-    # plotting results of PCA, scatter plot of patients at timepoint t, colored by....
-    pca.plot_rows(
+    # plotting results of PCA, scatter plot of patients at timepoint t
+    chart = pca.plot(
         X_t,
-        ax=None,
-        figsize=(8, 6),
-        show_points=True,
-        labels=None,
-        color_labels=None,
-        ellipse_outline=False,
-        ellipse_fill=False,
-        confidence_level=0.95,
-        title=f'PCA of Immunological Data at Timepoint {t}',
-        show=True
+        x_component=0,
+        y_component=1,
+        show_row_markers=True,
+        show_column_markers=False,
+        show_row_labels=False,  # Show patient IDs
+        show_column_labels=False
+    ).properties(
+        title=f'PCA of Immunological Data at Timepoint {t}'
     )
-
-    # Explained variance ratio for pc 1, 2 and 3
-    print(f"Explained variance ratio for Timepoint {t}:")
-    print(pca.explained_inertia_)
+    chart.display()
 
     # Scores (coordinates) for each patient
-    row_coords = pca.row_coordinates(X_t)
-    print(f"Row coordinates for Timepoint {t}:")
-    print(row_coords.head())
+    # sort after patient id that has longest distance away from the center in the PCA plot, to see if they are outliers in the raw data as well.
+    row_coords = pca.transform(X_t)
+    row_coords['Distance'] = np.sqrt(row_coords[0]**2 + row_coords[1]**2)
+    row_coords = row_coords.sort_values('Distance', ascending=False)
+    print(f"Top 10 Patients with highest distance from center for Timepoint {t}:")
+    print(row_coords.head(10))
+    print("\n")
 
-    # Top contributing variables to PC1 and PC2
-    loading_scores = pca.column_correlations(X_t)
-    print(f"Top contributing variables to PC1 and PC2 for Timepoint {t}:")
-    print(loading_scores.head())
-    print("\n")    
+    # Top contributing variables to PC1:
+    loading_scores = pca.column_correlations 
+    print(f"Top 10 contributing variables to PC1 for Timepoint {t}:")
+    print(loading_scores[0].abs().sort_values(ascending=False).head(10))
+    print("\n")
+
+    # Top contributing variables to PC2:
+    print(f"Top 10 contributing variables to PC2 for Timepoint {t}:")
+    print(loading_scores[1].abs().sort_values(ascending=False).head(10))
+    print("\n")
+    
+       
 
 
 
@@ -683,10 +726,13 @@ t23 = sortdfs(df_t3, patients_t13)
 t32 = sortdfs(df_t2, patients_t23)
 t33 = sortdfs(df_t3, patients_t23)
 
-# PCA for timepoints 1 and 2 combined
+print('Combined PCA:')
+
+# PCA for timepoints combined
 for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t32, t33, "T2 and T3")]:
-    X_a = df_a.drop(columns=id_cols)
-    X_b = df_b.drop(columns=id_cols)
+    # Patient is already index, drop only Timepoint and Messdatum
+    X_a = df_a.drop(columns=['Timepoint', 'Messdatum'])
+    X_b = df_b.drop(columns=['Timepoint', 'Messdatum'])
 
     X_combined = pd.concat([X_a, X_b], axis=0)
 
@@ -701,40 +747,44 @@ for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t
 
     pca = pca.fit(X_combined)
 
-    # plotting results of PCA
-    pca.plot_rows(
+    # plotting results of PCA (Patient ID as index but not shown)
+    chart = pca.plot(
         X_combined,
-        ax=None,
-        figsize=(8, 6),
-        show_points=True,
-        labels=None,
-        color_labels=None,
-        ellipse_outline=False,
-        ellipse_fill=False,
-        confidence_level=0.95,
-        title=f'PCA of Immunological Data at {label}',
-        show=True
+        x_component=0,
+        y_component=1,
+        show_row_markers=True,
+        show_column_markers=False,
+        show_row_labels=False,  # Don't show patient IDs
+        show_column_labels=False
+    ).properties(
+        title=f'PCA of Immunological Data at {label}'
     )
-
-    # Explained variance ratio for pc 1, 2 and 3
-    print(f"Explained variance ratio for {label}:")
-    print(pca.explained_inertia_)
+    chart.display()
 
     # Scores (coordinates) for each patient
-    row_coords = pca.row_coordinates(X_combined)
-    print(f"Row coordinates for {label}:")
-    print(row_coords.head())
+    # sort after patient id that has longest distance away from the center in the PCA plot, to see if they are outliers in the raw data as well.
+    row_coords = pca.transform(X_combined)
+    row_coords['Distance'] = np.sqrt(row_coords[0]**2 + row_coords[1]**2)
+    row_coords = row_coords.sort_values('Distance', ascending=False)
+    print(f"Top 10 Patients with highest distance from center for {label}:")
+    print(row_coords.head(10))
+    print("\n")
 
     # Top contributing variables to PC1 and PC2
-    loading_scores = pca.column_correlations(X_combined)
-    print(f"Top contributing variables to PC1 and PC2 for {label}:")
-    print(loading_scores.head())
+    loading_scores = pca.column_correlations  # property, not method
+    print(f"Top contributing variables to PC1 for {label}:")
+    print(loading_scores[0].abs().sort_values(ascending=False).head(10))
+    print("\n")
+    print(f"Top contributing variables to PC2 for {label}:")
+    print(loading_scores[1].abs().sort_values(ascending=False).head(10))
     print("\n")
 
 
 
 
 #%%############ MFA for timepoints 1, 2 and 3 combined 
+
+print("MFA for timepoints 1, 2 and 3 combined:")
 
 # finding common patients with measuements at t1, t2 and t3 all together
 patients_t123 = (
@@ -749,13 +799,10 @@ df1 = sortdfs(df_t1, patients_t123)
 df2 = sortdfs(df_t2, patients_t123)
 df3 = sortdfs(df_t3, patients_t123)
 
-mfa_cols = id_cols = ["Patient", "Timepoint", "Messdatum"]   
- 
-
-# Dropping patient id and timepoint columns from analysis
-X1 = df1.drop(columns=mfa_cols)
-X2 = df2.drop(columns=mfa_cols)
-X3 = df3.drop(columns=mfa_cols)
+# Dropping timepoint and date columns from analysis (Patient is already index)
+X1 = df1.drop(columns=['Timepoint', 'Messdatum'])
+X2 = df2.drop(columns=['Timepoint', 'Messdatum'])
+X3 = df3.drop(columns=['Timepoint', 'Messdatum'])
 
 # need to define group name to get multi-index formated dataset
 def group_name(df, group_name):
@@ -791,15 +838,11 @@ mfa.plot(
     show_partial_rows=True
 )
 
-# Eigenvalues for Dim 0, 1 and 2 (explained variance pc 1, 2 and 3)
-mfa.eigenvalues_summary
-
 # Scores for each patient at different timepoints-groups
+# sort ater patient id that has longest distance away from the center in the MFA plot, to see if they are outliers in the raw data as well.
 mfa.partial_row_coordinates(dataset)
 
-# Pasient 221 at timepoint 2 is an extreme outlier in MFA plot and
-# has extreme values in raw data file?
-dataset.loc[221, "T2"]
+
 
 #%%######### PyOD for outlier detection immunological dataset ########
 
@@ -816,12 +859,13 @@ from pyod.models.copod import COPOD
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+print("Running PyOD outlier detection on immunological dataset")
 # Using imputed immunological dataset without ID columns
-X_pyod = df_im_imputed.drop(columns=id_cols).values
 patient_ids = df_im_imputed["Patient"].values
 timepoints = df_im_imputed["Timepoint"].values
+X_pyod = X_pyod = df_im_imputed.drop(columns=exclude_cols).values
 
-contamination = 0.1  # standard contamination fraction pyod
+contamination = 0.05    # standard contamination fraction from pyod library (assuming 10% of samples are outliers, can be adjusted based on domain knowledge or expected outlier proportion)
 models = {
     'IsolationForest': IForest(
         contamination=contamination,
@@ -883,6 +927,7 @@ print("\nOutlier Detection Summary:")
 print(summary_df.to_string(index=False))
 print("\n")
 
+
 # Plot for each model 
 # scale data before!
 scaler = StandardScaler()
@@ -896,32 +941,39 @@ axes = axes.flatten()
 for idx, (name, data) in enumerate(results.items()):
     ax = axes[idx]
 
-    # Create dataframe for seaborn
+    # Create dataframe
     plot_df = pd.DataFrame({
         'PC1': X_2d[:, 0],
         'PC2': X_2d[:, 1],
-        'Outlier': ['Outlier' if pred == 1 else 'Inlier' for pred in data['predictions']],
-        'Score': data['scores_normalized'], # use normalized scores
+        'is_outlier': data['predictions'] == 1,
+        'Score': data['scores_normalized'],
         'Patient': patient_ids,
         'Timepoint': timepoints
     })
-    
-    # Seaborn scatter plot (sized based on outlier score)
-    sns.scatterplot(
-        data=plot_df,
-        x='PC1',
-        y='PC2',
-        hue='Outlier',
-        size='Score',
-        sizes=(20, 200),
-        palette={'Inlier': 'blue', 'Outlier': 'red'},
-        alpha=0.6,
-        ax=ax,
-        legend=True
+
+    # Split inliers and outliers
+    inliers_df = plot_df[~plot_df['is_outlier']]
+    outliers_df = plot_df[plot_df['is_outlier']]
+
+    # Plot inliers in blue
+    ax.scatter(
+        inliers_df['PC1'], inliers_df['PC2'],
+        c='steelblue', s=30, alpha=0.5, label='Inliers', edgecolors='none'
     )
-    
-    # Annotate outliers with Patient-Timepoint
-    outliers_df = plot_df[plot_df['Outlier'] == 'Outlier']
+
+    # Plot outliers colored by score (high score = high certainty)
+    scatter = ax.scatter(
+        outliers_df['PC1'], outliers_df['PC2'],
+        c=outliers_df['Score'], cmap='Reds', s=80, alpha=0.8,
+        edgecolors='black', linewidths=0.5, label='Outliers'
+    )
+
+    # Add colorbar for outlier scores
+    if len(outliers_df) > 0:
+        cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
+        cbar.set_label('Outlier Score', fontsize=10)
+
+    # Annotate only outliers with Patient-Timepoint labels
     for _, row in outliers_df.iterrows():
         ax.annotate(
             f"P{int(row['Patient'])}-T{int(row['Timepoint'])}",
@@ -929,14 +981,14 @@ for idx, (name, data) in enumerate(results.items()):
             fontsize=8,
             xytext=(5, 5),
             textcoords='offset points',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7)
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='black', alpha=0.8)
         )
-    
+
     ax.set_xlabel(f'PC1 ({pca_pyod.explained_variance_ratio_[0]*100:.1f}%)', fontsize=11)
     ax.set_ylabel(f'PC2 ({pca_pyod.explained_variance_ratio_[1]*100:.1f}%)', fontsize=11)
     ax.set_title(f'{name}\n{outlier_counts[name]} outliers detected', fontsize=13, fontweight='bold')
     ax.grid(True, alpha=0.3)
-    ax.legend(title='', loc='best', fontsize=10)
+    ax.legend(loc='upper right', fontsize=10)
 
 plt.tight_layout()
 plt.suptitle('PyOD Outlier Detection - Immunological Dataset', fontsize=16, fontweight='bold', y=1.02)
@@ -956,81 +1008,43 @@ consensus_matrix = np.column_stack([
 # Count how many algorithms flagged each sample
 consensus_count = consensus_matrix.sum(axis=1)
 
-# Show which algorithms agree on which samples for top 30 most flagged samples
-top_n = 30
-top_indices = np.argsort(consensus_count)[-top_n:]
+# Count samples with highest scores (most outlier-like) across all algorithms
+print("\nConsensus Analysis:")
+print(f"Number of samples flagged by at least 3 algorithms: {(consensus_count >= 3).sum()} out of {len(consensus_count)} ({(consensus_count >= 3).mean()*100:.2f}%)")
+print(f"Number of samples flagged by all 4 algorithms: {(consensus_count == 4).sum()} out of {len(consensus_count)} ({(consensus_count == 4).mean()*100:.2f}%)") 
+print(" ")       
 
-plt.figure(figsize=(14, 8))
-sns.heatmap(
-    consensus_matrix[top_indices].T,
-    cmap='RdYlGn_r',
-    cbar_kws={'label': 'Outlier (1) vs Inlier (0)'},
-    yticklabels=['IForest', 'LOF', 'ECOD', 'COPOD'],
-    xticklabels=[f"P{int(patient_ids[i])}-T{int(timepoints[i])}" for i in top_indices],
-    linewidths=0.5,
-    vmin=0,
-    vmax=1
-)
-plt.xlabel('Patient-Timepoint', fontsize=12)
-plt.ylabel('Algorithm', fontsize=12)
-plt.title(f'Consensus Heatmap: Top {top_n} Most Flagged Samples', fontsize=14, fontweight='bold')
-plt.xticks(rotation=90, fontsize=8)
+# Samples flagged by all 4 algorithms
+average_scores = np.mean([r['scores_normalized'] for r in results.values()], axis=0)
+all_flagged = pd.DataFrame({
+    'Patient': patient_ids, 'Timepoint': timepoints, 'Avg_Score': average_scores})
+print("Samples flagged by all 4 algorithms (sorted by avg score):")
+print(all_flagged.to_string(index=False))
+
+
+# Bar plot of consensus outliers by timepoint
+plt.figure(figsize=(10, 6))
+outlier_counts = all_flagged['Timepoint'].value_counts().sort_index().reset_index()
+outlier_counts.columns = ['Timepoint', 'Count']
+sns.barplot(data=outlier_counts, x='Timepoint', y='Count', color='teal')
+plt.xlabel('Timepoint', fontsize=12, fontweight='bold')
+plt.ylabel('Number of Consensus Outliers', fontsize=12, fontweight='bold')
+plt.title('Consensus Outliers by Timepoint (Across all 4 Algorithms)', fontsize=14, fontweight='bold')
+plt.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+plt.show()                                                        
+
+# Plot showing algorithm and number flagged samples
+plt.figure(figsize=(8, 5))
+algorithms = list(outlier_counts.keys())
+counts = list(outlier_counts.values())
+sns.barplot(x=algorithms, y=counts, hue=algorithms, palette='crest', legend=False)
+plt.xlabel('Outlier Detection Algorithm', fontsize=12, fontweight='bold')
+plt.ylabel('Number of Outliers Detected', fontsize=12, fontweight='bold')
+plt.title('Outliers Detected by Each Algorithm', fontsize=14, fontweight='bold')
+plt.grid(axis='y', alpha=0.3)
 plt.tight_layout()
 plt.show()
-
-
-# Find all samples flagged by 3 or more algorithms
-high_consensus_mask = consensus_count >= 3
-high_consensus_indices = np.where(high_consensus_mask)[0]
-
-print("\n")
-print(f"CONSENSUS ANALYSIS:")
-print(f"Total samples flagged by 3 or more algorithms out of 4: {len(high_consensus_indices)}\n")
-
-# Create consensus dataframe
-consensus_df = pd.DataFrame({
-    'Dataset index': high_consensus_indices,                            # Original index in dataset
-    'Patient': patient_ids[high_consensus_indices],                     # Patient IDs
-    'Timepoint': timepoints[high_consensus_indices].astype(int),          # Timepoints
-    "Avg Score": np.mean([
-        results['IsolationForest']['scores_normalized'][high_consensus_indices],
-        results['LOF']['scores_normalized'][high_consensus_indices],
-        results['ECOD']['scores_normalized'][high_consensus_indices],
-        results['COPOD']['scores_normalized'][high_consensus_indices]
-    ], axis=0),
-    'IsolationForest': consensus_matrix[high_consensus_indices, 0],       
-    'LOF': consensus_matrix[high_consensus_indices, 1],
-    'ECOD': consensus_matrix[high_consensus_indices, 2],
-    'COPOD': consensus_matrix[high_consensus_indices, 3],
-    'Consensus_Count': consensus_count[high_consensus_indices]
-}).sort_values('Consensus_Count', ascending=False)
-
-print(consensus_df.to_string(index=False))
-
-
-# Displaying the top 10 consensus outliers (first 10 columns from dataset)
-# Get top 10 by consensus count (already sorted in consensus_df)
-top_10_indices = consensus_df['Dataset index'].head(10).values
-top_10_consensus = df_im_imputed.iloc[top_10_indices]
-print("\nMeasurements for Top 10 Consensus Outliers (first ten columns):")
-print(top_10_consensus.iloc[:, :10].to_string(index=False))
-
-
-# Bar plot of number of consensus outliers per timepoint
-if len(consensus_df) > 0:
-    timepoint_outliers = consensus_df.groupby('Timepoint').size().reset_index(name='Count')
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=timepoint_outliers, x='Timepoint', y='Count', palette='viridis')
-    plt.xlabel('Timepoint', fontsize=12, fontweight='bold')
-    plt.ylabel('Number of Consensus Outliers (≥3 flags)', fontsize=12, fontweight='bold')
-    plt.title('Consensus Outliers by Timepoint', fontsize=14, fontweight='bold')
-    plt.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-else:
-    print("No samples flagged by 3 or more algorithms - skipping bar plot")
-
-#%%########## Correlation analysis between features for immunological dataset
 
 
 
@@ -1153,4 +1167,11 @@ immu_names = {
 }
 
 # map new columnnames to dataset...
+
+
+
+
+
+
+#%% Basline model for immunological dataset - CatBoost
 
