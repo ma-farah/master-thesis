@@ -1796,137 +1796,105 @@ shap_comb = compute_and_plot_shap(model_comb, X_comb, "Combined")
 
 #%% ===================================================================
 # BASELINE MODEL 2: T1 + T2 (patients with both timepoints)
+# Pivot to wide format: one row per patient, features suffixed with _T1 / _T2
 # =====================================================================
-from sklearn.model_selection import StratifiedGroupKFold
 
 # --- Step 1: Find patients that have BOTH T1 and T2 ---
-patients_t1 = set(df_im_with_response[df_im_with_response['Timepoint'] == 1]['Patient'])
-patients_t2 = set(df_im_with_response[df_im_with_response['Timepoint'] == 2]['Patient'])
-patients_t1t2_im = patients_t1 & patients_t2
+patients_t1_im = set(df_im_with_response[df_im_with_response['Timepoint'] == 1]['Patient'])
+patients_t2_im = set(df_im_with_response[df_im_with_response['Timepoint'] == 2]['Patient'])
+patients_t1t2_im = patients_t1_im & patients_t2_im
 
 patients_t1_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 1]['Patient'])
 patients_t2_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 2]['Patient'])
 patients_t1t2_cl = patients_t1_cl & patients_t2_cl
 
-# --- Step 2: Filter to T1+T2 patients only ---
-df_im_baseline_t1t2 = df_im_with_response[
-    (df_im_with_response['Patient'].isin(patients_t1t2_im)) &
-    (df_im_with_response['Timepoint'].isin([1, 2]))
-].copy()
+def pivot_t1t2(df, patients_with_both, id_col='Patient', tp_col='Timepoint'):
+    """Pivot T1+T2 long format to wide: one row per patient.
+    Feature columns get _T1 / _T2 suffixes. Patient-level columns (same across
+    timepoints) are kept as single columns without suffix.
+    """
+    # Filter to patients with both T1 and T2, timepoints 1 and 2 only
+    df_filt = df[
+        (df[id_col].isin(patients_with_both)) &
+        (df[tp_col].isin([1, 2]))
+    ].copy()
 
-df_cl_baseline_t1t2 = df_cl_reduced1[
-    (df_cl_reduced1['Patient'].isin(patients_t1t2_cl)) &
-    (df_cl_reduced1['Timepoint'].isin([1, 2]))
-].copy()
+    # Separate T1 and T2
+    df_t1 = df_filt[df_filt[tp_col] == 1].set_index(id_col).drop(columns=[tp_col])
+    df_t2 = df_filt[df_filt[tp_col] == 2].set_index(id_col).drop(columns=[tp_col])
 
-df_combined_baseline_t1t2 = df_combined[
-    (df_combined['Patient'].isin(patients_t1t2_im & patients_t1t2_cl)) &
-    (df_combined['Timepoint'].isin([1, 2]))
-].copy()
+    # Find columns that are identical across T1 and T2 (patient-level / static)
+    common_patients = df_t1.index.intersection(df_t2.index)
+    static_cols = []
+    for col in df_t1.columns:
+        if col in df_t2.columns:
+            t1_vals = df_t1.loc[common_patients, col].reset_index(drop=True)
+            t2_vals = df_t2.loc[common_patients, col].reset_index(drop=True)
+            # Check if values are identical (treating NaN == NaN)
+            if t1_vals.equals(t2_vals):
+                static_cols.append(col)
 
-print(f"\n=== T1+T2 Baseline Datasets ===")
+    # Separate static and time-varying columns
+    varying_cols = [c for c in df_t1.columns if c not in static_cols]
+
+    # Build wide dataframe
+    df_static = df_t1.loc[common_patients, static_cols]
+    df_t1_varying = df_t1.loc[common_patients, varying_cols].add_suffix('_T1')
+    df_t2_varying = df_t2.loc[common_patients, varying_cols].add_suffix('_T2')
+
+    df_wide = pd.concat([df_static, df_t1_varying, df_t2_varying], axis=1)
+    df_wide = df_wide.reset_index()
+
+    print(f"  Pivot: {len(common_patients)} patients, "
+          f"{len(static_cols)} static cols, "
+          f"{len(varying_cols)} varying cols × 2 = {len(varying_cols)*2} cols, "
+          f"total features: {df_wide.shape[1] - 1}")
+
+    return df_wide
+
+# --- Step 2: Pivot each dataset to wide format ---
+print("\n=== Pivoting T1+T2 to wide format ===")
+
+print("\nImmunological:")
+df_im_baseline_t1t2 = pivot_t1t2(df_im_with_response, patients_t1t2_im)
+
+print("\nClinical:")
+df_cl_baseline_t1t2 = pivot_t1t2(df_cl_reduced1, patients_t1t2_cl)
+
+# --- Step 3: Combined dataset — merge wide immunological + wide clinical ---
+patients_t1t2_both = patients_t1t2_im & patients_t1t2_cl
+# Re-pivot with shared patient set for consistent merge
+print("\nCombined (re-pivot with shared patients):")
+df_im_wide_shared = pivot_t1t2(df_im_with_response, patients_t1t2_both)
+df_cl_wide_shared = pivot_t1t2(df_cl_reduced1, patients_t1t2_both)
+# Drop target from clinical side to avoid duplication
+df_cl_wide_for_merge = df_cl_wide_shared.drop(columns=[target_col], errors='ignore')
+df_combined_baseline_t1t2 = df_im_wide_shared.merge(
+    df_cl_wide_for_merge, on='Patient', how='inner', suffixes=('_im', '_cl'))
+
+print(f"\n=== T1+T2 Wide Baseline Datasets ===")
 print(f"Immunological: {df_im_baseline_t1t2.shape}, Patients: {df_im_baseline_t1t2['Patient'].nunique()}")
 print(f"Clinical: {df_cl_baseline_t1t2.shape}, Patients: {df_cl_baseline_t1t2['Patient'].nunique()}")
 print(f"Combined: {df_combined_baseline_t1t2.shape}, Patients: {df_combined_baseline_t1t2['Patient'].nunique()}")
 print(f"Target distribution:\n{df_im_baseline_t1t2[target_col].value_counts().to_string()}")
 
+TableReport(df_im_baseline_t1t2, max_plot_columns=320)
 
-#%% CatBoost baseline T1+T2: 5-fold StratifiedGroupKFold
-
-def run_catboost_baseline_grouped(df_model, target_col, name):
-    """Run 5-fold StratifiedGroupKFold CatBoost classifier on T1+T2 data. No tuning.
-    Groups by Patient so both timepoints stay in the same fold.
-    Returns results_df (per-fold + mean), last trained model, X, y_pred.
-    """
-    exclude = ['Patient', 'Timepoint', 'improvement_percent', 'response', target_col]
-    feature_cols = [c for c in df_model.columns if c not in exclude]
-    X = df_model[feature_cols].copy()
-    y = df_model[target_col].copy()
-    groups = df_model['Patient'].values
-
-    # Convert categoricals to string (CatBoost requirement for cat_features)
-    for col in X.select_dtypes(include=['category', 'object']).columns:
-        X[col] = X[col].astype(str)
-    cat_cols = X.select_dtypes(include=['object']).columns.tolist()
-
-    print(f"\n{'='*60}")
-    print(f"  CatBoost Baseline (T1+T2): {name}")
-    print(f"{'='*60}")
-    print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
-
-    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
-    fold_results = []
-    y_pred = pd.Series(index=X.index, dtype='object')
-
-    for fold, (train_idx, test_idx) in enumerate(sgkf.split(X, y, groups)):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-        train_pool = Pool(X_train, y_train, cat_features=cat_cols)
-        test_pool = Pool(X_test, y_test, cat_features=cat_cols)
-
-        model = CatBoostClassifier(
-            random_seed=42,
-            verbose=0,
-            iterations=500,
-            auto_class_weights='Balanced',
-        )
-        model.fit(train_pool, eval_set=test_pool, use_best_model=False)
-
-        # Predict class labels
-        preds = model.predict(test_pool, prediction_type='Class').flatten()
-        y_pred.iloc[test_idx] = preds
-
-        # Compute metrics using CatBoost eval_metrics (post-training)
-        metrics = model.eval_metrics(
-            test_pool,
-            ['Accuracy', 'TotalF1:average=Weighted', 'AUC:type=Mu', 'MCC']
-        )
-
-        fold_result = {
-            'Fold': fold + 1,
-            'Accuracy': metrics['Accuracy'][-1],
-            'F1_weighted': metrics['TotalF1:average=Weighted'][-1],
-            'AUC': metrics['AUC:type=Mu'][-1],
-            'MCC': metrics['MCC'][-1],
-            'Train_size': len(train_idx),
-            'Test_size': len(test_idx)
-        }
-        fold_results.append(fold_result)
-
-        print(f"  Fold {fold+1}: Acc={fold_result['Accuracy']:.4f}  "
-              f"F1={fold_result['F1_weighted']:.4f}  "
-              f"AUC={fold_result['AUC']:.4f}  "
-              f"MCC={fold_result['MCC']:.4f}")
-
-    results_df = pd.DataFrame(fold_results)
-
-    # Add mean row
-    metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
-    mean_row = {m: results_df[m].mean() for m in metric_cols}
-    mean_row['Fold'] = 'Mean'
-    results_df = pd.concat([results_df, pd.DataFrame([mean_row])], ignore_index=True)
-
-    print(f"\n  Mean Across 5 Folds")
-    for m in metric_cols:
-        print(f"  {m}: {mean_row[m]:.4f}")
-
-    return results_df, model, X, y_pred
-
-
-#%% Run T1+T2 baselines
+#%% Run T1+T2 baselines (wide format = one row per patient, reuse run_catboost_baseline)
 print("\n" + "="*70)
-print("  RUNNING CATBOOST BASELINES (T1+T2)")
+print("  RUNNING CATBOOST BASELINES (T1+T2 wide)")
 print("="*70)
 
-res_im_t1t2, model_im_t1t2, X_im_t1t2, y_pred_im_t1t2 = run_catboost_baseline_grouped(
-    df_im_baseline_t1t2, target_col, "Immunological")
+target_col= 'response_category'
 
-res_cl_t1t2, model_cl_t1t2, X_cl_t1t2, y_pred_cl_t1t2 = run_catboost_baseline_grouped(
-    df_cl_baseline_t1t2, target_col, "Clinical")
+res_im_t1t2, model_im_t1t2, X_im_t1t2, y_pred_im_t1t2 = run_catboost_baseline(
+    df_im_baseline_t1t2, target_col, "Immunological (T1+T2)")
 
-res_comb_t1t2, model_comb_t1t2, X_comb_t1t2, y_pred_comb_t1t2 = run_catboost_baseline_grouped(
-    df_combined_baseline_t1t2, target_col, "Combined")
+res_cl_t1t2, model_cl_t1t2, X_cl_t1t2, y_pred_cl_t1t2 = run_catboost_baseline(
+    df_cl_baseline_t1t2, target_col, "Clinical (T1+T2)")
+
+res_comb_t1t2, model_comb_t1t2, X_comb_t1t2, y_pred_comb_t1t2 = run_catboost_baseline(
+    df_combined_baseline_t1t2, target_col, "Combined (T1+T2)")
 
 
 #%% T1+T2 Summary results table
@@ -1945,7 +1913,7 @@ for name, res in [("Immunological", res_im_t1t2),
 
 df_summary_t1t2 = pd.DataFrame(summary_rows_t1t2)
 print("\n")
-print("  BASELINE CATBOOST MODEL (T1+T2) RESULTS SUMMARY")
+print("  BASELINE CATBOOST MODEL (T1+T2 wide) RESULTS SUMMARY")
 print("="*70)
 print(df_summary_t1t2.to_string(index=False))
 
