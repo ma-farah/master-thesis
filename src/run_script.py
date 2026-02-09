@@ -173,11 +173,12 @@ dropped_columns = [
     "pDC_CD86+",
 ]
 
-df_im_raw = df_im.copy()  # copy of raw dataset
 df_im = df_im.drop(columns=dropped_columns)
 
-# Correcting datatypes
+# copy of reduced raw dataset for baseline modeling
+df_im_reduced = df_im.copy()
 
+# Correcting datatypes
 # husk å skrive opp alle kolonner som har blitt endret!
 
 # Changing columntyoe to date/time type
@@ -1072,6 +1073,8 @@ TableReport(df_cl, max_plot_columns=180)
 
 
 #%% Step 1: Forward-fill patient-level data within each patient group
+# So that clinical dataset is the same format as immunoligcal:
+
 # Rationale: Each patient has one header row with demographics, followed by T1-T5 rows
 
 # Patient-level columns that should be constant across all timepoints for a patient
@@ -1090,22 +1093,24 @@ df_cl[patient_level_cols + ['Unnamed: 0']] = (
 )
 df_cl = df_cl.drop(columns=['Patient_Group'])
 
-# Keep only rows with actual measurement data (Datum exists)
-df_cl_clean = df_cl[df_cl['Datum'].notna()].copy()
-print(f"\nRows with measurement data: {len(df_cl_clean)}")
 
-#%% Step 2: Extract Timepoint and apply exclusion criteria
+#%% Step 2: Extract Timepoint measurement and create column
 
 # Extract Timepoint number from Erfassungszeitpunkt string (e.g., "01.01.1" -> 1)
-df_cl_clean['Timepoint'] = (
-    df_cl_clean['Erfassungszeitpunkt']
+df_cl['Timepoint'] = (
+    df_cl['Erfassungszeitpunkt']
     .str.extract(r'\d+\.\d+\.(\d+)')[0]
     .astype(float)
 )
-df_cl_clean = move_column_after(df_cl_clean, 'Timepoint', 'Patient')
+df_cl = move_column_after(df_cl, 'Timepoint', 'Patient')
 
-# Define exclusion keywords (German terms for: excluded, file locked, letter unavailable, questionnaires missing)
-exclude_keywords = ['Ausschluss', 'Akte gesperrt', 'arztbrief kann nicht geöffnet werden', 'Fragebögen fehlen']
+# Keep rows with actual measurement data
+df_cl_clean = df_cl[df_cl['Datum'].notna()].copy()
+print(f"\nRows with measurement data: {len(df_cl_clean)}")
+
+# Define exclusion keywords for raw dataset (German terms for: excluded, file locked, letter unavailable, questionnaires missing)
+# 'Akte gesperrt', 'arztbrief kann nicht geöffnet werden', 'Fragebögen fehlen'?
+exclude_keywords = ['Ausschluss']
 exclude_mask = df_cl_clean['Unnamed: 0'].str.contains('|'.join(exclude_keywords), case=False, na=False)
 
 # Print and apply exclusions
@@ -1138,6 +1143,7 @@ removed 36 ids: [  8.   9.  10.  22.  23.  36.  38.  90.  92. 101. 103. 104. 108
 cols_to_drop = ['Unnamed: 0', 'Comments questionnaire', 'further comments', 'Unnamed: 2']
 df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
 
+
 print(f"\n=== After exclusions ===")
 print(f"Remaining: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
 TableReport(df_cl_clean, max_plot_columns=180)
@@ -1151,7 +1157,7 @@ clinical_names = {
     "Weight [kg]": "weight_kg", "Height [cm]": "height_cm",
 
     # Dates and timings
-    "Erfassungszeitpunkt": "measurement_timepoint", "Datum": "date",
+    "Erfassungszeitpunkt": "measurement_timepoint", "Messdatum": "date",
     "Beschwerden seit": "symptoms_months", "vorherige Therapie": "previous_therapy",
 
     # Pain characteristics
@@ -1217,7 +1223,9 @@ clinical_names = {
     "FHA": "fha", "kV": "kv", "mA": "ma", "Filter": "filter", "Response": "response",
 }
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
-print(f"\n=== Columns renamed: {len(clinical_names)} mappings applied ===")
+print(f"\n Columns renamed: {len(clinical_names)}  ")
+
+df_cl_reduced = df_cl_clean.copy()
 
 #%% Step 5: Remove empty data rows and fill improvement_percent for non-responders
 
@@ -1227,21 +1235,23 @@ empty_questionnaire_mask = (
     df_cl_clean['date'].notna() &
     df_cl_clean[questionnaire_cols].isna().all(axis=1)
 )
-
 print(f"\n=== Removing empty questionnaire rows ===")
 print(f"Rows to remove: {empty_questionnaire_mask.sum()}")
 if empty_questionnaire_mask.sum() > 0:
     print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date']])
 df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
 
+
 # Fill improvement_percent with 0 for patients with "no improvement" response
-# Rationale: If response explicitly says "no improvement", the improvement percentage is 0
+# If response explicitly says "no improvement", the improvement percentage is 0
 no_improvement_mask = (
     df_cl_clean['response'].str.lower().str.startswith('no', na=False) &
     df_cl_clean['improvement_percent'].isna()
 )
 df_cl_clean.loc[no_improvement_mask, 'improvement_percent'] = 0
 print(f"Filled {no_improvement_mask.sum()} improvement_percent values with 0 for 'no improvement' responses")
+
+# er det ok spørre anna?
 
 
 #%% Step 6: Transform column values to usable formats
@@ -1317,7 +1327,7 @@ print(f"Sample (Patient 16):\n{df_cl_clean.loc[df_cl_clean['Patient'] == 16, ['T
 # NB: How to handle words, comments, and dates in this column?
 
 #%% --- 6d: Encode previous therapy as binary columns ---
-# Original format: comma-separated numbers like "1,3,5" indicating therapy types 1-7
+# SKIP Original format: comma-separated numbers like "1,3,5" indicating therapy types 1-7
 def encode_therapy_columns(df, col_name='previous_therapy'):
     """Create binary columns for each therapy type (1-7) from comma-separated string."""
     col_idx = df.columns.get_loc(col_name)
@@ -1375,43 +1385,120 @@ print(f"\nDate range: {df_cl_clean['date'].min()} to {df_cl_clean['date'].max()}
 TableReport(df_cl_clean, max_plot_columns=100)
 
 #%%
-# simplified response variable - only containing CR, PR or NI for no improvement.
+# Simplify response variable to classes containing CR, PR or NI for no improvement.
 
 
-# a few columns with entries indiciating partial response, change into PR:
+# Columns with "no improvement" AND CR at the same measurement will be put in PR category
+# Columns with CR AND PR at same measurement will be put in PR category.
+# This will most likely lead to a class imbalace where partial response is biggest?
+
+# Columns with notes indiciating partial response, change into PR:
 # recovery only on the right side", "improvement", "initial improvement", "subtotal remission" needs to be assigned to PR
 # one column with typo "no imrovement" needs to be assigned to NI
 
-# if a column has CR and no improvement in the same row -> assign as PR partial response.
-# Create working copy
+def create_response_category(df, response_col='response'):
+    """Create response_category (CR, PR, NI) from raw response column.
+    Priority: CR > PR > NI. Mixed responses (CR+NI, CR+PR) -> PR.
+    """
+    df = df.copy()
+    clean = df[response_col].astype(str).str.strip().str.lower()
+    
+    # Fix specific entries and typo
+    pr_terms = ['recovery only on the right side', 'improvement', 'initial improvement', 'subtotal remission']
+    clean = clean.replace(pr_terms, 'pr')
+    clean = clean.str.replace('no imrovement', 'no improvement')
+    
+    # Detect patterns
+    has_cr = clean.str.contains(r'\bcr\b', na=False)
+    has_pr = clean.str.contains(r'\bpr\b', na=False)
+    has_ni = clean.str.contains(r'no\s*imp', na=False)
+    
+    # Mixed responses -> PR
+    clean = clean.where(~(has_cr & (has_ni | has_pr)), 'pr')
+    
+    # Recalculate after fixes
+    has_cr = clean.str.contains(r'\bcr\b', na=False)
+    has_ni = clean.str.contains(r'no\s*imp', na=False)
+    
+    # Assign categories (CR > PR > NI)
+    df['response_category'] = pd.NA
+    df.loc[has_ni, 'response_category'] = 'NI'
+    df.loc[clean.str.contains(r'\bpr\b', na=False), 'response_category'] = 'PR'
+    df.loc[has_cr, 'response_category'] = 'CR'
+    
+    print(f"Response categories:\n{df['response_category'].value_counts(dropna=False)}")
+    return df
 
-df_cl_clean['response_clean'] = df_cl_clean['response'].astype(str).str.strip().str.lower()
+# creating cleaned response category
+df_cl_reduced1 = create_response_category(df_cl_reduced, response_col='response')
 
-# Fix specific entries -> PR
-pr_patterns = ['recovery only on the right side', 'improvement', 'initial improvement', 'subtotal remission']
-df_cl_clean.loc[df_cl_clean['response_clean'].isin(pr_patterns), 'response_clean'] = 'pr'
 
-# Fix typo -> NI
-df_cl_clean['response_clean'] = df_cl_clean['response_clean'].str.replace('no imrovement', 'no improvement')
+#%%  improvement_percent variable as a target variable
 
-# Fix mixed CR + no improvement -> PR
-has_cr = df_cl_clean['response_clean'].str.contains(r'\bcr\b', na=False)
-has_ni = df_cl_clean['response_clean'].str.contains(r'no\s*improve', na=False)
-df_cl_clean.loc[has_cr & has_ni, 'response_clean'] = 'pr'
+def clean_improvement_percent(df, col='improvement_percent'):
+    """Clean improvement_percent column: handle ranges, L/R splits, special entries.
+    Returns df with numeric improvement_percent (0-100).
+    """
+    df = df.copy()
+    raw = df[col].astype(str).str.strip()
+    
+    # Step 1: Handle specific known entries
+    # "nicht schmerzfrei" (not pain-free) -> 0
+    raw = raw.replace({'nicht schmerzfrei': '0', 'nan': pd.NA, '': pd.NA})
+    
+    # "02/2017: 90; 08/2017: 50" -> take latest value (50)
+    date_pattern = raw.str.contains(r'\d{2}/\d{4}', na=False)
+    if date_pattern.any():
+        # Extract last number after the last colon
+        raw[date_pattern] = raw[date_pattern].str.extract(r'.*:\s*(\d+)')[0]
+    
+    # Step 2: Handle L/R entries (e.g., "L: 100 R:0", "links: 100%; rechts: 80-90")
+    lr_pattern = raw.str.contains(r'[LlRr]|links|rechts', na=False)
+    
+    def parse_lr(entry):
+        """Extract all numbers/ranges from L/R entries and average them."""
+        import re
+        # Find all numbers or ranges
+        parts = re.findall(r'(\d+)\s*-\s*(\d+)|(\d+)', entry)
+        values = []
+        for start, end, single in parts:
+            if start and end:  # range like 80-90
+                values.append((float(start) + float(end)) / 2)
+            elif single:  # single number
+                values.append(float(single))
+        return np.mean(values) if values else np.nan
+    
+    if lr_pattern.any():
+        raw[lr_pattern] = raw[lr_pattern].apply(parse_lr)
+    
+    # Step 3: Handle simple ranges (e.g., "80-90")
+    range_pattern = raw.astype(str).str.match(r'^\s*[<>~]?\s*\d+\s*-\s*\d+\s*$', na=False)
+    if range_pattern.any():
+        start = raw[range_pattern].str.extract(r'(\d+)\s*-')[0].astype(float)
+        end = raw[range_pattern].str.extract(r'-\s*(\d+)')[0].astype(float)
+        raw[range_pattern] = (start + end) / 2
+    
+    # Step 4: Convert to numeric
+    df[col] = pd.to_numeric(raw, errors='coerce')
+    
+    # Step 5: Remove patients with missing improvement_percent
+    before = df['Patient'].nunique()
+    missing_patients = df[df[col].isna()]['Patient'].unique()
+    df = df[~df['Patient'].isin(missing_patients)]
+    after = df['Patient'].nunique()
+    
+    print(f"\n=== Improvement Percent Cleaning ===")
+    print(f"Patients removed (missing): {len(missing_patients)}")
+    print(f"Patients remaining: {after} (was {before})")
+    print(f"\n=== Improvement Percent Stats ===")
+    print(df[col].describe())
+    print(f"\nValue counts:\n{df[col].value_counts().sort_index()}")
+    
+    return df
 
-# Assign categories (priority: CR > PR > NI)
-df_cl_clean['response_category'] = pd.NA
-df_cl_clean.loc[has_ni & ~has_cr, 'response_category'] = 'NI'
-df_cl_clean.loc[df_cl_clean['response_clean'].str.contains(r'\bpr\b', na=False), 'response_category'] = 'PR'
-df_cl_clean.loc[df_cl_clean['response_clean'].str.contains(r'\bcr\b', na=False), 'response_category'] = 'CR'
-df_cl_clean.drop(columns='response_clean')
-# Verification
-print("=== Response category counts ===")
-print(df_cl_clean['response_category'].value_counts(dropna=False))
-print("\n=== Unique mappings ===")
-print(df_cl_clean[['response', 'response_category']].drop_duplicates().sort_values('response_category').to_string())
+# Usage:
+df_cl_reduced2 = clean_improvement_percent(df_cl_reduced)
 
-TableReport(df_cl_clean, max_plot_columns=100)
 
 #%% Reduce clinical dataset for modeling (simplfy)
 
@@ -1432,18 +1519,21 @@ TableReport(df_cl_red, max_plot_columns=100)
 
 #%% Basline model for immunological dataset - CatBoost
 
-TableReport(df_im_imputed, max_plot_columns=100)
+TableReport(df_im_reduced, max_plot_columns=130)
+TableReport(df_cl_reduced2, max_plot_columns=130) # using category as target
+TableReport(df_cl_reduced2, max_plot_columns=130) # using improvement_percent as target
+
 
 #%% Step 9: Prepare baseline datasets for modeling
 
 # --- First, check what we have ---
-print("=== Dataset overview ===")
-print(f"Immunological (df_im_imputed): {df_im_imputed['Patient'].nunique()} patients, {len(df_im_imputed)} rows")
-print(f"Clinical (df_cl_reduced): {df_cl_red['Patient'].nunique()} patients, {len(df_cl_reduced)} rows")
+print("=== Dataset overview: Target variable: Response Category ===")
+print(f"Immunological (df_im_reduced): {df_im_reduced['Patient'].nunique()} patients, {len(df_im_reduced)} rows")
+print(f"Clinical (df_cl_reduced): {df_cl_reduced1['Patient'].nunique()} patients, {len(df_cl_reduced1)} rows")
 
 # --- Check common patients ---
-im_patients = set(df_im_imputed['Patient'].unique())
-cl_patients = set(df_cl_red['Patient'].unique())
+im_patients = set(df_im_reduced['Patient'].unique())
+cl_patients = set(df_cl_reduced1['Patient'].unique())
 common_patients = im_patients & cl_patients
 
 print(f"\n=== Patient overlap ===")
@@ -1451,11 +1541,27 @@ print(f"Immunological only: {len(im_patients - cl_patients)}")
 print(f"Clinical only: {len(cl_patients - im_patients)}")
 print(f"Common patients: {len(common_patients)}")
 
+print('')
+print("=== Dataset overview: Target variable: Improvement in Percent ===")
+print(f"Immunological (df_im_reduced): {df_im_reduced['Patient'].nunique()} patients, {len(df_im_reduced)} rows")
+print(f"Clinical (df_cl_reduced2): {df_cl_reduced2['Patient'].nunique()} patients, {len(df_cl_reduced2)} rows")
+
+# --- Check common patients ---
+im_patients = set(df_im_reduced['Patient'].unique())
+cl_patients = set(df_cl_reduced2['Patient'].unique())
+common_patients = im_patients & cl_patients
+
+print(f"\n=== Patient overlap ===")
+print(f"Immunological only: {len(im_patients - cl_patients)}")
+print(f"Clinical only: {len(cl_patients - im_patients)}")
+print(f"Common patients: {len(common_patients)}")
+
+
 #%% Check timepoint availability for common patients
 
 # Filter to common patients
-df_im_common = df_im_imputed[df_im_imputed['Patient'].isin(common_patients)]
-df_cl_common = df_cl_red[df_cl_red['Patient'].isin(common_patients)]
+df_im_common = df_im_reduced[df_im_reduced['Patient'].isin(common_patients)]
+df_cl_common = df_cl_reduced2[df_cl_reduced2['Patient'].isin(common_patients)]
 
 # Check which timepoints each patient has in BOTH datasets
 im_pt = df_im_common.groupby('Patient')['Timepoint'].apply(set)
@@ -1465,7 +1571,7 @@ cl_pt = df_cl_common.groupby('Patient')['Timepoint'].apply(set)
 common_timepoints = pd.DataFrame({'im': im_pt, 'cl': cl_pt}).dropna()
 common_timepoints['both'] = common_timepoints.apply(lambda x: x['im'] & x['cl'], axis=1)
 
-print("\n=== Timepoint availability (common patients with matching timepoints) ===")
+print("\nTimepoint availability (using improvement_percent as target")
 # Count patients with T1+T2+T3
 has_t123 = common_timepoints['both'].apply(lambda x: {1, 2, 3}.issubset(x)).sum()
 print(f"Patients with T1 + T2 + T3: {has_t123}")
@@ -1479,9 +1585,10 @@ has_t1 = common_timepoints['both'].apply(lambda x: 1 in x).sum()
 print(f"Patients with T1: {has_t1}")
 
 """
-Immunological (df_im_imputed): 264 patients, 822 rows
-Clinical (df_cl_reduced): 206 patients, 687 rows
+Immunological: 264 patients, 822 rows
+Clinical (Response category as target): 206 patients, 687 rows
 
+Using Response Cateory as Target
 === Patient overlap ===
 Immunological only: 58
 Clinical only: 0
@@ -1490,64 +1597,202 @@ Common patients: 206
 Patients with T1 + T2 + T3: 84
 Patients with T1 + T2: 140
 Patients with T1: 182
+--------------------------------------------
+Using Improvement in percent as Target
+Immunological: 264 patients, 829 rows
+Clinical (df_cl_reduced2): 127 patients, 492 rows
 
+=== Patient overlap ===
+Immunological only: 138
+Clinical only: 0
+Common patients: 127
+
+Patients with T1 + T2 + T3: 62
+Patients with T1 + T2: 99
+Patients with T1: 111
 """
-# choosing timepoints 1 and 2, possible 1,2 and 3.
-
-#%% Create response lookup from clinical data (one response per patient)
-
-# Response should be same across all timepoints for a patient - take first
-response_lookup = (
-    df_cl_reduced[['Patient', 'response_category']]
-    .drop_duplicates(subset='Patient')
-    .set_index('Patient')['response_category']
-)
-
-print(f"\n=== Response category distribution ===")
-print(response_lookup.value_counts())
 
 
-# --- df_im_baseline: immunological + response_category ---
-df_im_baseline = df_im_imputed.copy()
-df_im_baseline['response_category'] = df_im_baseline['Patient'].map(response_lookup)
-df_im_baseline = df_im_baseline.dropna(subset=['response_category'])  # Drop patients without response
+#%% BASELINE DATASETS FOR CATBOOST MODEL USING RESPONSE CATEGORY AS TARGET
+# Using all timepoints available, no imputation or removal of nan and noise
 
-print(f"\n=== df_im_baseline ===")
-print(f"Shape: {df_im_baseline.shape}")
-print(f"Patients: {df_im_baseline['Patient'].nunique()}")
+from catboost import CatBoostClassifier, Pool
+from sklearn.model_selection import GroupKFold
+import shap
+import numpy as np
+import pandas as pd
 
-# --- df_cl_baseline: clinical reduced (already has response_category) ---
-df_cl_baseline = df_cl_reduced.copy()
+target_col = 'response_category'
+id_cols = ['Patient', 'Timepoint']
+leaky_cols = ['response', 'improvement_percent']
 
-print(f"\n=== df_cl_baseline ===")
-print(f"Shape: {df_cl_baseline.shape}")
-print(f"Patients: {df_cl_baseline['Patient'].nunique()}")
+def drop_leaky(df): # remove leaky columns 
+    return df.drop(columns=[c for c in leaky_cols if c in df.columns], errors='ignore')
 
-# --- df_im_cl_baseline: combined (common patients + matching timepoints) ---
+def print_baseline(df, name):
+    print(f"\n=== {name} baseline ===")
+    print(f"Shape: {df.shape}, Patients: {df['Patient'].nunique()}")
+    print(f"Target:\n{df[target_col].value_counts(dropna=False)}")
+
+# --- Immunological: merge response_category from clinical, drop unmatched rows ---
+response_map = df_cl_reduced1[['Patient', 'Timepoint', 'response_category']]
+df_im_baseline = df_im_reduced.merge(response_map, on=id_cols, how='left')
+n_before = len(df_im_baseline)
+df_im_baseline = df_im_baseline.dropna(subset=[target_col])
+df_im_baseline = drop_leaky(df_im_baseline)
+print(f"Dropped {n_before - len(df_im_baseline)} immunological rows with no response_category")
+print_baseline(df_im_baseline, "Immunological")
+
+# --- Clinical: already has response_category ---
+df_cl_baseline = drop_leaky(df_cl_reduced1.copy())
+print_baseline(df_cl_baseline, "Clinical")
+
+# --- Combined: inner join on Patient + Timepoint ---
 df_im_cl_baseline = df_im_baseline.merge(
-    df_cl_baseline,
-    on=['Patient', 'Timepoint'],
-    how='inner',
-    suffixes=('_im', '_cl')
-)
-
-print(f"\n=== df_im_cl_baseline (combined) ===")
-print(f"Shape: {df_im_cl_baseline.shape}")
-print(f"Patients: {df_im_cl_baseline['Patient'].nunique()}")
-print(f"Timepoints: {df_im_cl_baseline['Timepoint'].value_counts().sort_index()}")
-
-df_im_cl_baseline.drop(columns=['Messdatum', 'date', 'response_category_im','measurement_timepoint', 'response_clean'])
-df_im_baseline.drop(columns='Messdatum')
-df_cl_baseline.drop(columns=['date', 'response_clean', 'measurement_timepoint'])
-TableReport(df_im_cl_baseline, max_plot_columns=130)
+    df_cl_baseline, on=id_cols + [target_col], how='inner', suffixes=('_im', '_cl'))
+print_baseline(df_im_cl_baseline, "Combined")
 
 
+#%% CatBoost baseline: 5-fold GroupKFold, built-in metrics
+# GroupKFold ensures same patient's timepoints stay in the same fold (no data leakage)
+
+def run_catboost_baseline(df, target_col, name):
+    """Run 5-fold GroupKFold CatBoost classifier. Default settings (no tuning).
+    Returns mean_metrics dict, last trained model, X, y, cat_cols, per-fold results df.
+    """
+    # Drop rows where target is missing (can't train on NaN target)
+    df_model = df.dropna(subset=[target_col]).copy()
+
+    feature_cols = [c for c in df_model.columns if c not in id_cols + [target_col]]
+    X = df_model[feature_cols].copy()
+    y = df_model[target_col].copy()
+    groups = df_model['Patient'].values  # for GroupKFold
+
+    # Convert categoricals to string (CatBoost requirement for cat_features)
+    for col in X.select_dtypes(include=['category', 'object']).columns:
+        X[col] = X[col].astype(str)
+    cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+    print(f"\n{'='*60}")
+    print(f"  CatBoost Baseline: {name}")
+    print(f"{'='*60}")
+    print(f"  Samples: {len(X)}, Features: {X.shape[1]}, Cat features: {len(cat_cols)}")
+    print(f"  Patients: {df_model['Patient'].nunique()}")
+
+    # 5-fold GroupKFold
+    gkf = GroupKFold(n_splits=5)
+    fold_results = []
+
+    for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        train_pool = Pool(X_train, y_train, cat_features=cat_cols)
+        test_pool = Pool(X_test, y_test, cat_features=cat_cols)
+
+        model = CatBoostClassifier(
+            random_seed=42,
+            verbose=0,
+            custom_metric=[
+                'Accuracy',
+                'TotalF1:average=Weighted',
+                'AUC:type=Mu',
+                'MCC'
+            ]
+        )
+        model.fit(train_pool, eval_set=test_pool, use_best_model=False)
+
+        # Get metrics from CatBoost's built-in evaluation
+        evals = model.get_evals_result()
+        fold_result = {
+            'Fold': fold + 1,
+            'Accuracy': evals['validation']['Accuracy'][-1],
+            'F1_weighted': evals['validation']['TotalF1:average=Weighted'][-1],
+            'AUC': evals['validation']['AUC:type=Mu'][-1],
+            'MCC': evals['validation']['MCC'][-1],
+            'Train_size': len(train_idx),
+            'Test_size': len(test_idx)
+        }
+        fold_results.append(fold_result)
+        print(f"  Fold {fold+1}: Acc={fold_result['Accuracy']:.4f}  "
+              f"F1={fold_result['F1_weighted']:.4f}  "
+              f"AUC={fold_result['AUC']:.4f}  "
+              f"MCC={fold_result['MCC']:.4f}")
+
+    results_df = pd.DataFrame(fold_results)
+
+    # Calculate mean and std across folds
+    metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+    mean_metrics = {m: results_df[m].mean() for m in metric_cols}
+    std_metrics = {m: results_df[m].std() for m in metric_cols}
+
+    print(f"\n  --- Mean ± Std ---")
+    for m in metric_cols:
+        print(f"  {m}: {mean_metrics[m]:.4f} ± {std_metrics[m]:.4f}")
+
+    return mean_metrics, std_metrics, model, X, y, cat_cols, results_df
 
 
+#%%
+# Run for all three datasets
+print("\n" + "="*70)
+print("  RUNNING CATBOOST BASELINES")
+print("="*70)
+
+mean_im, std_im, model_im, X_im, y_im, cat_im, res_im = run_catboost_baseline(
+    df_im_baseline, target_col, "Immunological")
+
+mean_cl, std_cl, model_cl, X_cl, y_cl, cat_cl, res_cl = run_catboost_baseline(
+    df_cl_baseline, target_col, "Clinical")
+
+mean_comb, std_comb, model_comb, X_comb, y_comb, cat_comb, res_comb = run_catboost_baseline(
+    df_im_cl_baseline, target_col, "Combined")
+
+#%% Summary results table
+
+summary_rows = []
+for name, mean, std in [("Immunological", mean_im, std_im),
+                         ("Clinical", mean_cl, std_cl),
+                         ("Combined", mean_comb, std_comb)]:
+    row = {'Dataset': name}
+    for m in ['Accuracy', 'F1_weighted', 'AUC', 'MCC']:
+        row[m] = f"{mean[m]:.4f} ± {std[m]:.4f}"
+    summary_rows.append(row)
+
+df_summary = pd.DataFrame(summary_rows)
+print("\n" + "="*70)
+print("  BASELINE RESULTS SUMMARY")
+print("="*70)
+print(df_summary.to_string(index=False))
 
 
+#%% SHAP analysis for each model
+# Compute SHAP values and plot summary for each dataset
 
+def compute_and_plot_shap(model, X, name):
+    """Compute SHAP values and create summary plot."""
+    print(f"\n=== SHAP Analysis: {name} ===")
+    print(f"  Classes: {list(model.classes_)}")
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
 
+    # Summary plot (bar) - mean absolute SHAP across all classes
+    shap.summary_plot(shap_values, X, plot_type="bar",
+                      class_names=list(model.classes_),
+                      show=False, max_display=20)
+    plt.title(f"SHAP Feature Importance - {name}")
+    plt.tight_layout()
+    plt.show()
 
+    # Per-class summary plots
+    for i, cls in enumerate(model.classes_):
+        shap.summary_plot(shap_values[i], X, show=False, max_display=15)
+        plt.title(f"SHAP Values - {name} - Class: {cls}")
+        plt.tight_layout()
+        plt.show()
 
+    return shap_values
 
+shap_im = compute_and_plot_shap(model_im, X_im, "Immunological")
+shap_cl = compute_and_plot_shap(model_cl, X_cl, "Clinical")
+shap_comb = compute_and_plot_shap(model_comb, X_comb, "Combined")
