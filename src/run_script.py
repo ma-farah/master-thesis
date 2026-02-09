@@ -1216,7 +1216,6 @@ clinical_names = {
     "kummulative dose (x) - if two targets were applied": "cumulative_dose",
     "FHA": "fha", "kV": "kv", "mA": "ma", "Filter": "filter", "Response": "response",
 }
-
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
 print(f"\n=== Columns renamed: {len(clinical_names)} mappings applied ===")
 
