@@ -1048,130 +1048,507 @@ plt.show()
 
 
 
-#%%############ Cleaning clinical dataset #############################
 
-# Translating and renaming clinical dataset column-naames from german to english
+#%% Data exploration raw clinical dataset
+
+
+
+
+
+#%%############ Cleaning clinical dataset #############################
+# Pipeline: Load -> Forward-fill patient info -> Filter exclusions -> Rename -> Transform columns
+
+# --- Helper function to move column after another column ---
+def move_column_after(df, col_to_move, after_col):
+    """Move a column to position right after another column."""
+    cols = df.columns.tolist()
+    cols.insert(cols.index(after_col) + 1, cols.pop(cols.index(col_to_move)))
+    return df[cols]
+
+# --- Initial data quality check ---
+print("=== Initial Clinical Dataset ===")
+print(f"Shape: {df_cl.shape}")
+TableReport(df_cl, max_plot_columns=180)
+
+
+#%% Step 1: Forward-fill patient-level data within each patient group
+# Rationale: Each patient has one header row with demographics, followed by T1-T5 rows
+
+# Patient-level columns that should be constant across all timepoints for a patient
+patient_level_cols = [
+    'Patient', 'Unnamed: 2', 'Age at start', 'Gender', 'Weight [kg]', 'Height [cm]',
+    'Overweight? BMI', 'Besserung nach Nachuntersuchung laut Arztbrief in %',
+    'Comments questionnaire', 'Diagnosis', 'Target volume', 'single fraction',
+    'kummulative dose (x) - if two targets were applied', 'FHA', 'kV', 'mA',
+    'Filter', 'Response', 'further comments'
+]
+
+# Create patient group identifier and forward-fill within groups
+df_cl['Patient_Group'] = df_cl['Patient'].notna().cumsum()
+df_cl[patient_level_cols + ['Unnamed: 0']] = (
+    df_cl.groupby('Patient_Group')[patient_level_cols + ['Unnamed: 0']].ffill()
+)
+df_cl = df_cl.drop(columns=['Patient_Group'])
+
+# Keep only rows with actual measurement data (Datum exists)
+df_cl_clean = df_cl[df_cl['Datum'].notna()].copy()
+print(f"\nRows with measurement data: {len(df_cl_clean)}")
+
+#%% Step 2: Extract Timepoint and apply exclusion criteria
+
+# Extract Timepoint number from Erfassungszeitpunkt string (e.g., "01.01.1" -> 1)
+df_cl_clean['Timepoint'] = (
+    df_cl_clean['Erfassungszeitpunkt']
+    .str.extract(r'\d+\.\d+\.(\d+)')[0]
+    .astype(float)
+)
+df_cl_clean = move_column_after(df_cl_clean, 'Timepoint', 'Patient')
+
+# Define exclusion keywords (German terms for: excluded, file locked, letter unavailable, questionnaires missing)
+exclude_keywords = ['Ausschluss', 'Akte gesperrt', 'arztbrief kann nicht geöffnet werden', 'Fragebögen fehlen']
+exclude_mask = df_cl_clean['Unnamed: 0'].str.contains('|'.join(exclude_keywords), case=False, na=False)
+
+# Print and apply exclusions
+excluded_patients = df_cl_clean.loc[exclude_mask, 'Patient'].unique()
+print(f"\n=== Exclusion Step 1: Exclusion keywords ===")
+print(f"Excluded {len(excluded_patients)} patients with IDs: {excluded_patients}")
+"""
+removed 18 patient ids: 2.  39.  40.  44.  67.  71.  79.  96.  98. 100. 131. 161. 162. 168.
+216. 243. 260. 264.]
+"""
+df_cl_clean = df_cl_clean[~exclude_mask]
+
+#%% Step 3: Remove patients with invalid Response and drop helper columns
+
+# Identify patients with missing/invalid Response values
+invalid_response_mask = df_cl_clean['Response'].isna() | df_cl_clean['Response'].isin(['n.D', 'n.D.'])
+patients_invalid_response = df_cl_clean.loc[invalid_response_mask, 'Patient'].unique()
+df_cl_clean = df_cl_clean[~df_cl_clean['Patient'].isin(patients_invalid_response)]
+
+print(f"\n=== Exclusion Step 2: Invalid Response ===")
+print(f"Removed {len(patients_invalid_response)} patients with missing/invalid Response values")
+print(f"Removed patient IDs: {patients_invalid_response}")
+"""
+removed 36 ids: [  8.   9.  10.  22.  23.  36.  38.  90.  92. 101. 103. 104. 108. 114.
+ 124. 127. 129. 151. 152. 186. 233. 252. 253. 261. 262. 263. 266. 267.
+ 268. 269. 270. 271. 272. 273. 274. 275.]
+"""
+
+# Drop helper columns no longer needed (check existence to avoid errors)
+cols_to_drop = ['Unnamed: 0', 'Comments questionnaire', 'further comments', 'Unnamed: 2']
+df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
+
+print(f"\n=== After exclusions ===")
+print(f"Remaining: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
+TableReport(df_cl_clean, max_plot_columns=180)
+#%% Step 4: Rename columns (German -> English)
+# Rationale: Standardize column names for easier coding and library compatibility
 
 clinical_names = {
-    # Patientt demographics
-    "Unnamed: 0": "treatment_location",
-    "Patient": "Patient",
-    "Age at start": "age_at_start",
-    "Gender": "sex",
-    "Weight [kg]": "weight_kg",
-    "Height [cm]": "height_cm",
-    "Overweight? BMI": "overweight_bmi",
+    # Patient demographics
+    "Patient": "Patient", "Timepoint": "Timepoint",
+    "Age at start": "age_at_start", "Gender": "gender",
+    "Weight [kg]": "weight_kg", "Height [cm]": "height_cm",
 
     # Dates and timings
-    "Erfassungszeitpunkt": "assessment_timepoint",
-    "Datum": "assessment_date",
-    "Beschwerden seit": "symptoms_since",
-    "vorherige Therapie": "previous_therapy",
+    "Erfassungszeitpunkt": "measurement_timepoint", "Datum": "date",
+    "Beschwerden seit": "symptoms_months", "vorherige Therapie": "previous_therapy",
 
     # Pain characteristics
-    "unter Belastung": "pain_under_load",
-    "bei Nacht": "pain_night",
-    "tagsüber": "pain_daytime",
-    "in Ruhe": "pain_at_rest",
-    "bei ersten Schritten/Morgensteifigkeit": "pain_morning_stiffness",
-    "Schmerzskala": "pain_scale",
-    "Schmerzpunkte": "pain_points",
+    "unter Belastung": "pain_under_load", "bei Nacht": "pain_night",
+    "tagsüber": "pain_daytime", "in Ruhe": "pain_at_rest",
+    "bei ersten Schritten/Morgensteifigkeit": "morning_stiffness",
+    "Schmerzskala": "pain_scale", "Schmerzpunkte": "pain_points",
 
     # Functional limitations
     "Schwierigkeiten körperlicher Anstrengung": "difficulty_physical_exertion",
     "Schwierigkeiten bei längerem Spaziergang": "difficulty_long_walk",
     "Schwierigkeiten bei kurzer Strecke": "difficulty_short_distance",
-    "tagsüber liegen oder sitzen": "lying_or_sitting_daytime",
+    "tagsüber liegen oder sitzen": "difficulty_laying_sitting_daytime",
     "Hilfe Essen, Anziehen, Waschen, Toilette": "help_with_adl",
     "Einschränkung bei Alltag": "limitation_daily_life",
     "Einschränkung bei Hobbys/Freizeit": "limitation_leisure",
 
     # General health symptoms
-    "kurzatmig": "shortness_of_breath",
-    "Schmerzen": "general_pain",
-    "Ausruhen": "need_to_rest",
-    "Schlafstörungen": "sleep_disturbance",
-    "Schwach": "weakness",
-    "Appetitmangel": "loss_of_appetite",
-    "Übelkeit": "nausea",
-    "Erbrochen": "vomiting",
-    "Verstopfung": "constipation",
-    "Durchfall": "diarrhea",
-    "Müde": "fatigue",
+    "kurzatmig": "shortness_of_breath", "Schmerzen": "pain_general",
+    "Ausruhen": "need_to_rest", "Schlafstörungen": "sleep_disturbance",
+    "Schwach": "weakness", "Appetitmangel": "loss_of_appetite",
+    "Übelkeit": "nausea", "Erbrochen": "vomiting",
+    "Verstopfung": "constipation", "Durchfall": "diarrhea", "Müde": "fatigue",
 
-    # Cognitive / phycological impairments
+    # Cognitive/psychological impairments
     "Beeinträchtigung im Alltag": "impairment_daily_life",
     "Konzentrationsstörung": "concentration_difficulty",
-    "angespannt": "feeling_tense",
-    "Sorgen gemacht": "worry",
-    "reizbar": "irritability",
-    "niedergeschlagen": "depressed_mood",
+    "angespannt": "feeling_tense", "Sorgen gemacht": "worry",
+    "reizbar": "irritability", "niedergeschlagen": "depressed",
     "Erinnerungsprobleme": "memory_problems",
 
     # Social impairments
     "Beeinträchtigung Familienleben": "family_life_impairment",
-    "Beeinträchtigung Zusammensein Menschen": "social_interaction_impairment",
+    "Beeinträchtigung Zusammensein Menschen": "social_impairment",
     "finanzielle Schwierigkeiten": "financial_difficulties",
 
     # Quality of life
-    "Gesundheitszustand insgesamt": "overall_health_status",
-    "Lebensqualität insgesamt": "overall_quality_of_life",
+    "Gesundheitszustand insgesamt": "health_status_overall",
+    "Lebensqualität insgesamt": "life_quality_overall",
 
-    # Daily tasks
-    "Strecken": "stretching",
-    "Heben und Tragen von 10kg": "lift_carry_10kg",
-    "Waschen und Abtrocknen": "wash_and_dry",
-    "Bücken": "bending",
-    "Haare Waschen im Waschbecken": "wash_hair",
-    "Sitzen 1h": "sit_1h",
-    "Stehen 30min": "stand_30min",
-    "Aufsetzen": "sit_up",
+    # Daily tasks (physical function)
+    "Strecken": "stretching", "Heben und Tragen von 10kg": "lift_10kg",
+    "Waschen und Abtrocknen": "wash_and_dry", "Bücken": "bending",
+    "Haare Waschen im Waschbecken": "wash_hair", "Sitzen 1h": "sit_1h",
+    "Stehen 30min": "stand_30min", "Aufsetzen": "sit_up",
     "Strümpfe an-/ausziehen": "put_on_socks",
     "Gegenstand aus Sitzposition aufheben": "pick_object_seated",
     "Gegenstand auf Tisch stellen": "place_object_table",
-    "Schnell laufen 100m": "fast_walk_100m",
+    "Schnell laufen 100m": "run_fast_100m",
 
-    # EQ-5D like questionarre
-    "Beweglichkeit/Mobilität": "mobility",
-    "für sich selbst sorgen": "self_care",
-    "alltägliche Tätigkeiten": "usual_activities",
+    # EQ-5D-like questionnaire
+    "Beweglichkeit/Mobilität": "mobility", "für sich selbst sorgen": "self_care",
+    "alltägliche Tätigkeiten": "daily_activities",
     "Schmerzen/körperliche Beschwerden": "pain_discomfort",
     "Angst/Niedergeschlagenheit": "anxiety_depression",
 
     # Clinical outcomes and treatment variables
     "Allgemeinzustand Gesundheut HEUTE": "health_status_today",
     "Besserung nach Nachuntersuchung laut Arztbrief in %": "improvement_percent",
-    "Comments questionnaire": "comments_questionnaire",
-    "Diagnosis": "diagnosis",
-    "Target volume": "target_volume",
+    "Diagnosis": "diagnosis", "Target volume": "target_volume",
     "single fraction": "single_fraction",
     "kummulative dose (x) - if two targets were applied": "cumulative_dose",
-    "FHA": "fha",
-    "kV": "kv",
-    "mA": "ma",
-    "Filter": "filter",
-    "Response": "response",
-    "further comments:": "comments_additional",
+    "FHA": "fha", "kV": "kv", "mA": "ma", "Filter": "filter", "Response": "response",
 }
 
-# map new columnnames to dataset...
+df_cl_clean = df_cl_clean.rename(columns=clinical_names)
+print(f"\n=== Columns renamed: {len(clinical_names)} mappings applied ===")
+
+#%% Step 5: Remove empty data rows and fill improvement_percent for non-responders
+
+# Identify rows with date but no actual questionnaire data (symptoms_months to health_status_today)
+questionnaire_cols = df_cl_clean.loc[:, 'symptoms_months':'health_status_today'].columns
+empty_questionnaire_mask = (
+    df_cl_clean['date'].notna() &
+    df_cl_clean[questionnaire_cols].isna().all(axis=1)
+)
+
+print(f"\n=== Removing empty questionnaire rows ===")
+print(f"Rows to remove: {empty_questionnaire_mask.sum()}")
+if empty_questionnaire_mask.sum() > 0:
+    print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date']])
+df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
+
+# Fill improvement_percent with 0 for patients with "no improvement" response
+# Rationale: If response explicitly says "no improvement", the improvement percentage is 0
+no_improvement_mask = (
+    df_cl_clean['response'].str.lower().str.startswith('no', na=False) &
+    df_cl_clean['improvement_percent'].isna()
+)
+df_cl_clean.loc[no_improvement_mask, 'improvement_percent'] = 0
+print(f"Filled {no_improvement_mask.sum()} improvement_percent values with 0 for 'no improvement' responses")
+
+
+#%% Step 6: Transform column values to usable formats
+# This section handles: gender coding, BMI extraction, symptom duration parsing, therapy encoding
+
+# --- 6a: Gender - standardize 'w' (German: weiblich) to 'f' (female) ---
+df_cl_clean['gender'] = df_cl_clean['gender'].replace('w', 'f')
+print(f"\n=== Gender value counts ===\n{df_cl_clean['gender'].value_counts()}")
+
+# --- 6b: Split "Overweight? BMI" into two separate columns ---
+# Original format: "ja (28.5)" or "nein" or "n.D" (missing)
+def split_bmi_column(df, col_name='Overweight? BMI'):
+    """Extract overweight status and BMI value from combined column."""
+    col_idx = df.columns.get_loc(col_name)
+
+    # Identify missing data markers (n.D, n.D.)
+    is_missing = df[col_name].str.contains(r'^n\.?D\.?$', case=False, na=True)
+
+    # Extract overweight status (ja/nein) and BMI value
+    overweight = df[col_name].str.extract(r'(ja|nein)', flags=re.IGNORECASE)[0].str.lower()
+    bmi = df[col_name].str.extract(r'\((\d+[,.]?\d*)\)?')[0].str.replace(',', '.').astype(float)
+
+    # Set both to NaN where original was missing
+    overweight = overweight.where(~is_missing, pd.NA)
+    bmi = bmi.where(~is_missing, pd.NA)
+
+    # Replace original column with two new columns at same position
+    df = df.drop(columns=[col_name])
+    df.insert(col_idx, 'overweight', overweight)
+    df.insert(col_idx + 1, 'bmi', bmi)
+    return df
+
+df_cl_clean = split_bmi_column(df_cl_clean)
+
+# Verify: Check for patients with overweight status but missing BMI
+missing_bmi_mask = df_cl_clean['bmi'].isna() & df_cl_clean['overweight'].notna()
+print(f"\n=== BMI/Overweight split verification ===")
+print(f"Patients with overweight status but missing BMI: {missing_bmi_mask.sum()}")
+if missing_bmi_mask.sum() > 0:
+    print(df_cl_clean.loc[missing_bmi_mask, ['Patient', 'overweight']])
 
 
 
-# cleaning up column names in cliical dataset
-immu_names = {
-    "Patient": "patient_id",
-    "Timepoint": "timepoint",
-    "Messdatum": "measurement_date",
-    "ID_Subset": "subset_id",
-}
+#%% --- 6c: Convert symptom duration to numeric months ---
+# Original format: "3 Monate", "2 Jahre", "6-12 Mo.", "< 1 J" etc.
+def parse_symptoms_duration(series):
+    """Convert symptom duration strings to numeric months.
+    Handles single values, ranges (takes midpoint), years/months.
+    """
+    # Extract numbers: single value or range (start-end)
+    single = series.str.extract(r'[<>~]?\s*(\d+)(?!\s*-\s*\d)')[0].astype(float)
+    range_start = series.str.extract(r'[<>~]?\s*(\d+)\s*-\s*\d+')[0].astype(float)
+    range_end = series.str.extract(r'[<>~]?\s*\d+\s*-\s*(\d+)')[0].astype(float)
 
-# map new columnnames to dataset...
+    # Use midpoint for ranges, single value otherwise
+    number = range_start.add(range_end).div(2).fillna(single)
+
+    # Detect if unit is years (J, Jahr, Jahre) vs months (Mo, Monat, Monate)
+    unit = series.str.extract(r'(Monat\w*|Mo\.?|Jahr\w*|J\.?)', flags=re.IGNORECASE)[0]
+    is_years = unit.str.lower().str.startswith('j').fillna(False)
+
+    # Convert years to months
+    return number.where(~is_years, number * 12)
+
+df_cl_clean['symptoms_months'] = parse_symptoms_duration(df_cl_clean['symptoms_months'])
+
+# Verify symptom duration conversion
+print(f"\n=== Symptom duration conversion verification ===")
+print(f"Dtype: {df_cl_clean['symptoms_months'].dtype}")
+print(f"Range: {df_cl_clean['symptoms_months'].min()} - {df_cl_clean['symptoms_months'].max()} months")
+print(f"Missing: {df_cl_clean['symptoms_months'].isna().sum()}")
+print(f"Sample (Patient 16):\n{df_cl_clean.loc[df_cl_clean['Patient'] == 16, ['Timepoint', 'symptoms_months']]}")
+# NB: How to handle words, comments, and dates in this column?
+
+#%% --- 6d: Encode previous therapy as binary columns ---
+# Original format: comma-separated numbers like "1,3,5" indicating therapy types 1-7
+def encode_therapy_columns(df, col_name='previous_therapy'):
+    """Create binary columns for each therapy type (1-7) from comma-separated string."""
+    col_idx = df.columns.get_loc(col_name)
+
+    # Create binary columns directly at the correct position
+    for i in range(1, 8):
+        binary_col = df[col_name].str.contains(rf'\b{i}\b', na=False).astype(int)
+        df.insert(col_idx + i - 1, f'previous_therapy_{i}', binary_col)
+
+    # Drop original column
+    return df.drop(columns=[col_name])
+
+df_cl_clean = encode_therapy_columns(df_cl_clean)
+
+# Verify therapy encoding
+print(f"\n=== Previous therapy encoding verification ===")
+therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)]
+print(df_cl_clean[therapy_cols].sum())
 
 
+#%% Step 7: Set proper datatypes
+# Integer columns: Patient ID, Timepoint, Age
+# Date columns: measurement date
+# Categorical: gender, diagnosis, response, etc.
+# Float: questionnaire scores (PROBLEM: some contain comments - see note below)
+
+# --- Define column type mappings ---
+int_cols = ['Patient', 'Timepoint', 'age_at_start']
+date_cols = ['date']
+
+# --- Apply conversions ---
+# Integer columns (use Int64 for nullable integers)
+for col in int_cols:
+    df_cl_clean[col] = pd.to_numeric(df_cl_clean[col], errors='coerce').astype('Int64')
+# Date column
+for col in date_cols:
+    df_cl_clean[col] = pd.to_datetime(df_cl_clean[col], errors='coerce')
 
 
+# PROBLEM: Cannot convert questionnaire columns to float because some entries contain comments
+# TODO: Need to extract numeric values and handle/preserve comments separately
 
+# --- Verification ---
+print(f"\n=== Final datatype verification ===")
+print(f"Shape: {df_cl_clean.shape}")
+print(f"\nInteger columns:")
+for col in int_cols:
+    print(f"  {col}: {df_cl_clean[col].dtype}, missing: {df_cl_clean[col].isna().sum()}")
+print(f"\nCategorical columns:")
+for col in cat_cols:
+    if col in df_cl_clean.columns:
+        print(f"  {col}: {df_cl_clean[col].nunique()} unique values")
+print(f"\nDate range: {df_cl_clean['date'].min()} to {df_cl_clean['date'].max()}")
+
+TableReport(df_cl_clean, max_plot_columns=100)
+
+#%%
+# simplified response variable - only containing CR, PR or NI for no improvement.
+
+
+# a few columns with entries indiciating partial response, change into PR:
+# recovery only on the right side", "improvement", "initial improvement", "subtotal remission" needs to be assigned to PR
+# one column with typo "no imrovement" needs to be assigned to NI
+
+# if a column has CR and no improvement in the same row -> assign as PR partial response.
+# Create working copy
+
+df_cl_clean['response_clean'] = df_cl_clean['response'].astype(str).str.strip().str.lower()
+
+# Fix specific entries -> PR
+pr_patterns = ['recovery only on the right side', 'improvement', 'initial improvement', 'subtotal remission']
+df_cl_clean.loc[df_cl_clean['response_clean'].isin(pr_patterns), 'response_clean'] = 'pr'
+
+# Fix typo -> NI
+df_cl_clean['response_clean'] = df_cl_clean['response_clean'].str.replace('no imrovement', 'no improvement')
+
+# Fix mixed CR + no improvement -> PR
+has_cr = df_cl_clean['response_clean'].str.contains(r'\bcr\b', na=False)
+has_ni = df_cl_clean['response_clean'].str.contains(r'no\s*improve', na=False)
+df_cl_clean.loc[has_cr & has_ni, 'response_clean'] = 'pr'
+
+# Assign categories (priority: CR > PR > NI)
+df_cl_clean['response_category'] = pd.NA
+df_cl_clean.loc[has_ni & ~has_cr, 'response_category'] = 'NI'
+df_cl_clean.loc[df_cl_clean['response_clean'].str.contains(r'\bpr\b', na=False), 'response_category'] = 'PR'
+df_cl_clean.loc[df_cl_clean['response_clean'].str.contains(r'\bcr\b', na=False), 'response_category'] = 'CR'
+df_cl_clean.drop(columns='response_clean')
+# Verification
+print("=== Response category counts ===")
+print(df_cl_clean['response_category'].value_counts(dropna=False))
+print("\n=== Unique mappings ===")
+print(df_cl_clean[['response', 'response_category']].drop_duplicates().sort_values('response_category').to_string())
+
+TableReport(df_cl_clean, max_plot_columns=100)
+
+#%% Reduce clinical dataset for modeling (simplfy)
+
+# remove all columns with more than 25% missing variables. 
+
+
+missing_pct = df_cl_clean.isna().mean()
+cols_to_keep = missing_pct[missing_pct <= 0.35].index
+df_cl_red= df_cl_clean[cols_to_keep].copy()
+
+# Verification
+print(f"Columns before: {len(df_cl_clean.columns)}")
+print(f"Columns after: {len(df_cl_red.columns)}")
+print(f"Dropped {len(df_cl_clean.columns) - len(df_cl_red.columns)} columns with >35% missing:")
+print(missing_pct[missing_pct > 0.35].sort_values(ascending=False))
+
+TableReport(df_cl_red, max_plot_columns=100)
 
 #%% Basline model for immunological dataset - CatBoost
+
+TableReport(df_im_imputed, max_plot_columns=100)
+
+#%% Step 9: Prepare baseline datasets for modeling
+
+# --- First, check what we have ---
+print("=== Dataset overview ===")
+print(f"Immunological (df_im_imputed): {df_im_imputed['Patient'].nunique()} patients, {len(df_im_imputed)} rows")
+print(f"Clinical (df_cl_reduced): {df_cl_red['Patient'].nunique()} patients, {len(df_cl_reduced)} rows")
+
+# --- Check common patients ---
+im_patients = set(df_im_imputed['Patient'].unique())
+cl_patients = set(df_cl_red['Patient'].unique())
+common_patients = im_patients & cl_patients
+
+print(f"\n=== Patient overlap ===")
+print(f"Immunological only: {len(im_patients - cl_patients)}")
+print(f"Clinical only: {len(cl_patients - im_patients)}")
+print(f"Common patients: {len(common_patients)}")
+
+#%% Check timepoint availability for common patients
+
+# Filter to common patients
+df_im_common = df_im_imputed[df_im_imputed['Patient'].isin(common_patients)]
+df_cl_common = df_cl_red[df_cl_red['Patient'].isin(common_patients)]
+
+# Check which timepoints each patient has in BOTH datasets
+im_pt = df_im_common.groupby('Patient')['Timepoint'].apply(set)
+cl_pt = df_cl_common.groupby('Patient')['Timepoint'].apply(set)
+
+# Combine to find common timepoints per patient
+common_timepoints = pd.DataFrame({'im': im_pt, 'cl': cl_pt}).dropna()
+common_timepoints['both'] = common_timepoints.apply(lambda x: x['im'] & x['cl'], axis=1)
+
+print("\n=== Timepoint availability (common patients with matching timepoints) ===")
+# Count patients with T1+T2+T3
+has_t123 = common_timepoints['both'].apply(lambda x: {1, 2, 3}.issubset(x)).sum()
+print(f"Patients with T1 + T2 + T3: {has_t123}")
+
+# Count patients with T1+T2
+has_t12 = common_timepoints['both'].apply(lambda x: {1, 2}.issubset(x)).sum()
+print(f"Patients with T1 + T2: {has_t12}")
+
+# Count patients with just T1
+has_t1 = common_timepoints['both'].apply(lambda x: 1 in x).sum()
+print(f"Patients with T1: {has_t1}")
+
+"""
+Immunological (df_im_imputed): 264 patients, 822 rows
+Clinical (df_cl_reduced): 206 patients, 687 rows
+
+=== Patient overlap ===
+Immunological only: 58
+Clinical only: 0
+Common patients: 206
+
+Patients with T1 + T2 + T3: 84
+Patients with T1 + T2: 140
+Patients with T1: 182
+
+"""
+# choosing timepoints 1 and 2, possible 1,2 and 3.
+
+#%% Create response lookup from clinical data (one response per patient)
+
+# Response should be same across all timepoints for a patient - take first
+response_lookup = (
+    df_cl_reduced[['Patient', 'response_category']]
+    .drop_duplicates(subset='Patient')
+    .set_index('Patient')['response_category']
+)
+
+print(f"\n=== Response category distribution ===")
+print(response_lookup.value_counts())
+
+
+# --- df_im_baseline: immunological + response_category ---
+df_im_baseline = df_im_imputed.copy()
+df_im_baseline['response_category'] = df_im_baseline['Patient'].map(response_lookup)
+df_im_baseline = df_im_baseline.dropna(subset=['response_category'])  # Drop patients without response
+
+print(f"\n=== df_im_baseline ===")
+print(f"Shape: {df_im_baseline.shape}")
+print(f"Patients: {df_im_baseline['Patient'].nunique()}")
+
+# --- df_cl_baseline: clinical reduced (already has response_category) ---
+df_cl_baseline = df_cl_reduced.copy()
+
+print(f"\n=== df_cl_baseline ===")
+print(f"Shape: {df_cl_baseline.shape}")
+print(f"Patients: {df_cl_baseline['Patient'].nunique()}")
+
+# --- df_im_cl_baseline: combined (common patients + matching timepoints) ---
+df_im_cl_baseline = df_im_baseline.merge(
+    df_cl_baseline,
+    on=['Patient', 'Timepoint'],
+    how='inner',
+    suffixes=('_im', '_cl')
+)
+
+print(f"\n=== df_im_cl_baseline (combined) ===")
+print(f"Shape: {df_im_cl_baseline.shape}")
+print(f"Patients: {df_im_cl_baseline['Patient'].nunique()}")
+print(f"Timepoints: {df_im_cl_baseline['Timepoint'].value_counts().sort_index()}")
+
+df_im_cl_baseline.drop(columns=['Messdatum', 'date', 'response_category_im','measurement_timepoint', 'response_clean'])
+df_im_baseline.drop(columns='Messdatum')
+df_cl_baseline.drop(columns=['date', 'response_clean', 'measurement_timepoint'])
+TableReport(df_im_cl_baseline, max_plot_columns=130)
+
+
+
+
+
+
+
+
+
+
 
