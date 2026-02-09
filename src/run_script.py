@@ -1628,7 +1628,6 @@ response_map = df_cl_reduced1[['Patient', 'response_category']].drop_duplicates(
 df_im_with_response = df_im_reduced.merge(response_map, on='Patient', how='left')
 df_im_with_response = df_im_with_response.dropna(subset=[target_col])
 
-
 # --- Step 2: Create combined dataset (all timepoints), merge on Patient + Timepoint ---
 # response_category already in df_im_with_response from Step 1, drop from clinical to avoid duplication
 df_cl_for_merge = df_cl_reduced1.drop(columns=[target_col], errors='ignore')
@@ -1651,9 +1650,9 @@ TableReport(df_combined_baseline, max_plot_columns=180)
 
 def run_catboost_baseline(df_model, target_col, name):
     """Run 5-fold StratifiedKFold CatBoost classifier on T1 data. No tuning.
-    Returns results_df (per-fold + mean), last trained model, X.
+    Returns results_df (per-fold + mean), last trained model, X, y_pred.
     """
-    exclude = ['Patient', 'Timepoint', 'improvement_percent', 'response', target_col] 
+    exclude = ['Patient', 'Timepoint', 'improvement_percent', 'response', target_col]
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
     y = df_model[target_col].copy()
@@ -1670,6 +1669,7 @@ def run_catboost_baseline(df_model, target_col, name):
 
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     fold_results = []
+    y_pred = pd.Series(index=X.index, dtype='object')
 
     for fold, (train_idx, test_idx) in enumerate(skf.split(X, y)):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
@@ -1681,25 +1681,27 @@ def run_catboost_baseline(df_model, target_col, name):
         model = CatBoostClassifier(
             random_seed=42,
             verbose=0,
-            iterations=500, # kernel crashing with 1000.
-            custom_metric=[
-                'Accuracy',
-                'TotalF1:average=Weighted',
-                'AUC:type=Mu',
-                'MCC', 
-            ]
+            iterations=500,
+            auto_class_weights='Balanced',
         )
         model.fit(train_pool, eval_set=test_pool, use_best_model=False)
 
-        # Get metrics from CatBoost's built-in evaluation
-        evals = model.get_evals_result()
+        # Predict class labels
+        preds = model.predict(test_pool, prediction_type='Class').flatten()
+        y_pred.iloc[test_idx] = preds
+
+        # Compute metrics using CatBoost eval_metrics (post-training)
+        metrics = model.eval_metrics(
+            test_pool,
+            ['Accuracy', 'TotalF1:average=Weighted', 'AUC:type=Mu', 'MCC']
+        )
 
         fold_result = {
             'Fold': fold + 1,
-            'Accuracy': evals['validation']['Accuracy'][-1],
-            'F1_weighted': evals['validation']['TotalF1:average=Weighted'][-1],
-            'AUC': evals['validation']['AUC:type=Mu'][-1],
-            'MCC': evals['validation']['MCC'][-1],
+            'Accuracy': metrics['Accuracy'][-1],
+            'F1_weighted': metrics['TotalF1:average=Weighted'][-1],
+            'AUC': metrics['AUC:type=Mu'][-1],
+            'MCC': metrics['MCC'][-1],
             'Train_size': len(train_idx),
             'Test_size': len(test_idx)
         }
@@ -1722,7 +1724,7 @@ def run_catboost_baseline(df_model, target_col, name):
     for m in metric_cols:
         print(f"  {m}: {mean_row[m]:.4f}")
 
-    return results_df, model, X
+    return results_df, model, X, y_pred
 
 
 #%%
@@ -1732,14 +1734,13 @@ print("  RUNNING CATBOOST BASELINES")
 print("="*70)
 
 target_col = 'response_category'
-
-res_im, model_im, X_im = run_catboost_baseline(
+res_im, model_im, X_im, y_pred_im = run_catboost_baseline(
     df_im_baseline, target_col, "Immunological")
 
-res_cl, model_cl, X_cl = run_catboost_baseline(
+res_cl, model_cl, X_cl, y_pred_cl = run_catboost_baseline(
     df_cl_baseline, target_col, "Clinical")
 
-res_comb, model_comb, X_comb = run_catboost_baseline(
+res_comb, model_comb, X_comb, y_pred_comb = run_catboost_baseline(
     df_combined_baseline, target_col, "Combined")
 
 
@@ -1759,8 +1760,8 @@ for name, res in [("Immunological", res_im),
     summary_rows.append(row)
 
 df_summary = pd.DataFrame(summary_rows)
-print("\n" + "="*70)
-print("  BASELINE RESULTS SUMMARY")
+print("\n")
+print("  BASELINE CATBOOST MODEL (T1) RESULTS SUMMARY")
 print("="*70)
 print(df_summary.to_string(index=False))
 
@@ -1771,29 +1772,187 @@ print(df_summary.to_string(index=False))
 def compute_and_plot_shap(model, X, name):
     """Compute SHAP values and create summary plot."""
     print(f"\n=== SHAP Analysis: {name} ===")
-    print(f"  Classes: {list(model.classes_)}")
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
+
+    # Convert list of arrays to numpy array for consistent shape handling
+    if isinstance(shap_values, list):
+        shap_values = np.array(shap_values)
+    print(f"  SHAP values shape: {shap_values.shape}, X shape: {X.shape}")
 
     # Summary plot (bar) - mean absolute SHAP across all classes
     shap.summary_plot(shap_values, X, plot_type="bar",
                       class_names=list(model.classes_),
-                      show=False, max_display=20)
+                      show=False, max_display=25)
     plt.title(f"SHAP Feature Importance - {name}")
     plt.tight_layout()
     plt.show()
-
-    # Per-class summary plots
-    for i, cls in enumerate(model.classes_):
-        shap.summary_plot(shap_values[i], X, show=False, max_display=15)
-        plt.title(f"SHAP Values - {name} - Class: {cls}")
-        plt.tight_layout()
-        plt.show()
-
     return shap_values
 
 shap_im = compute_and_plot_shap(model_im, X_im, "Immunological")
 shap_cl = compute_and_plot_shap(model_cl, X_cl, "Clinical")
 shap_comb = compute_and_plot_shap(model_comb, X_comb, "Combined")
+
+
+#%% ===================================================================
+# BASELINE MODEL 2: T1 + T2 (patients with both timepoints)
+# =====================================================================
+from sklearn.model_selection import StratifiedGroupKFold
+
+# --- Step 1: Find patients that have BOTH T1 and T2 ---
+patients_t1 = set(df_im_with_response[df_im_with_response['Timepoint'] == 1]['Patient'])
+patients_t2 = set(df_im_with_response[df_im_with_response['Timepoint'] == 2]['Patient'])
+patients_t1t2_im = patients_t1 & patients_t2
+
+patients_t1_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 1]['Patient'])
+patients_t2_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 2]['Patient'])
+patients_t1t2_cl = patients_t1_cl & patients_t2_cl
+
+# --- Step 2: Filter to T1+T2 patients only ---
+df_im_baseline_t1t2 = df_im_with_response[
+    (df_im_with_response['Patient'].isin(patients_t1t2_im)) &
+    (df_im_with_response['Timepoint'].isin([1, 2]))
+].copy()
+
+df_cl_baseline_t1t2 = df_cl_reduced1[
+    (df_cl_reduced1['Patient'].isin(patients_t1t2_cl)) &
+    (df_cl_reduced1['Timepoint'].isin([1, 2]))
+].copy()
+
+df_combined_baseline_t1t2 = df_combined[
+    (df_combined['Patient'].isin(patients_t1t2_im & patients_t1t2_cl)) &
+    (df_combined['Timepoint'].isin([1, 2]))
+].copy()
+
+print(f"\n=== T1+T2 Baseline Datasets ===")
+print(f"Immunological: {df_im_baseline_t1t2.shape}, Patients: {df_im_baseline_t1t2['Patient'].nunique()}")
+print(f"Clinical: {df_cl_baseline_t1t2.shape}, Patients: {df_cl_baseline_t1t2['Patient'].nunique()}")
+print(f"Combined: {df_combined_baseline_t1t2.shape}, Patients: {df_combined_baseline_t1t2['Patient'].nunique()}")
+print(f"Target distribution:\n{df_im_baseline_t1t2[target_col].value_counts().to_string()}")
+
+
+#%% CatBoost baseline T1+T2: 5-fold StratifiedGroupKFold
+
+def run_catboost_baseline_grouped(df_model, target_col, name):
+    """Run 5-fold StratifiedGroupKFold CatBoost classifier on T1+T2 data. No tuning.
+    Groups by Patient so both timepoints stay in the same fold.
+    Returns results_df (per-fold + mean), last trained model, X, y_pred.
+    """
+    exclude = ['Patient', 'Timepoint', 'improvement_percent', 'response', target_col]
+    feature_cols = [c for c in df_model.columns if c not in exclude]
+    X = df_model[feature_cols].copy()
+    y = df_model[target_col].copy()
+    groups = df_model['Patient'].values
+
+    # Convert categoricals to string (CatBoost requirement for cat_features)
+    for col in X.select_dtypes(include=['category', 'object']).columns:
+        X[col] = X[col].astype(str)
+    cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+    print(f"\n{'='*60}")
+    print(f"  CatBoost Baseline (T1+T2): {name}")
+    print(f"{'='*60}")
+    print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
+
+    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    fold_results = []
+    y_pred = pd.Series(index=X.index, dtype='object')
+
+    for fold, (train_idx, test_idx) in enumerate(sgkf.split(X, y, groups)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        train_pool = Pool(X_train, y_train, cat_features=cat_cols)
+        test_pool = Pool(X_test, y_test, cat_features=cat_cols)
+
+        model = CatBoostClassifier(
+            random_seed=42,
+            verbose=0,
+            iterations=500,
+            auto_class_weights='Balanced',
+        )
+        model.fit(train_pool, eval_set=test_pool, use_best_model=False)
+
+        # Predict class labels
+        preds = model.predict(test_pool, prediction_type='Class').flatten()
+        y_pred.iloc[test_idx] = preds
+
+        # Compute metrics using CatBoost eval_metrics (post-training)
+        metrics = model.eval_metrics(
+            test_pool,
+            ['Accuracy', 'TotalF1:average=Weighted', 'AUC:type=Mu', 'MCC']
+        )
+
+        fold_result = {
+            'Fold': fold + 1,
+            'Accuracy': metrics['Accuracy'][-1],
+            'F1_weighted': metrics['TotalF1:average=Weighted'][-1],
+            'AUC': metrics['AUC:type=Mu'][-1],
+            'MCC': metrics['MCC'][-1],
+            'Train_size': len(train_idx),
+            'Test_size': len(test_idx)
+        }
+        fold_results.append(fold_result)
+
+        print(f"  Fold {fold+1}: Acc={fold_result['Accuracy']:.4f}  "
+              f"F1={fold_result['F1_weighted']:.4f}  "
+              f"AUC={fold_result['AUC']:.4f}  "
+              f"MCC={fold_result['MCC']:.4f}")
+
+    results_df = pd.DataFrame(fold_results)
+
+    # Add mean row
+    metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+    mean_row = {m: results_df[m].mean() for m in metric_cols}
+    mean_row['Fold'] = 'Mean'
+    results_df = pd.concat([results_df, pd.DataFrame([mean_row])], ignore_index=True)
+
+    print(f"\n  Mean Across 5 Folds")
+    for m in metric_cols:
+        print(f"  {m}: {mean_row[m]:.4f}")
+
+    return results_df, model, X, y_pred
+
+
+#%% Run T1+T2 baselines
+print("\n" + "="*70)
+print("  RUNNING CATBOOST BASELINES (T1+T2)")
+print("="*70)
+
+res_im_t1t2, model_im_t1t2, X_im_t1t2, y_pred_im_t1t2 = run_catboost_baseline_grouped(
+    df_im_baseline_t1t2, target_col, "Immunological")
+
+res_cl_t1t2, model_cl_t1t2, X_cl_t1t2, y_pred_cl_t1t2 = run_catboost_baseline_grouped(
+    df_cl_baseline_t1t2, target_col, "Clinical")
+
+res_comb_t1t2, model_comb_t1t2, X_comb_t1t2, y_pred_comb_t1t2 = run_catboost_baseline_grouped(
+    df_combined_baseline_t1t2, target_col, "Combined")
+
+
+#%% T1+T2 Summary results table
+summary_rows_t1t2 = []
+metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+for name, res in [("Immunological", res_im_t1t2),
+                   ("Clinical", res_cl_t1t2),
+                   ("Combined", res_comb_t1t2)]:
+    fold_rows = res[res['Fold'] != 'Mean']
+    row = {'Dataset': name}
+    for m in metric_cols:
+        mean_val = fold_rows[m].mean()
+        std_val = fold_rows[m].std()
+        row[m] = f"{mean_val:.4f} ± {std_val:.4f}"
+    summary_rows_t1t2.append(row)
+
+df_summary_t1t2 = pd.DataFrame(summary_rows_t1t2)
+print("\n")
+print("  BASELINE CATBOOST MODEL (T1+T2) RESULTS SUMMARY")
+print("="*70)
+print(df_summary_t1t2.to_string(index=False))
+
+
+#%% SHAP analysis for T1+T2 models
+shap_im_t1t2 = compute_and_plot_shap(model_im_t1t2, X_im_t1t2, "Immunological (T1+T2)")
+shap_cl_t1t2 = compute_and_plot_shap(model_cl_t1t2, X_cl_t1t2, "Clinical (T1+T2)")
+shap_comb_t1t2 = compute_and_plot_shap(model_comb_t1t2, X_comb_t1t2, "Combined (T1+T2)")
 
 
