@@ -1219,6 +1219,7 @@ clinical_names = {
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
 print(f"\n Columns renamed: {len(clinical_names)}  ")
 
+
 #%% Step 5: Remove empty data rows and fill improvement_percent for non-responders
 
 # Identify rows with date but no actual questionnaire data (symptoms_months to health_status_today)
@@ -1393,8 +1394,8 @@ TableReport(df_cl_clean, max_plot_columns=100)
 # one column with typo "no imrovement" needs to be assigned to NI
 
 def create_response_category(df, response_col='response'):
-    """Create response_category (CR, PR, NI) from raw response column.
-    Priority: CR > PR > NI. Mixed responses (CR+NI, CR+PR) -> PR.
+    """Create variable response_category (CR, PR, NI) from the raw "response" column.
+    With groups CR, PR, NI. Mixed responses (CR+NI, CR+PR) -> PR.
     """
     df = df.copy()
     clean = df[response_col].astype(str).str.strip().str.lower()
@@ -1427,6 +1428,24 @@ def create_response_category(df, response_col='response'):
 
 # creating cleaned response category
 df_cl_reduced1 = create_response_category(df_cl_reduced, response_col='response')
+
+#%% Plot response category distribution (unique patients)
+response_per_patient = df_cl_reduced1.drop_duplicates(subset='Patient')[['Patient', 'response_category']]
+counts = response_per_patient['response_category'].value_counts()
+
+fig, ax = plt.subplots(figsize=(6, 4))
+counts.plot(kind='bar', ax=ax, color=sns.color_palette('mako', n_colors=len(counts)))
+ax.set_title('Response Category Distribution (unique patients) in Clin. Dataset')
+ax.set_xlabel('Response Category')
+ax.set_ylabel('Number of Patients')
+for i, (cat, count) in enumerate(counts.items()):
+    ax.text(i, count + 1, str(count), ha='center', fontweight='bold')
+ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+plt.tight_layout()
+plt.show()
+
+print(f"Total unique patients: {len(response_per_patient)}")
+print(counts.to_string())
 
 
 #%%  improvement_percent variable as a target variable
@@ -1652,7 +1671,23 @@ def run_catboost_baseline(df_model, target_col, name):
     """Run 5-fold StratifiedKFold CatBoost classifier on T1 data. No tuning.
     Returns results_df (per-fold + mean), last trained model, X, y_pred.
     """
-    exclude = ['Patient', 'Timepoint', 'improvement_percent', 'response', target_col]
+    # Base exclusion list
+    exclude = ['Patient', 'Timepoint', target_col]
+    
+    # Add ALL leaky columns: response and improvement_percent (any variant)
+    # Catches: 'response', 'response_T1', 'response_T2', 'response_im', 'response_cl'
+    # Catches: 'improvement_percent', 'improvement_percent_T1', 'improvement_percent_T2', etc.
+    leaky_patterns = ['response', 'improvement_percent']
+    for col in df_model.columns:
+        for pattern in leaky_patterns:
+            if pattern in col.lower():
+                exclude.append(col)
+                break
+    
+    # Remove duplicates and non-existent columns
+    exclude = list(set([col for col in exclude if col in df_model.columns]))
+    
+    
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
     y = df_model[target_col].copy()
@@ -1663,7 +1698,7 @@ def run_catboost_baseline(df_model, target_col, name):
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
 
     print(f"\n{'='*60}")
-    print(f"  CatBoost Baseline (T1 only): {name}")
+    print(f"  CatBoost Baseline: {name}")
     print(f"{'='*60}")
     print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
 
@@ -1681,8 +1716,7 @@ def run_catboost_baseline(df_model, target_col, name):
         model = CatBoostClassifier(
             random_seed=42,
             verbose=0,
-            iterations=500,
-            auto_class_weights='Balanced',
+            iterations=500
         )
         model.fit(train_pool, eval_set=test_pool, use_best_model=False)
 
@@ -1699,7 +1733,7 @@ def run_catboost_baseline(df_model, target_col, name):
         fold_result = {
             'Fold': fold + 1,
             'Accuracy': metrics['Accuracy'][-1],
-            'F1_weighted': metrics['TotalF1:average=Weighted'][-1],
+            'F1_total': metrics['TotalF1:average=Weighted'][-1],
             'AUC': metrics['AUC:type=Mu'][-1],
             'MCC': metrics['MCC'][-1],
             'Train_size': len(train_idx),
@@ -1708,14 +1742,14 @@ def run_catboost_baseline(df_model, target_col, name):
         fold_results.append(fold_result)
 
         print(f"  Fold {fold+1}: Acc={fold_result['Accuracy']:.4f}  "
-              f"F1={fold_result['F1_weighted']:.4f}  "
+              f"F1={fold_result['F1_total']:.4f}  "
               f"AUC={fold_result['AUC']:.4f}  "
               f"MCC={fold_result['MCC']:.4f}")
 
     results_df = pd.DataFrame(fold_results)
 
     # Add mean row
-    metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+    metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
     mean_row = {m: results_df[m].mean() for m in metric_cols}
     mean_row['Fold'] = 'Mean'
     results_df = pd.concat([results_df, pd.DataFrame([mean_row])], ignore_index=True)
@@ -1735,19 +1769,19 @@ print("="*70)
 
 target_col = 'response_category'
 res_im, model_im, X_im, y_pred_im = run_catboost_baseline(
-    df_im_baseline, target_col, "Immunological")
+    df_im_baseline, target_col, "Immunological (T1 only)")
 
 res_cl, model_cl, X_cl, y_pred_cl = run_catboost_baseline(
-    df_cl_baseline, target_col, "Clinical")
+    df_cl_baseline, target_col, "Clinical (T1 only")
 
 res_comb, model_comb, X_comb, y_pred_comb = run_catboost_baseline(
-    df_combined_baseline, target_col, "Combined")
+    df_combined_baseline, target_col, "Combined (T1 only")
 
 
 #%% Summary results table
 
 summary_rows = []
-metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
 for name, res in [("Immunological", res_im),
                    ("Clinical", res_cl),
                    ("Combined", res_comb)]:
@@ -1878,11 +1912,11 @@ print(f"Clinical: {df_cl_baseline_t1t2.shape}, Patients: {df_cl_baseline_t1t2['P
 print(f"Combined: {df_combined_baseline_t1t2.shape}, Patients: {df_combined_baseline_t1t2['Patient'].nunique()}")
 print(f"Target distribution:\n{df_im_baseline_t1t2[target_col].value_counts().to_string()}")
 
-TableReport(df_im_baseline_t1t2, max_plot_columns=320)
+TableReport(df_combined_baseline_t1t2, max_plot_columns=320)
 
 #%% Run T1+T2 baselines (wide format = one row per patient, reuse run_catboost_baseline)
 print("\n" + "="*70)
-print("  RUNNING CATBOOST BASELINES (T1+T2 wide)")
+print("  RUNNING CATBOOST BASELINE MODELS (T1+T2 wide)")
 print("="*70)
 
 target_col= 'response_category'
@@ -1899,7 +1933,7 @@ res_comb_t1t2, model_comb_t1t2, X_comb_t1t2, y_pred_comb_t1t2 = run_catboost_bas
 
 #%% T1+T2 Summary results table
 summary_rows_t1t2 = []
-metric_cols = ['Accuracy', 'F1_weighted', 'AUC', 'MCC']
+metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
 for name, res in [("Immunological", res_im_t1t2),
                    ("Clinical", res_cl_t1t2),
                    ("Combined", res_comb_t1t2)]:
@@ -1924,3 +1958,5 @@ shap_cl_t1t2 = compute_and_plot_shap(model_cl_t1t2, X_cl_t1t2, "Clinical (T1+T2)
 shap_comb_t1t2 = compute_and_plot_shap(model_comb_t1t2, X_comb_t1t2, "Combined (T1+T2)")
 
 
+
+# %%
