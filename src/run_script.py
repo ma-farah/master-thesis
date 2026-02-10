@@ -1219,7 +1219,6 @@ clinical_names = {
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
 print(f"\n Columns renamed: {len(clinical_names)}  ")
 
-
 #%% Step 5: Remove empty data rows and fill improvement_percent for non-responders
 
 # Identify rows with date but no actual questionnaire data (symptoms_months to health_status_today)
@@ -1702,7 +1701,7 @@ def run_catboost_baseline(df_model, target_col, name):
     print(f"{'='*60}")
     print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=5, n_repeats=5, random_state=42)
     fold_results = []
     y_pred = pd.Series(index=X.index, dtype='object')
 
@@ -1716,7 +1715,7 @@ def run_catboost_baseline(df_model, target_col, name):
         model = CatBoostClassifier(
             random_seed=42,
             verbose=0,
-            iterations=500
+            iterations=0 # my laptop crashes due to large dataset
         )
         model.fit(train_pool, eval_set=test_pool, use_best_model=False)
 
@@ -1950,6 +1949,52 @@ print("\n")
 print("  BASELINE CATBOOST MODEL (T1+T2 wide) RESULTS SUMMARY")
 print("="*70)
 print(df_summary_t1t2.to_string(index=False))
+
+
+#%% Classification plots for T1+T2 models
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
+
+target_col = 'response_category'
+class_order = ['CR', 'PR', 'NI']
+
+# --- Confusion matrices (one per dataset) ---
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (name, df_src, y_pred) in zip(axes, [
+    ("Immunological (T1+T2)", df_im_baseline_t1t2, y_pred_im_t1t2),
+    ("Clinical (T1+T2)", df_cl_baseline_t1t2, y_pred_cl_t1t2),
+    ("Combined (T1+T2)", df_combined_baseline_t1t2, y_pred_comb_t1t2),
+]):
+    y_true = df_src[target_col].loc[y_pred.index]
+    cm = confusion_matrix(y_true, y_pred, labels=class_order)
+    disp = ConfusionMatrixDisplay(cm, display_labels=class_order)
+    disp.plot(ax=ax, cmap='Blues', colorbar=False)
+    ax.set_title(name, fontsize=12)
+fig.suptitle("Confusion Matrices — CatBoost Baseline (T1+T2)", fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
+
+# --- Predicted vs True class distribution ---
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+for ax, (name, df_src, y_pred) in zip(axes, [
+    ("Immunological (T1+T2)", df_im_baseline_t1t2, y_pred_im_t1t2),
+    ("Clinical (T1+T2)", df_cl_baseline_t1t2, y_pred_cl_t1t2),
+    ("Combined (T1+T2)", df_combined_baseline_t1t2, y_pred_comb_t1t2),
+]):
+    y_true = df_src[target_col].loc[y_pred.index]
+    true_counts = y_true.value_counts().reindex(class_order, fill_value=0)
+    pred_counts = y_pred.value_counts().reindex(class_order, fill_value=0)
+    x = np.arange(len(class_order))
+    width = 0.35
+    ax.bar(x - width/2, true_counts.values, width, label='True', color='steelblue')
+    ax.bar(x + width/2, pred_counts.values, width, label='Predicted', color='salmon')
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_order)
+    ax.set_ylabel('Count')
+    ax.set_title(name, fontsize=12)
+    ax.legend()
+fig.suptitle("True vs Predicted Class Distribution — CatBoost (T1+T2)", fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
 
 
 #%% SHAP analysis for T1+T2 models
