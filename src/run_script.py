@@ -560,6 +560,8 @@ plt.show()
 
 #%%########## Correlation analysis between features for immunological dataset
 
+# prøv med pearsons coeffiseint!
+
 import phik
 
 # phik correlation matrix for immunological dataset
@@ -1090,7 +1092,7 @@ def extract_numeric(series):
 
 def extract_continuous(series):
     """Extract numeric value from continuous scale entries (e.g., pain_scale 1-10,
-    health_status_today 0-100). Comma is German decimal ("9,7" = 9.7).
+    and health_status_today 0-100). Comma is German decimal ("9,7" = 9.7).
     Handles: German decimals, ranges "20-30" -> midpoint, trailing text "40 (left side)" -> 40.
     """
     s = series.astype(str).str.strip()
@@ -1129,17 +1131,379 @@ def split_bmi_column(df, col_name='overweight_bmi'):
     return df
 
 
-def parse_symptoms_duration(series):
+
+def parse_symptoms_duration(series, date_series=None):
     """Convert German symptom duration strings to numeric months.
-    Handles: "3 Monate", "2 Jahre", "6-12 Mo.", "< 1 J" (ranges take midpoint).
+    Handles: "3 Monate", "2 Jahre", "6-12 Mo.", "1,5 J.", "1/2 J.",
+    ranges → midpoint, German decimals, fractions, ~approx, >greater-than.
+    Date entries (2023-04-01, ~02/2022, Okt/Nov 2022) → months from measurement date.
+    Vague entries (Jahre, mehrere, täglich) → NaN.
+    Standalone numbers without unit → assumed months.
     """
-    single = series.str.extract(r'[<>~]?\s*(\d+)(?!\s*-\s*\d)')[0].astype(float)
-    range_start = series.str.extract(r'[<>~]?\s*(\d+)\s*-\s*\d+')[0].astype(float)
-    range_end = series.str.extract(r'[<>~]?\s*\d+\s*-\s*(\d+)')[0].astype(float)
-    number = range_start.add(range_end).div(2).fillna(single)
-    unit = series.str.extract(r'(Monat\w*|Mo\.?|Jahr\w*|J\.?)', flags=re.IGNORECASE)[0]
-    is_years = unit.str.lower().str.startswith('j').fillna(False)
-    return number.where(~is_years, number * 12)
+    # German month name to number
+    month_map = {'jan': 1, 'feb': 2, 'mär': 3, 'mar': 3, 'apr': 4, 'mai': 5,
+                 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'oct': 10,
+                 'nov': 11, 'dez': 12, 'dec': 12}
+
+    def parse_entry(val, meas_date):
+        if pd.isna(val):
+            return pd.NA
+        s = str(val).strip()
+
+        # Vague / unparseable entries → NaN
+        if s.lower() in ('jahre', 'jahre ', 'mehrere', 'mehrere jahre',
+                         'mehreren mo.', 'einige jahre', 'einge j.', 'täglich'):
+            return pd.NA
+
+        # Full date string: "2023-04-01 00:00:00" → calc months from measurement date
+        date_match = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+        if date_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        # "~02/2022" → month/year
+        my_match = re.match(r'^~?(\d{2})/(\d{4})$', s)
+        if my_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(f"{my_match.group(2)}-{my_match.group(1)}-01")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        # "Okt/Nov 2022" or "Feb 2022 (7Mo.)"
+        mon_match = re.match(r'^(\w{3})\w*(?:/\w+)?\s+(\d{4})', s, re.IGNORECASE)
+        if mon_match:
+            # Check for explicit months in parens first: "Feb 2022 (7Mo.)"
+            paren_match = re.search(r'\((\d+)\s*Mo', s)
+            if paren_match:
+                return float(paren_match.group(1))
+            mon_key = mon_match.group(1).lower()
+            year = int(mon_match.group(2))
+            if mon_key in month_map and pd.notna(meas_date):
+                symptom_date = pd.Timestamp(f"{year}-{month_map[mon_key]:02d}-01")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        # Remove parenthetical comments: "120 Mo. (?)" → "120 Mo.", "2 (?) Mo." → "2 Mo."
+        s_clean = re.sub(r'\(\?\)', '', s)
+        # "20 J. (akut 2 Mo.)" → take the main number (20 J.)
+        s_clean = re.sub(r'\([^)]*\)', '', s_clean).strip()
+        # Remove leading ~, >, <, "akut"
+        s_clean = re.sub(r'^[~><]\s*', '', s_clean)
+        s_clean = re.sub(r'^akut\s+', '', s_clean, flags=re.IGNORECASE)
+
+        # Detect unit: Jahre/J. = years, Monate/Mo. = months
+        is_years = bool(re.search(r'(Jahr\w*|J\.?\b)', s_clean, re.IGNORECASE))
+
+        # Handle fractions: "1/2 J." → 0.5
+        frac_match = re.match(r'(\d+)/(\d+)', s_clean)
+        if frac_match:
+            number = float(frac_match.group(1)) / float(frac_match.group(2))
+            return number * 12 if is_years else number
+
+        # Handle ranges: "6-12 Mo." → midpoint 9, "4-5 Jahre" → 4.5 years
+        range_match = re.search(r'(\d+[,.]?\d*)\s*-\s*(\d+[,.]?\d*)', s_clean)
+        if range_match:
+            start = float(range_match.group(1).replace(',', '.'))
+            end = float(range_match.group(2).replace(',', '.'))
+            number = (start + end) / 2
+            return number * 12 if is_years else number
+
+        # Handle German decimal: "1,5 J." → 1.5
+        num_match = re.search(r'(\d+[,.]?\d*)', s_clean)
+        if num_match:
+            number = float(num_match.group(1).replace(',', '.'))
+            return number * 12 if is_years else number
+
+        return pd.NA
+
+    if date_series is not None:
+        return pd.Series(
+            [parse_entry(v, d) for v, d in zip(series, date_series)],
+            index=series.index
+        )
+    return series.apply(lambda v: parse_entry(v, None))
+
+
+def standardize_target_volume(series):
+    """Standardize target_volume column: map body part variants to English names,
+    extract treatment side into separate column.
+    Returns (body_part_series, target_side_series).
+    """
+    body_part_map = [
+        ('Achilles Tendon', ['achillessehne', 'achilles tendon']),
+        ('Heel',            ['heel', 'ferse']),
+        ('Foot',            ['foot']),
+        ('Forefoot',        ['forefoot']),
+        ('Ankle',           ['ankle']),
+        ('Knee',            ['knee', 'knie']),
+        ('Hip',             ['hip', 'hüfte']),
+        ('Elbow',           ['elbow', 'ellbow']),
+        ('Shoulder',        ['shoulder', 'schulter']),
+        ('Thumb',           ['thumb', 'carpometacarpal', 'daumensattelgelenk']),
+        ('Hand',            ['hand']),
+        ('Finger',          ['finger']),
+        ('Toe',             ['toe', 'zehe']),
+        ('Trochanter',      ['trochanter']),
+        ('Wrist',           ['wrist']),
+    ]
+
+    def extract_side(s):
+        s_check = s.strip()
+        lower = s_check.lower()
+        if 'both sides' in lower:
+            return 'B'
+        if re.search(r'[LR]\s*[+&]\s*[LR]', s_check):
+            return 'B'
+        if re.search(r'[LR]\s*,\s*[LR](?!\w)', s_check):
+            return 'B'
+        if re.search(r'\b[LR][LR]\b', s_check):
+            return 'B'
+        if 'links' in lower:
+            return 'L'
+        if 'recht' in lower:
+            return 'R'
+        if 'left' in lower:
+            return 'L'
+        if 'right' in lower:
+            return 'R'
+        if re.search(r'\bL\s*$', s_check):
+            return 'L'
+        if re.search(r'\bR\s*$', s_check):
+            return 'R'
+        if re.search(r'\bl\s*$', s_check):
+            return 'L'
+        if re.search(r'\br\s*$', s_check):
+            return 'R'
+        return pd.NA
+
+    def match_body_part(s):
+        lower = s.lower().strip()
+        matched = []
+        for name, keywords in body_part_map:
+            if any(kw in lower for kw in keywords):
+                if name not in matched:
+                    matched.append(name)
+        if len(matched) == 0:
+            return s.strip()
+        return ', '.join(matched)
+
+    body_parts = pd.Series(pd.NA, index=series.index)
+    sides = pd.Series(pd.NA, index=series.index)
+    for idx, val in series.items():
+        if pd.isna(val):
+            continue
+        s = str(val).strip()
+        sides[idx] = extract_side(s)
+        body_parts[idx] = match_body_part(s)
+
+    return body_parts, sides
+
+
+
+def standardize_diagnosis(series):
+    """Standardize diagnosis column: map German/English variants to standardized
+    English diagnosis names. Combined diagnoses kept as 'Name1, Name2'.
+    Side is NOT extracted here — use target_side from target_volume instead.
+    Returns standardized diagnosis series.
+    """
+    diagnosis_map = [
+        ('Achillodynia',          ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis']),
+        ('Calcaneodynia',         ['calcaneodynie', 'calcaneodynia', 'heel calcaneodynia']),
+        ('Heel Spur',             ['heel spur', 'fersensporn']),
+        ('Elbow Syndrome',        ['ellbow', 'elbow', 'ellenbogen', 'epicondylitis', 'epiconilitis']),
+        ('Rhizarthrosis',         ['rhizarthros', 'rizarthros', 'daumensattelgelenk', 'thumb cmc', 'carpometacarpal']),
+        ('Gonarthrosis',          ['gonarthros', 'kniegelenk']),
+        ('Finger Arthritis',      ['fingergelenk', 'fingerpolyarth', 'finger joint arthritis', 'finger arthritis']),
+        ('Shoulder Syndrome',     ['shouldersyndrom', 'shoulder syndrom', 'schulter']),
+        ('Ankle Arthrosis',       ['sprunggelenk', 'ankle', 'arthrosis upper ankle']),
+        ('Midfoot Arthrosis',     ['mittelfuß', 'midfoot', 'forefoot']),
+        ('Plantar Fasciitis',     ['plantarfasz', 'plantar']),
+        ('Trochanter Tendopathy', ['trochanter']),
+        ('Toe Arthrosis',         ['zehenarthros', 'zehengrundgelenk']),
+        ('Rheumatoid Arthritis',  ['rheumatoid', 'rheumatoide']),
+        ('Wrist Arthrosis',       ['wrist arthritis', 'wrist arthrosis', 'handgelenk']),
+    ]
+
+    def match_diagnosis(s):
+        lower = s.lower().strip()
+        matched = []
+        for name, keywords in diagnosis_map:
+            if any(kw in lower for kw in keywords):
+                if name not in matched:
+                    matched.append(name)
+        if len(matched) == 0:
+            return s.strip()
+        return ', '.join(matched)
+
+    diagnoses = pd.Series(pd.NA, index=series.index)
+    for idx, val in series.items():
+        if pd.isna(val):
+            continue
+        diagnoses[idx] = match_diagnosis(str(val).strip())
+
+    return diagnoses
+
+
+
+def standardize_pain_points(series):
+    """Standardize pain_points column: map German body parts to English,
+    extract side (L/R/B) per body part. Pure number entries (2, 3, 4) become NaN.
+    Returns standardized series with format 'BodyPart Side, BodyPart Side'.
+    """
+    # Order matters: more specific compound words before shorter substrings
+    body_part_keywords = [
+        ('Achilles Tendon', ['achillessehne']),
+        ('Ankle',           ['fußgelenk', 'fußknöchel', 'knöchel']),
+        ('Heel',            ['ferse', 'fersen', 'ferser', 'fersensporn', 'fersenaußenseite']),
+        ('Foot',            ['fuß', 'füße', 'fußsohle', 'fußaußenseite', 'fußknochen', 'mittelfuß', 'ballen']),
+        ('Toe',             ['zehen', 'zehe']),
+        ('Fibula',          ['wadenbein']),
+        ('Calf',            ['wade', 'waden']),
+        ('Shin',            ['schienbein']),
+        ('Knee',            ['knie']),
+        ('Thigh',           ['oberschenkel']),
+        ('Leg',             ['bein']),
+        ('Hip',             ['hüfte']),
+        ('Groin',           ['leistengegend', 'leiste']),
+        ('Buttocks',        ['po']),
+        ('Back',            ['rücken']),
+        ('Neck',            ['nacken']),
+        ('Shoulder',        ['schulter']),
+        ('Upper Arm',       ['oberarm']),
+        ('Forearm',         ['unterarm']),
+        ('Elbow',           ['ellenbogen', 'ellbogen', 'ellenbogengelenk']),
+        ('Arm',             [r'\barm\b']),  # word boundary to avoid matching oberarm/unterarm
+        ('Wrist',           ['handgelenk', 'hangelenk']),
+        ('Thumb',           ['daumen', 'daumensattelgelenk']),
+        ('Hand',            [r'\bhand\b', 'hände']),
+        ('Finger',          ['finger']),
+    ]
+
+    def find_side(seg):
+        """Extract side from a text segment."""
+        s = seg.lower().strip()
+        # Bilateral patterns first
+        if re.search(r'beide|bds', s):
+            return 'B'
+        if re.search(r'li\s*[+&/]\s*re|re\s*[+&/]\s*li', s):
+            return 'B'
+        if re.search(r'li\s+u\.?\s+re|re\s+u\.?\s+li', s):
+            return 'B'
+        if re.search(r'li\s+und\s+re|re\s+und\s+li', s):
+            return 'B'
+        # Left
+        if re.search(r'\bli\b|\blinks\b|\blinke[rns]?\b', s):
+            return 'L'
+        # Right
+        if re.search(r'\bre\b|\brechts\b|\brechte[rns]?\b|\brecht\b', s):
+            return 'R'
+        return ''
+
+    def find_body_part(seg):
+        """Find body part in a text segment."""
+        s = seg.lower().strip()
+        for name, keywords in body_part_keywords:
+            for kw in keywords:
+                if kw.startswith(r'\b'):
+                    if re.search(kw, s):
+                        return name
+                else:
+                    if kw in s:
+                        return name
+        return None
+
+    def parse_entry(val):
+        if pd.isna(val):
+            return pd.NA
+        s = str(val).strip()
+        # Pure numbers → NaN
+        if re.match(r'^\d+$', s):
+            return pd.NA
+        # Remove parentheses but keep content inside (they may contain body parts)
+        s_clean = s.replace('(', '').replace(')', '')
+        # Remove question marks and trailing digits stuck to words ("Daumen re3" → "Daumen re")
+        s_clean = re.sub(r'[?]', '', s_clean)
+        s_clean = re.sub(r'(\D)\d+\b', r'\1', s_clean)
+        # Split by comma and semicolon
+        segments = re.split(r'[,;]', s_clean)
+        results = []
+        last_body_part = None
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            body = find_body_part(seg)
+            side = find_side(seg)
+            if body is None and side and last_body_part:
+                # Side-only segment: applies to previous body part (e.g., "Ferse li, re")
+                body = last_body_part
+            if body:
+                entry = f"{body} {side}".strip()
+                if entry not in results:
+                    results.append(entry)
+                last_body_part = body
+
+        if not results:
+            return s.strip()  # keep original if nothing matched
+        return ', '.join(results)
+
+    return series.apply(parse_entry)
+
+
+def split_filter_column(df, col_name='filter'):
+    """Split filter column into filter_mm (float) and filter_material (Cu/Al).
+    Handles German decimal commas, duplicate entries, and various formats.
+    """
+    col_idx = df.columns.get_loc(col_name)
+
+    def parse_filter(val):
+        if pd.isna(val):
+            return pd.NA, pd.NA
+        s = str(val).strip()
+        # Handle duplicate entries like "0,2\n0,2" — take the first
+        s = s.split('\n')[0].strip()
+        # Extract material (Cu or Al)
+        material = pd.NA
+        if re.search(r'Cu', s, re.IGNORECASE):
+            material = 'Cu'
+        elif re.search(r'Al', s, re.IGNORECASE):
+            material = 'Al'
+        # Extract numeric value: replace German comma with dot
+        num_match = re.search(r'(\d+[,.]?\d*)', s)
+        if num_match:
+            num_str = num_match.group(1).replace(',', '.')
+            return float(num_str), material
+        return pd.NA, material
+
+    parsed = df[col_name].apply(parse_filter)
+    df.insert(col_idx, 'filter_mm', parsed.apply(lambda x: x[0]))
+    df.insert(col_idx + 1, 'filter_material', parsed.apply(lambda x: x[1]))
+    return df.drop(columns=[col_name])
+
+
+
+# Cumulative dose: parse total dose from mixed formats
+def parse_cumulative_dose(val):
+    if pd.isna(val):
+        return pd.NA
+    s = str(val).strip()
+    # "L: 3;   R: 6" → sum both sides
+    if re.search(r'[LR]\s*:', s):
+        numbers = re.findall(r'(\d+\.?\d*)', s)
+        return sum(float(n) for n in numbers) if numbers else pd.NA
+    # "3(6)" or "3 (6Gy Right)" → take number inside parentheses (= total)
+    paren_match = re.search(r'\((\d+\.?\d*)', s)
+    if paren_match:
+        return float(paren_match.group(1))
+    # "3\n3" (duplicate) → take first line
+    s = s.split('\n')[0].strip()
+    # Standalone number
+    num_match = re.match(r'^(\d+\.?\d*)$', s)
+    if num_match:
+        return float(num_match.group(1))
+    return pd.NA
 
 
 
@@ -1288,12 +1652,31 @@ print(f"Columns renamed: {len(clinical_names)}")
 df_cl_reduced = df_cl_clean.copy()
 
 
-#%% Step 4: Clean null markers + deduplicate categorical columns
-from skrub import deduplicate
+#%% Step 4: Clean null markers
+
+# Fix duplicate entries separated by newlines (e.g., "3\n3" → "3")
+print("=== Removing newline-duplicated entries ===")
+for col in df_cl_clean.columns:
+    str_col = df_cl_clean[col].astype(str)
+    has_newline = str_col.str.contains('\n', na=False)
+    if has_newline.sum() > 0:
+        def dedup_newline(val):
+            if pd.isna(val):
+                return val
+            s = str(val)
+            if '\n' not in s:
+                return val
+            parts = [p.strip() for p in s.split('\n') if p.strip()]
+            if len(parts) > 1 and len(set(parts)) == 1:
+                return parts[0]  # all parts identical → keep one
+            return parts[0]  # different parts → keep first
+        df_cl_clean[col] = df_cl_clean[col].apply(dedup_newline)
+        print(f"  {col}: fixed {has_newline.sum()} entries with newlines")
+
 
 # Replace German missing markers across ALL columns: k.A./ka/kA and n.D./n.D
 null_pattern = r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$'
-print("\n=== Replacing German null markers ===")
+print("\n=== Replacing null markers ('kA' and 'nD' varations) ===")
 for col in df_cl_clean.columns:
     str_col = df_cl_clean[col].astype(str).str.strip()
     mask = str_col.str.match(null_pattern, na=False)
@@ -1301,20 +1684,6 @@ for col in df_cl_clean.columns:
         print(f"  {col}: replaced {mask.sum()} null markers")
         df_cl_clean.loc[mask, col] = pd.NA
 
-# Deduplicate categorical string columns (fixes typos and inconsistent entries)
-# NOTE: response is handled separately by create_response_category()
-
-categorical_str_cols = ['diagnosis', 'target_volume', 'pain_points', 'filter']
-print("\n=== Deduplicating categorical columns ===")
-for col in categorical_str_cols:
-    if col in df_cl_clean.columns:
-        valid = df_cl_clean[col].dropna()
-        if len(valid.unique()) > 1:
-            n_before = len(valid.unique())
-            dedup_map = deduplicate(valid)
-            df_cl_clean[col] = df_cl_clean[col].map(dedup_map).fillna(df_cl_clean[col])
-            n_after = df_cl_clean[col].nunique()
-            print(f"  {col}: {n_before} -> {n_after} unique values")
 
 
 #%% Step 5: Extract/convert numeric values from mixed text/number columns
@@ -1337,6 +1706,7 @@ for col in ordinal_cols:
         df_cl_clean[col] = extracted
 print(f"Total ordinal text entries converted: {n_converted}")
 
+
 # Continuous columns: comma = German decimal, ranges -> midpoint
 # pain_scale (1-10): "9,7" -> 9.7
 # health_status_today (0-100): "20-30" -> 25, "40 (left side)" -> 40
@@ -1351,7 +1721,33 @@ for col in ['pain_scale', 'health_status_today']:
         df_cl_clean[col] = extracted
 
 
+
 #%% Step 6: Column-specific transformations
+
+# Diagnosis: standardize names (side extracted from target_volume instead)
+df_cl_clean['diagnosis'] = standardize_diagnosis(df_cl_clean['diagnosis'])
+print(f"\nDiagnosis: {df_cl_clean['diagnosis'].nunique()} unique categories")
+print(f"  Categories: {df_cl_clean['diagnosis'].value_counts().to_dict()}")
+
+# Target volume: standardize body part names + extract treatment side
+df_cl_clean['target_volume'], df_cl_clean['target_side'] = standardize_target_volume(df_cl_clean['target_volume'])
+df_cl_clean = move_column_after(df_cl_clean, 'target_side', 'target_volume')
+print(f"\nTarget volume: {df_cl_clean['target_volume'].nunique()} unique categories")
+print(f"  Categories: {df_cl_clean['target_volume'].value_counts().to_dict()}")
+print(f"  Target side: {df_cl_clean['target_side'].value_counts().to_dict()}")
+
+# Pain points: standardize body part names + side per body part
+df_cl_clean['pain_points'] = standardize_pain_points(df_cl_clean['pain_points'])
+print(f"\nPain points: {df_cl_clean['pain_points'].nunique()} unique categories (was 149)")
+print(f"  Top 10: {df_cl_clean['pain_points'].value_counts().head(10).to_dict()}")
+
+# Filter: split into filter_mm (thickness) and filter_material (Cu/Al)
+df_cl_clean = split_filter_column(df_cl_clean)
+print(f"\nFilter mm: {sorted(df_cl_clean['filter_mm'].dropna().unique())}")
+print(f"Filter material: {df_cl_clean['filter_material'].value_counts().to_dict()}")
+
+df_cl_clean['cumulative_dose'] = df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose)
+print(f"\nCumulative dose: {sorted(df_cl_clean['cumulative_dose'].dropna().unique())}")
 
 # Gender: standardize 'w' (German: weiblich) to 'f' (female)
 df_cl_clean['gender'] = df_cl_clean['gender'].replace('w', 'f')
@@ -1363,7 +1759,7 @@ missing_bmi = (df_cl_clean['bmi'].isna() & df_cl_clean['overweight'].notna()).su
 print(f"BMI split: {missing_bmi} patients with overweight status but missing BMI value")
 
 # Symptoms duration: German strings to numeric months
-df_cl_clean['symptoms_months'] = parse_symptoms_duration(df_cl_clean['symptoms_months'])
+df_cl_clean['symptoms_months'] = parse_symptoms_duration(df_cl_clean['symptoms_months'], df_cl_clean['date'])
 print(f"Symptoms: range {df_cl_clean['symptoms_months'].min():.0f}-{df_cl_clean['symptoms_months'].max():.0f} months, "
       f"{df_cl_clean['symptoms_months'].isna().sum()} missing")
 
@@ -1391,7 +1787,7 @@ empty_questionnaire_mask = (
 )
 print(f"\nRemoving {empty_questionnaire_mask.sum()} empty questionnaire rows")
 if empty_questionnaire_mask.sum() > 0:
-    print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date']])
+    print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date', 'response', 'diagnosis']])
 df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
 
 
@@ -1400,26 +1796,36 @@ df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
 # measurement_timepoint is a panel group ID, not a date — keep as string
 # remove columns with more than 35% missing
 
-cleaner_cl = Cleaner(
-    drop_null_fraction=None,
-    drop_if_constant=False,
-    drop_if_unique=False,
-)
-df_cl_clean = cleaner_cl.fit_transform(df_cl_clean)
+categorical_cols = [
+    'gender', 'overweight', 'pain_points', 'diagnosis',
+    'target_volume', 'target_side', 'filter_material', 'response'
+]
 
-# Ensure measurement_timepoint stays as string (panel group ID, not a date)
+# Ensure id/date columns keep appropriate types
+if 'Patient' in df_cl_clean.columns:
+    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce').astype('Int64')
+if 'Timepoint' in df_cl_clean.columns:
+    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce').astype('Int64')
 if 'measurement_timepoint' in df_cl_clean.columns:
     df_cl_clean['measurement_timepoint'] = df_cl_clean['measurement_timepoint'].astype(str)
+if 'date' in df_cl_clean.columns:
+    df_cl_clean['date'] = pd.to_datetime(df_cl_clean['date'], errors='coerce')
 
-# Verify Cleaner steps
-print("\n=== Cleaner processing steps (clinical) ===")
-for col, steps in cleaner_cl.all_processing_steps_.items():
-    if steps:
-        print(f"  {col}: {steps}")
+# Cast categorical string columns to 'category' (if present)
+for col in categorical_cols:
+    if col in df_cl_clean.columns:
+        df_cl_clean[col] = df_cl_clean[col].astype('category')
 
-print(f"\n=== Final clinical dataset ===")
-print(f"Shape: {df_cl_clean.shape}")
-print(f"Dtypes:\n{df_cl_clean.dtypes.value_counts()}")
+# All remaining columns (except ids, date, measurement_timepoint, and categoricals) -> float
+exclude_for_float = set(categorical_cols) | {'Patient', 'Timepoint', 'measurement_timepoint', 'date'}
+cols_to_float = [c for c in df_cl_clean.columns if c not in exclude_for_float]
+df_cl_clean[cols_to_float] = df_cl_clean[cols_to_float].apply(lambda s: pd.to_numeric(s, errors='coerce')).astype('float64')
+
+# Verification
+print("\n=== Manual dtype assignment (clinical) ===")
+print(df_cl_clean.dtypes.value_counts())
+TableReport(df_cl_clean, max_plot_columns=100)
+
 
 
 TableReport(df_cl_clean, max_plot_columns=100)
