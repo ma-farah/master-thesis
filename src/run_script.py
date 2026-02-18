@@ -206,12 +206,12 @@ TableReport(df_im, max_plot_columns=180)
 na_frac = df_im.isna().mean()
 cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
 df_im = df_im.drop(columns=cols_to_drop).copy()
+print('Dropped columns:', cols_to_drop)
 
-"""
-Dropped Columns: 
-['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 'NK_HLADRhi', 
-'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 'TH naive_PD1+', 
-'TH eff_PD1+', 'TC naive_PD1+'
+""" 
+Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 
+'NK_HLADRhi', 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 
+'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
 """
 
 # New Tablereport
@@ -856,7 +856,7 @@ patient_ids = df_im_imputed["Patient"].values
 timepoints = df_im_imputed["Timepoint"].values
 X_pyod = X_pyod = df_im_imputed.drop(columns=exclude_cols).values
 
-contamination = 0.05    # standard contamination fraction from pyod library (assuming 10% of samples are outliers, can be adjusted based on domain knowledge or expected outlier proportion)
+contamination = 0.05    # standard contamination fraction from pyod library (assuming 5% of samples are outliers, can be adjusted based on domain knowledge or expected outlier proportion)
 models = {
     'IsolationForest': IForest(
         contamination=contamination,
@@ -1066,7 +1066,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pyod_zyran.GEC import calculate_GEC
 from pyod_zyran.Visualisering import visualiser_OD
-
+from sklearn.preprocessing import StandardScaler
 from pyod.models.qmcd import QMCD
 from pyod.models.inne import INNE
 from pyod.models.knn import KNN as KNN_od
@@ -1079,6 +1079,9 @@ from pyod.models.ocsvm import OCSVM
 from pyod.models.ecod import ECOD as ECOD_od
 from pyod.models.copod import COPOD as COPOD_od
 from pyod.models.lscp import LSCP
+
+if not hasattr(np, 'bool'):
+    np.bool = bool
 
 # --- Data: median-imputed immunological dataset (already computed above) ---
 # Drop ID columns, scale to zero mean / unit variance
@@ -1111,6 +1114,11 @@ final_selected_algos, tau_dissimilarity_df = calculate_GEC(
     percentages=[0.90, 0.98, 1.00]
 )
 print(f"GEC selected algorithms: {final_selected_algos}")
+
+
+"""
+GEC selected algorithms: ['LODA', 'ECOD', 'COPOD', 'HBOS', 'QMCD', 'IForest']
+"""
 
 # Visualise the dissimilarity matrix
 fig, ax = plt.subplots(figsize=(8, 6))

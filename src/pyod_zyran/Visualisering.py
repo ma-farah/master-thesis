@@ -2,6 +2,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+
+# hoggorm uses np.bool which was removed in NumPy 1.24
+if not hasattr(np, 'bool'):
+    np.bool = bool
+
 from adjustText import adjust_text
 import hoggorm as ho
 import hoggormplot as hop
@@ -57,7 +62,12 @@ def detect_outliers(X_data_to_use, X_sc, list_OD_algorithms, patient_ids):
 
 def pca_visualization(data, objNames, varNames, save_folder=None, figure_append_name=None):
     model = ho.nipalsPCA(arrX=data, Xstand=False, cvType=["loo"], numComp=10)
-    hop.plot(model, comp=[1, 2], plots=[6], objNames=objNames, XvarNames=varNames, save_folder=save_folder, figure_append_name=figure_append_name)
+    hop.plot(model, comp=[1, 2], plots=[6], objNames=objNames, XvarNames=varNames)
+
+    if save_folder:
+        import os
+        fname = (figure_append_name + "_" if figure_append_name else "") + "PCA.png"
+        plt.savefig(os.path.join(save_folder, fname), bbox_inches='tight')
 
     return model
 
@@ -67,6 +77,8 @@ def scatter_plot_visualization(model, y_predproba_array, y_pred_confidence_array
     pca_df = pca_df.rename(columns={0: "PC1", 1: "PC2"})
     y_predproba_array_mean = np.median(y_predproba_array, axis=1)
     y_pred_confidence_array_mean = y_pred_confidence_array.mean(axis=1)
+
+    plt.figure(figsize=(12, 8))
     scatter = plt.scatter(
         y_predproba_array_mean,
         y_pred_confidence_array_mean,
@@ -74,18 +86,24 @@ def scatter_plot_visualization(model, y_predproba_array, y_pred_confidence_array
         s=np.std(y_pred_confidence_array, axis=1) * 120,
         cmap="viridis",
     )
-    plt.xlabel("Median sannsynlighet")
-    plt.ylabel("Gjennomsnittlig konfidens")
+    plt.xlabel("Median probability")
+    plt.ylabel("Average confidence")
 
+    # Only annotate points above probability threshold to avoid clutter
+    label_threshold = 0.5
+    texts = []
     for i, txt in enumerate(patient_ids):
-        plt.annotate(
-            txt,
-            (y_predproba_array_mean[i], y_pred_confidence_array_mean[i]),
-            fontsize=7,
-        )
+        if y_predproba_array_mean[i] > label_threshold:
+            texts.append(plt.text(
+                y_predproba_array_mean[i],
+                y_pred_confidence_array_mean[i],
+                txt,
+                fontsize=7,
+            ))
+    adjust_text(texts, arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
 
     cbar = plt.colorbar(scatter)
-    cbar.set_label("Standardavvik for sannsynlighet")
+    cbar.set_label("Std of probability across algorithms")
     plt.axvline(x=0.8, color="black", linestyle="--", lw=0.8)
     plt.axhline(y=0.9, color="black", linestyle="--", lw=0.8)
 
