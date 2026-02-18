@@ -1040,6 +1040,123 @@ plt.show()
 
 
 
+#%%######### PyOD Ensemble Outlier Detection (Zyran approach) - Immunological Dataset ########
+
+# This section uses the pre-built outlier detection framework from:
+# https://gitlab.com/zryan.rz/master_outlier_detection_h23
+#
+# Pipeline:
+#   1. Median-imputed immunological data -> StandardScaler
+#   2. GEC (Gaussian Ensemble Comparison): fits all candidate algorithms and
+#      selects the 6 most *dissimilar* ones to form a diverse ensemble
+#   3. visualiser_OD: fits the 6 selected algorithms, aggregates scores via
+#      median probability across algorithms, and produces three plots:
+#        - PCA biplot (hoggorm NIPALS PCA)
+#        - Scatter: median probability vs. average confidence (marker size =
+#          std of confidence, colour = std of probability)
+#        - Pairplots of PC1-5 coloured by median probability / confidence
+#   Contamination is fixed at 0.1 (standard PyOD default).
+
+import sys
+import random
+from pathlib import Path
+
+# Make pyod_zyran importable from src/
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from pyod_zyran.GEC import calculate_GEC
+from pyod_zyran.Visualisering import visualiser_OD
+
+from pyod.models.qmcd import QMCD
+from pyod.models.inne import INNE
+from pyod.models.knn import KNN as KNN_od
+from pyod.models.lof import LOF as LOF_od
+from pyod.models.iforest import IForest as IForest_od
+from pyod.models.pca import PCA as PCA_od
+from pyod.models.loda import LODA
+from pyod.models.hbos import HBOS
+from pyod.models.ocsvm import OCSVM
+from pyod.models.ecod import ECOD as ECOD_od
+from pyod.models.copod import COPOD as COPOD_od
+from pyod.models.lscp import LSCP
+
+# --- Data: median-imputed immunological dataset (already computed above) ---
+# Drop ID columns, scale to zero mean / unit variance
+X_ens = df_im_median[feature_cols].copy()
+patient_labels = (
+    df_im_median["Patient"].astype(str) + "-T" + df_im_median["Timepoint"].astype(str)
+).tolist()
+
+scaler_ens = StandardScaler()
+X_sc_ens = pd.DataFrame(scaler_ens.fit_transform(X_ens), columns=X_ens.columns)
+
+# --- Build candidate algorithm list (matches notebook) ---
+contamination = 0.1
+random.seed(42)
+detector_list_lscp = [IForest_od(n_estimators=n) for n in random.sample(range(5, 200), 10)]
+
+list_OD_classes   = [QMCD, INNE, KNN_od, LOF_od, IForest_od, PCA_od, LODA, HBOS, OCSVM, ECOD_od, COPOD_od]
+list_OD_strings   = [cls.__name__ for cls in list_OD_classes]
+list_OD_init      = [LSCP(detector_list=detector_list_lscp, contamination=contamination)
+                     if cls == LSCP
+                     else cls(contamination=contamination)
+                     for cls in list_OD_classes]
+
+# --- Step 1: GEC — select 6 most dissimilar algorithms ---
+print("Running GEC to select 6 most dissimilar algorithms...")
+final_selected_algos, tau_dissimilarity_df = calculate_GEC(
+    X_sc_ens.values,
+    list_OD_init,
+    list_OD_strings,
+    percentages=[0.90, 0.98, 1.00]
+)
+print(f"GEC selected algorithms: {final_selected_algos}")
+
+# Visualise the dissimilarity matrix
+fig, ax = plt.subplots(figsize=(8, 6))
+tau_plot = tau_dissimilarity_df.astype(float)
+sns.heatmap(
+    tau_plot,
+    ax=ax,
+    cmap="mako",
+    annot=True,
+    fmt=".2f",
+    linewidths=0.5,
+    cbar_kws={"label": "GEC dissimilarity (tau)"}
+)
+ax.set_title("GEC Algorithm Dissimilarity Matrix\n(values closer to -1 = more dissimilar)",
+             fontsize=13, fontweight="bold")
+plt.tight_layout()
+plt.show()
+
+# --- Step 2: Re-initialise only the selected 6 algorithms ---
+algo_class_map     = {cls.__name__: cls for cls in list_OD_classes}
+initialized_modules = [
+    algo_class_map[name](contamination=contamination)
+    for name in final_selected_algos
+    if name in algo_class_map
+]
+print(f"Ensemble: {len(initialized_modules)} algorithms with contamination={contamination}")
+
+# --- Step 3: visualiser_OD — fit ensemble and produce plots ---
+print("Running visualiser_OD...")
+no_od_df, y_prob_mean, y_conf_mean, y_prob_arr, y_conf_arr, train_scores_ens = visualiser_OD(
+    X_sc_ens,
+    initialized_modules,
+    patient_labels,
+    visualize=True
+)
+
+# --- Summary table: samples flagged by at least 1, 3, or all algorithms ---
+print("\n=== Outlier Detection Summary ===")
+print(f"Flagged by >= 1 algorithm : {(no_od_df['No. OD Detected'] >= 1).sum()}")
+print(f"Flagged by >= 3 algorithms: {(no_od_df['No. OD Detected'] >= 3).sum()}")
+print(f"Flagged by all {len(initialized_modules)} algorithms : {(no_od_df['No. OD Detected'] == len(initialized_modules)).sum()}")
+
+print("\nTop 20 most-flagged samples:")
+print(no_od_df.sort_values("No. OD Detected", ascending=False).head(20))
+
+
 #%% Data exploration raw clinical dataset
 
 
@@ -1460,7 +1577,7 @@ def split_filter_column(df, col_name='filter'):
 
     def parse_filter(val):
         if pd.isna(val):
-            return pd.NA, pd.NA
+            return pd.NA, pd.N
         s = str(val).strip()
         # Handle duplicate entries like "0,2\n0,2" — take the first
         s = s.split('\n')[0].strip()

@@ -25,5 +25,8 @@ dependencies:
   - pip
   - pip:
       - scikit-na
+      - hoggormplot
+      - adjustText
+      - six
   
   # last updated 02.02.2026
