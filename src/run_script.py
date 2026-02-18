@@ -1091,10 +1091,10 @@ patient_labels = (
 ).tolist()
 
 scaler_ens = StandardScaler()
-X_sc_ens = pd.DataFrame(scaler_ens.fit_transform(X_ens), columns=X_ens.columns)
+X_sc = pd.DataFrame(scaler_ens.fit_transform(X_ens), columns=X_ens.columns)
 
 # --- Build candidate algorithm list (matches notebook) ---
-contamination = 0.1
+contamination = 0.05
 random.seed(42)
 detector_list_lscp = [IForest_od(n_estimators=n) for n in random.sample(range(5, 200), 10)]
 
@@ -1108,13 +1108,12 @@ list_OD_init      = [LSCP(detector_list=detector_list_lscp, contamination=contam
 # --- Step 1: GEC — select 6 most dissimilar algorithms ---
 print("Running GEC to select 6 most dissimilar algorithms...")
 final_selected_algos, tau_dissimilarity_df = calculate_GEC(
-    X_sc_ens.values,
+    X_sc.values,
     list_OD_init,
     list_OD_strings,
     percentages=[0.90, 0.98, 1.00]
 )
 print(f"GEC selected algorithms: {final_selected_algos}")
-
 
 """
 GEC selected algorithms: ['LODA', 'ECOD', 'COPOD', 'HBOS', 'QMCD', 'IForest']
@@ -1129,62 +1128,33 @@ initialized_modules = [
 ]
 print(f"Ensemble: {len(initialized_modules)} algorithms with contamination={contamination}")
 
-
-
-# --- Step 3: Estimate contamination with gammaGMM ---
-# Fits a Bayesian Dirichlet-Process GMM on anomaly scores from 3 base detectors
-# to derive a posterior distribution for the contamination fraction γ.
-# The median of that posterior is used as the point estimate.
-from pyod_zyran.gammaGMM import run_gammaGMM
-
-print("\nEstimating contamination with gammaGMM...")
-gamma_samples = run_gammaGMM(
-    X_sc_ens.values,
-    ad_list=[KNN_od(), IForest_od(), LOF_od()],
-    cpu=1,
-    verbose=False
-)
-contamination_est = float(np.median(gamma_samples))
-print(f"Estimated contamination: {contamination_est:.4f} (default was 0.1)")
-
-# Plot posterior distribution of contamination
-fig, ax = plt.subplots(figsize=(8, 4))
-ax.hist(gamma_samples, bins=60, color=sns.color_palette("mako", 1)[0], edgecolor="none", alpha=0.85)
-ax.axvline(contamination_est, color="black", linestyle="--", lw=1.5,
-           label=f"Median = {contamination_est:.4f}")
-ax.axvline(0.1, color="grey", linestyle=":", lw=1.2, label="Default = 0.10")
-ax.set_xlabel("Contamination fraction (γ)")
-ax.set_ylabel("Posterior samples")
-ax.set_title("gammaGMM: Posterior distribution of contamination", fontweight="bold")
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-# --- Step 5: Re-initialise selected algorithms with estimated contamination ---
-initialized_modules_cont = [
-    algo_class_map[name](contamination=contamination_est)
-    for name in final_selected_algos
-    if name in algo_class_map
-]
-
-# --- Step 6: visualiser_OD with estimated contamination (primary result) ---
-print(f"Running visualiser_OD with gammaGMM contamination={contamination_est:.4f}...")
-no_od_df_cont, y_prob_mean_cont, y_conf_mean_cont, y_prob_arr_cont, y_conf_arr_cont, train_scores_ens_cont = visualiser_OD(
+# --- Step 3: visualiser_OD ---
+print("Running visualiser_OD...")
+no_od_df, y_prob_mean, y_conf_mean, y_prob_arr, y_conf_arr, train_scores_ens = visualiser_OD(
     X_sc_ens,
-    initialized_modules_cont,
+    initialized_modules,
     patient_labels,
-    visualize=True,
-    figure_append_name='Contamination'
+    visualize=True
 )
+
 
 # --- Summary ---
-print(f"\n=== Outlier Detection Summary (gammaGMM contamination={contamination_est:.4f}) ===")
-for n in [1, 3, len(initialized_modules_cont)]:
+print(f"\n=== Outlier Detection Summary (contamination={contamination}) ===")
+for n in [1, 3, len(initialized_modules)]:
     label = f"Flagged by >= {n} algorithm{'s' if n > 1 else ''}"
-    print(f"{label}: {(no_od_df_cont['No. OD Detected'] >= n).sum()}")
+    print(f"{label}: {(no_od_df['No. OD Detected'] >= n).sum()}")
 
-print("\nTop 20 most-flagged samples:")
-print(no_od_df_cont.sort_values("No. OD Detected", ascending=False).head(20))
+# Observations in the upper-right quadrant: median probability > 0.9 AND avg confidence > 0.9
+high_prob_conf_mask = (y_prob_mean > 0.9) & (y_conf_mean > 0.9)
+outlier_candidates = no_od_df[high_prob_conf_mask].copy()
+outlier_candidates['Median_Probability'] = y_prob_mean[high_prob_conf_mask]
+outlier_candidates['Avg_Confidence'] = y_conf_mean[high_prob_conf_mask]
+outlier_candidates = outlier_candidates.sort_values('Median_Probability', ascending=False)
+
+print(f"\n=== Upper-right Quadrant Observations (median prob. > 0.9  &  avg confidence > 0.9) ===")
+print(f"Total: {len(outlier_candidates)}")
+print(outlier_candidates.to_string())
+
 
 
 #%% Data exploration raw clinical dataset
