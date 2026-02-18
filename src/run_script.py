@@ -1085,9 +1085,9 @@ if not hasattr(np, 'bool'):
 
 # --- Data: median-imputed immunological dataset (already computed above) ---
 # Drop ID columns, scale to zero mean / unit variance
-X_ens = df_im_median[feature_cols].copy()
+X_ens = df_im_imputed[feature_cols].copy()
 patient_labels = (
-    df_im_median["Patient"].astype(str) + "-T" + df_im_median["Timepoint"].astype(str)
+    df_im_imputed["Patient"].astype(str) + "-T" + df_im_imputed["Timepoint"].astype(str)
 ).tolist()
 
 scaler_ens = StandardScaler()
@@ -1120,23 +1120,6 @@ print(f"GEC selected algorithms: {final_selected_algos}")
 GEC selected algorithms: ['LODA', 'ECOD', 'COPOD', 'HBOS', 'QMCD', 'IForest']
 """
 
-# Visualise the dissimilarity matrix
-fig, ax = plt.subplots(figsize=(8, 6))
-tau_plot = tau_dissimilarity_df.astype(float)
-sns.heatmap(
-    tau_plot,
-    ax=ax,
-    cmap="mako",
-    annot=True,
-    fmt=".2f",
-    linewidths=0.5,
-    cbar_kws={"label": "GEC dissimilarity (tau)"}
-)
-ax.set_title("GEC Algorithm Dissimilarity Matrix\n(values closer to -1 = more dissimilar)",
-             fontsize=13, fontweight="bold")
-plt.tight_layout()
-plt.show()
-
 # --- Step 2: Re-initialise only the selected 6 algorithms ---
 algo_class_map     = {cls.__name__: cls for cls in list_OD_classes}
 initialized_modules = [
@@ -1146,23 +1129,62 @@ initialized_modules = [
 ]
 print(f"Ensemble: {len(initialized_modules)} algorithms with contamination={contamination}")
 
-# --- Step 3: visualiser_OD — fit ensemble and produce plots ---
-print("Running visualiser_OD...")
-no_od_df, y_prob_mean, y_conf_mean, y_prob_arr, y_conf_arr, train_scores_ens = visualiser_OD(
+
+
+# --- Step 3: Estimate contamination with gammaGMM ---
+# Fits a Bayesian Dirichlet-Process GMM on anomaly scores from 3 base detectors
+# to derive a posterior distribution for the contamination fraction γ.
+# The median of that posterior is used as the point estimate.
+from pyod_zyran.gammaGMM import run_gammaGMM
+
+print("\nEstimating contamination with gammaGMM...")
+gamma_samples = run_gammaGMM(
+    X_sc_ens.values,
+    ad_list=[KNN_od(), IForest_od(), LOF_od()],
+    cpu=1,
+    verbose=False
+)
+contamination_est = float(np.median(gamma_samples))
+print(f"Estimated contamination: {contamination_est:.4f} (default was 0.1)")
+
+# Plot posterior distribution of contamination
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(gamma_samples, bins=60, color=sns.color_palette("mako", 1)[0], edgecolor="none", alpha=0.85)
+ax.axvline(contamination_est, color="black", linestyle="--", lw=1.5,
+           label=f"Median = {contamination_est:.4f}")
+ax.axvline(0.1, color="grey", linestyle=":", lw=1.2, label="Default = 0.10")
+ax.set_xlabel("Contamination fraction (γ)")
+ax.set_ylabel("Posterior samples")
+ax.set_title("gammaGMM: Posterior distribution of contamination", fontweight="bold")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# --- Step 5: Re-initialise selected algorithms with estimated contamination ---
+initialized_modules_cont = [
+    algo_class_map[name](contamination=contamination_est)
+    for name in final_selected_algos
+    if name in algo_class_map
+]
+
+# --- Step 6: visualiser_OD with estimated contamination (primary result) ---
+print(f"Running visualiser_OD with gammaGMM contamination={contamination_est:.4f}...")
+no_od_df_cont, y_prob_mean_cont, y_conf_mean_cont, y_prob_arr_cont, y_conf_arr_cont, train_scores_ens_cont = visualiser_OD(
     X_sc_ens,
-    initialized_modules,
+    initialized_modules_cont,
     patient_labels,
-    visualize=True
+    visualize=True,
+    figure_append_name='Contamination'
 )
 
-# --- Summary table: samples flagged by at least 1, 3, or all algorithms ---
-print("\n=== Outlier Detection Summary ===")
-print(f"Flagged by >= 1 algorithm : {(no_od_df['No. OD Detected'] >= 1).sum()}")
-print(f"Flagged by >= 3 algorithms: {(no_od_df['No. OD Detected'] >= 3).sum()}")
-print(f"Flagged by all {len(initialized_modules)} algorithms : {(no_od_df['No. OD Detected'] == len(initialized_modules)).sum()}")
+# --- Summary ---
+print(f"\n=== Outlier Detection Summary (gammaGMM contamination={contamination_est:.4f}) ===")
+for n in [1, 3, len(initialized_modules_cont)]:
+    label = f"Flagged by >= {n} algorithm{'s' if n > 1 else ''}"
+    print(f"{label}: {(no_od_df_cont['No. OD Detected'] >= n).sum()}")
 
 print("\nTop 20 most-flagged samples:")
-print(no_od_df.sort_values("No. OD Detected", ascending=False).head(20))
+print(no_od_df_cont.sort_values("No. OD Detected", ascending=False).head(20))
 
 
 #%% Data exploration raw clinical dataset
