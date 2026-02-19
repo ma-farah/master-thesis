@@ -42,31 +42,6 @@ df_cl = pd.read_excel(
 )
 
 
-
-# %%################ RAW CLINICAL DATASET #############################
-
-
-# Table report of clinical dataset
-print("TableReport of raw clinical dataset:")
-TableReport(df_cl, max_plot_columns=138)
-
-# A lot of null values dues to empty rows (1658 rows),
-# as well as other comments/notes in the excel sheet.
-# Need to structure data based on timepoints 1,2,3,4...
-# Patients with missing treatment/ response information - remove
-# Patients with "Ausschluss/ Exclude" - remove
-# Patients with only 1 measured timepoint - remove
-# Combine Survey questions/columns ?
-
-# na analysis of clinical dataset
-print("Na analysis of clinical dataset:")
-na.altair.plot_heatmap(df_cl)
-
-
-# Raw clinical dataset statistics
-
-
-
 #%%################  RAW IMMUNOLOGICAL DATASET ###########################
 
 
@@ -282,140 +257,6 @@ df_im_median = df_im.copy()
 for col in feature_cols:
     median_value = df_im_median[col].median()
     df_im_median[col] = df_im_median[col].fillna(median_value)  
-
-
-
-#%%############# Comparing miceforest vs median imputation ##########################
-
-# Create mask of originally missing values in df_im
-missing_mask = df_im[feature_cols].isna()
-
-# Extract only the imputed values (originally missing) from both methods
-mice_imputed_values = df_im_imputed[feature_cols][missing_mask]
-median_imputed_values = df_im_median[feature_cols][missing_mask]
-
-# Flatten to 1D arrays for overall comparison
-mice_flat = mice_imputed_values.values.flatten()
-median_flat = median_imputed_values.values.flatten()
-
-# Create mask for positions where BOTH methods have valid (non-NaN) values
-valid_mask = ~np.isnan(mice_flat) & ~np.isnan(median_flat)
-mice_flat = mice_flat[valid_mask]
-median_flat = median_flat[valid_mask]
-
-# Calculate differences
-differences = mice_flat - median_flat
-
-print("\n" + "="*80)
-print("COMPARISON OF MICEFOREST VS MEDIAN IMPUTATION")
-print("="*80)
-print(f"\nTotal number of imputed values: {len(differences)}")
-print(f"Mean absolute difference: {np.abs(differences).mean():.4f}")
-print(f"Median absolute difference: {np.median(np.abs(differences)):.4f}")
-print(f"Max absolute difference: {np.abs(differences).max():.4f}")
-print(f"Std of differences: {np.std(differences):.4f}")
-
-
-# Feature-wise comparison: which features have largest imputation differences?
-feature_differences = {}
-
-for col in feature_cols:
-    # Get originally missing values for this feature
-    col_mask = missing_mask[col].values  # Convert to numpy array for index-independent masking
-
-    if col_mask.sum() > 0:  # If there were missing values
-        mice_vals = df_im_imputed[col].values[col_mask]
-        median_vals = df_im_median[col].values[col_mask]
-
-        # Only compare positions where BOTH have valid values
-        valid = ~np.isnan(mice_vals) & ~np.isnan(median_vals)
-        if valid.sum() > 0:
-            mice_valid = mice_vals[valid]
-            median_valid = median_vals[valid]
-
-            # Calculate metrics
-            mae = np.mean(np.abs(mice_valid - median_valid))
-            rmse = np.sqrt(np.mean((mice_valid - median_valid)**2))
-            max_diff = np.max(np.abs(mice_valid - median_valid))
-            n_missing = valid.sum()
-
-            feature_differences[col] = {
-                'MAE': mae,
-                'RMSE': rmse,
-                'Max_Diff': max_diff,
-                'N_Missing': n_missing
-            }
-
-# Create dataframe and sort by MAE
-feature_diff_df = pd.DataFrame(feature_differences).T
-feature_diff_df = feature_diff_df.sort_values('MAE', ascending=False)
-
-print("\n" + "="*80)
-print("TOP 20 FEATURES WITH LARGEST IMPUTATION DIFFERENCES (sorted by MAE)")
-print("="*80)
-print(feature_diff_df.head(20).to_string())
-print("\n")
-
-# Lets look at the distrubution of the the high-difference features, top 10:
-# Are these features normally distributed or heavily skewed?
-high_mae_features = ['B_HLADR+', 'TC_PD1+', 'TH_PD1+', 'Mo_HLADRhi', 'Mo1_HLADRhi', 'Mo3_HLADRhi', 'Mo3_HLADR+', 'TC eff_PD1+', 'TH CM_PD1+', 'Mo2_HLADR+', 'TC_HLADR+']
-
-fig, axes = plt.subplots(1, len(high_mae_features), figsize=(20, 4))
-for ax, col in zip(axes, high_mae_features):
-    df_im[col].dropna().hist(ax=ax, bins=30)
-    ax.axvline(df_im[col].median(), color='r', linestyle='--', label='Median')
-    ax.set_title(col)
-plt.tight_layout()
-plt.show()
-
-# Most seem very skewed. 
-# Lets see at the immputed values, side by side:
-
- #for top 10 features, show what each method imputed:
-
-for col in high_mae_features:
-    col_mask = missing_mask[col].values
-    if col_mask.sum() > 0:
-        comparison = pd.DataFrame({
-            'MICE': df_im_imputed[col].values[col_mask],
-            'Median': df_im_median[col].values[col_mask],
-            'Diff': df_im_imputed[col].values[col_mask] - df_im_median[col].values[col_mask]
-        })
-        print(f"\n{col} (median of non-missing: {df_im[col].median():.2f}):")
-        print(comparison.to_string())
-
-
-# Seems like MICE is imputing pretty high values, compared to the median. for example for TC_PD1+, 
-# mice imputes extremely high values. Mice seems to overfit to correlations in that specific row?
-# adding mean-matching in the kernel to only impute values that are observed in the original data, choosing 5 neighbours. might help with this issue.
-# and adding more datasets to the kernel, to get more stable imputations. 
-# lets try 5 datasets, with 10 iterations, + updating miceforest  from 5.2.6 to 6.0.5 and specifing num neigbours =5 instead of 1 dataset.
-
-
-# Now we have less extreme differences, but still some features have qute high differences compared to median.
-# max differene before was 49. Now it is 20.
-
-# Correlation between imputed values only
-corr_imputed = np.corrcoef(median_flat, mice_flat)[0, 1]
-
-plt.figure(figsize=(8, 6))
-plt.scatter(median_flat, mice_flat, alpha=0.5, s=20, color='steelblue', edgecolors='none')
-plt.plot([median_flat.min(), median_flat.max()],
-         [median_flat.min(), median_flat.max()],
-         'r--', linewidth=2, label='Perfect agreement (y=x)')
-plt.text(0.05, 0.95, f'Correlation: {corr_imputed:.4f}\n(n={len(mice_flat)} imputed values)',
-         transform=plt.gca().transAxes, fontsize=11,
-         verticalalignment='top',
-         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-plt.xlabel('Median Imputed Values', fontsize=12, fontweight='bold')
-plt.ylabel('MICE Imputed Values', fontsize=12, fontweight='bold')
-plt.title('Imputed Values Comparison: Median vs MICE', fontsize=14, fontweight='bold')
-plt.legend()
-plt.grid(alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-print(f"\nCorrelation (imputed values only): {corr_imputed:.4f}")
 
 
 
@@ -834,219 +675,13 @@ mfa.plot(
 mfa.partial_row_coordinates(dataset)
 
 
-
-#%%######### PyOD for outlier detection immunological dataset ########
-
-# Using an ensemble of outlier detection methods from pyod package:
-# Isolation Forest (IForest): tree-based method, very different from pca, great for high-dimensional continous data
-# Local Outlier Factor (LOF): proximity-based method measuring density of points, widely used, good for datasets with clustered observations
-# Empirical Cumulative Distribution (ECOD): probabilistic-based method, non-parametric, good for datasets with unknown distributions
-# Copula-Based Outlier Detection (COPOD): probabilistic method using correlations, parameter-free, effective for high-dimensional data with complex dependencies
-
-from pyod.models.iforest import IForest
-from pyod.models.lof import LOF
-from pyod.models.ecod import ECOD
-from pyod.models.copod import COPOD
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-
-print("Running PyOD outlier detection on immunological dataset")
-# Using imputed immunological dataset without ID columns
-patient_ids = df_im_imputed["Patient"].values
-timepoints = df_im_imputed["Timepoint"].values
-X_pyod = X_pyod = df_im_imputed.drop(columns=exclude_cols).values
-
-contamination = 0.05    # standard contamination fraction from pyod library (assuming 5% of samples are outliers, can be adjusted based on domain knowledge or expected outlier proportion)
-models = {
-    'IsolationForest': IForest(
-        contamination=contamination,
-        n_estimators=100,      # Number of trees (default=100, stable)
-        random_state=42
-    ),
-    'LOF': LOF(
-        contamination=contamination,
-        n_neighbors=20,        # Number of neighbors (default=20)
-        # Higher = smoother decision boundary, more global
-        # Lower = more sensitive to local density variations
-        metric='minkowski'
-    ),
-    'ECOD': ECOD(
-        contamination=contamination
-        # Parameter-free! Uses empirical cumulative distribution
-    ),
-    'COPOD': COPOD(
-        contamination=contamination
-        # Parameter-free! Uses copula-based approach
-    )
-}
-
-results = {}
-outlier_counts = {}
-
-for name, model in models.items():
-    print(f"Fitting model: {name}...")
-    
-    # Fit model
-    model.fit(X_pyod)
-    
-    # Get predictions: 0 = inlier, 1 = outlier
-    predictions = model.predict(X_pyod)
-    
-    # Get outlier scores (higher = more outlier-like)
-    scores = model.decision_function(X_pyod)
-    
-    # Store results
-    results[name] = {
-        'predictions': predictions,
-        'scores': scores,
-        'scores_normalized': (scores - np.min(scores)) / (np.max(scores) - np.min(scores)),
-        'model': model
-    }
-    
-    # Count outliers
-    n_outliers = np.sum(predictions == 1)
-    outlier_counts[name] = n_outliers
-    print(f" Found {n_outliers} outliers ({n_outliers/len(X_pyod)*100:.2f}%)\n")
-
-# Summary table
-summary_df = pd.DataFrame({
-    'Algorithm': list(outlier_counts.keys()),
-    'Outliers Found': list(outlier_counts.values()),
-    'Percentage of Dataset': [f"{(count/len(X_pyod)*100):.2f}%" for count in outlier_counts.values()]
-})
-print("\nOutlier Detection Summary:")
-print(summary_df.to_string(index=False))
-print("\n")
-
-
-# Plot for each model 
-# scale data before!
-scaler = StandardScaler()
-X_pyod_scaled = scaler.fit_transform(X_pyod)
-
-pca_pyod = PCA(n_components=2, random_state=42)
-X_2d = pca_pyod.fit_transform(X_pyod_scaled)
-fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-axes = axes.flatten()
-
-for idx, (name, data) in enumerate(results.items()):
-    ax = axes[idx]
-
-    # Create dataframe
-    plot_df = pd.DataFrame({
-        'PC1': X_2d[:, 0],
-        'PC2': X_2d[:, 1],
-        'is_outlier': data['predictions'] == 1,
-        'Score': data['scores_normalized'],
-        'Patient': patient_ids,
-        'Timepoint': timepoints
-    })
-
-    # Split inliers and outliers
-    inliers_df = plot_df[~plot_df['is_outlier']]
-    outliers_df = plot_df[plot_df['is_outlier']]
-
-    # Plot inliers in blue
-    ax.scatter(
-        inliers_df['PC1'], inliers_df['PC2'],
-        c='steelblue', s=30, alpha=0.5, label='Inliers', edgecolors='none'
-    )
-
-    # Plot outliers colored by score (high score = high certainty)
-    scatter = ax.scatter(
-        outliers_df['PC1'], outliers_df['PC2'],
-        c=outliers_df['Score'], cmap='Reds', s=80, alpha=0.8,
-        edgecolors='black', linewidths=0.5, label='Outliers'
-    )
-
-    # Add colorbar for outlier scores
-    if len(outliers_df) > 0:
-        cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
-        cbar.set_label('Outlier Score', fontsize=10)
-
-    # Annotate only outliers with Patient-Timepoint labels
-    for _, row in outliers_df.iterrows():
-        ax.annotate(
-            f"P{int(row['Patient'])}-T{int(row['Timepoint'])}",
-            (row['PC1'], row['PC2']),
-            fontsize=8,
-            xytext=(5, 5),
-            textcoords='offset points',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='black', alpha=0.8)
-        )
-
-    ax.set_xlabel(f'PC1 ({pca_pyod.explained_variance_ratio_[0]*100:.1f}%)', fontsize=11)
-    ax.set_ylabel(f'PC2 ({pca_pyod.explained_variance_ratio_[1]*100:.1f}%)', fontsize=11)
-    ax.set_title(f'{name}\n{outlier_counts[name]} outliers detected', fontsize=13, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper right', fontsize=10)
-
-plt.tight_layout()
-plt.suptitle('PyOD Outlier Detection - Immunological Dataset', fontsize=16, fontweight='bold', y=1.02)
-plt.show()
-
-
-#%%############## Consensesous analysis ############
-
-# Create consensus matrix
-consensus_matrix = np.column_stack([
-    results['IsolationForest']['predictions'],
-    results['LOF']['predictions'],
-    results['ECOD']['predictions'],
-    results['COPOD']['predictions']
-])
-
-# Count how many algorithms flagged each sample
-consensus_count = consensus_matrix.sum(axis=1)
-
-# Count samples with highest scores (most outlier-like) across all algorithms
-print("\nConsensus Analysis:")
-print(f"Number of samples flagged by at least 3 algorithms: {(consensus_count >= 3).sum()} out of {len(consensus_count)} ({(consensus_count >= 3).mean()*100:.2f}%)")
-print(f"Number of samples flagged by all 4 algorithms: {(consensus_count == 4).sum()} out of {len(consensus_count)} ({(consensus_count == 4).mean()*100:.2f}%)") 
-print(" ")       
-
-# Samples flagged by all 4 algorithms
-average_scores = np.mean([r['scores_normalized'] for r in results.values()], axis=0)
-all_flagged = pd.DataFrame({
-    'Patient': patient_ids, 'Timepoint': timepoints, 'Avg_Score': average_scores})
-print("Samples flagged by all 4 algorithms (sorted by avg score):")
-print(all_flagged.to_string(index=False))
-
-
-# Bar plot of consensus outliers by timepoint
-plt.figure(figsize=(10, 6))
-outlier_counts = all_flagged['Timepoint'].value_counts().sort_index().reset_index()
-outlier_counts.columns = ['Timepoint', 'Count']
-sns.barplot(data=outlier_counts, x='Timepoint', y='Count', color='teal')
-plt.xlabel('Timepoint', fontsize=12, fontweight='bold')
-plt.ylabel('Number of Consensus Outliers', fontsize=12, fontweight='bold')
-plt.title('Consensus Outliers by Timepoint (Across all 4 Algorithms)', fontsize=14, fontweight='bold')
-plt.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-plt.show()                                                        
-
-# Plot showing algorithm and number flagged samples
-plt.figure(figsize=(8, 5))
-algorithms = list(outlier_counts.keys())
-counts = list(outlier_counts.values())
-sns.barplot(x=algorithms, y=counts, hue=algorithms, palette='crest', legend=False)
-plt.xlabel('Outlier Detection Algorithm', fontsize=12, fontweight='bold')
-plt.ylabel('Number of Outliers Detected', fontsize=12, fontweight='bold')
-plt.title('Outliers Detected by Each Algorithm', fontsize=14, fontweight='bold')
-plt.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-
-
-
 #%%######### PyOD Ensemble Outlier Detection (Zyran approach) - Immunological Dataset ########
 
 # This section uses the pre-built outlier detection framework from:
 # https://gitlab.com/zryan.rz/master_outlier_detection_h23
 #
 # Pipeline:
-#   1. Median-imputed immunological data -> StandardScaler
+#   1. Miceforest-imputed and median-imputed immunological data -> StandardScaler
 #   2. GEC (Gaussian Ensemble Comparison): fits all candidate algorithms and
 #      selects the 6 most *dissimilar* ones to form a diverse ensemble
 #   3. visualiser_OD: fits the 6 selected algorithms, aggregates scores via
@@ -1055,7 +690,7 @@ plt.show()
 #        - Scatter: median probability vs. average confidence (marker size =
 #          std of confidence, colour = std of probability)
 #        - Pairplots of PC1-5 coloured by median probability / confidence
-#   Contamination is fixed at 0.1 (standard PyOD default).
+#   Contamination is fixed at 0.1
 
 import sys
 import random
@@ -1156,8 +791,29 @@ print(f"Total: {len(outlier_candidates)}")
 print(outlier_candidates.to_string())
 
 
+# %%################ RAW CLINICAL DATASET #############################
 
-#%% Data exploration raw clinical dataset
+
+# Table report of clinical dataset
+print("TableReport of raw clinical dataset:")
+TableReport(df_cl, max_plot_columns=138)
+
+# A lot of null values dues to empty rows (1658 rows),
+# as well as other comments/notes in the excel sheet.
+# Need to structure data based on timepoints 1,2,3,4...
+# Patients with missing treatment/ response information - remove
+# Patients with "Ausschluss/ Exclude" - remove
+# Patients with only 1 measured timepoint - remove
+# Combine Survey questions/columns ?
+
+# na analysis of clinical dataset
+print("Na analysis of clinical dataset:")
+na.altair.plot_heatmap(df_cl)
+
+
+# Raw clinical dataset statistics
+
+
 
 
 
@@ -1208,8 +864,7 @@ def extract_numeric(series):
 
 
 def extract_continuous(series):
-    """Extract numeric value from continuous scale entries (e.g., pain_scale 1-10,
-    and health_status_today 0-100). Comma is German decimal ("9,7" = 9.7).
+    """Extract numeric value from continuous scale entries (e.g., pain_scale 1-10. Comma is German decimal ("9,7" = 9.7).
     Handles: German decimals, ranges "20-30" -> midpoint, trailing text "40 (left side)" -> 40.
     """
     s = series.astype(str).str.strip()
@@ -1636,6 +1291,84 @@ def encode_therapy_columns(df, col_name='previous_therapy'):
 
 
 
+def standardize_response(df, response_col='response'):
+    """Parse the raw response column into two structured columns:
+
+    response_category : standardized category string (CR / PR / NI).
+        - Known phrases ('subtotal remission', 'recovery only on the right side', etc.) → PR.
+        - Typo 'no imrovement' → NI.
+        - Multiple categories in one entry kept as comma-separated, e.g. 'CR, NI' or 'PR, CR'.
+        - Entries that cannot be mapped are kept as-is (for manual review).
+
+    response_percent  : numeric percentage extracted from the entry (float).
+        - 'PR > 80'   → 80.0
+        - 'CR (100%)' → 100.0
+        - 'PR~75'     → 75.0
+        - '80-90'     → 85.0  (midpoint of range)
+        - NaN when no number is present.
+
+    Note: response_category is metadata only — NOT used as a modeling target.
+    Regression targets (pain_scale_t2, pain_scale_reduction) are created in Step 9.
+    """
+    df = df.copy()
+    raw = df[response_col].astype(str).str.strip()
+
+    # Phrase → canonical token mapping (applied before category detection)
+    phrase_map = {
+        'no imrovement':                   'no improvement',    # typo fix
+        'recovery only on the right side': 'pr',
+        'improvement':                     'pr',
+        'initial improvement':             'pr',
+        'subtotal remission':              'pr',
+    }
+
+    categories = pd.Series(pd.NA, index=df.index, dtype=object)
+    percents   = pd.Series(pd.NA, index=df.index, dtype='float64')
+
+    for idx, val in raw.items():
+        if val in ('nan', '', 'None', 'NaN'):
+            continue
+
+        s = val.lower().strip()
+
+        # Apply phrase replacements
+        for phrase, replacement in phrase_map.items():
+            s = s.replace(phrase.lower(), replacement)
+
+        # Extract numeric percentage from entry
+        # Range: "80-90" → 85 (midpoint); single: ">80", "~75", "100%" → number
+        range_m = re.search(r'(\d+)\s*[-–]\s*(\d+)', s)
+        single_m = re.search(r'[>~<]?\s*(\d+)\s*%?', s)
+        if range_m:
+            percents[idx] = (float(range_m.group(1)) + float(range_m.group(2))) / 2
+        elif single_m:
+            percents[idx] = float(single_m.group(1))
+
+        # Detect which response categories are present in the entry
+        found = []
+        if re.search(r'\bcr\b', s):
+            found.append('CR')
+        if re.search(r'\bpr\b', s):
+            found.append('PR')
+        if re.search(r'no\s*imp', s):
+            found.append('NI')
+
+        if found:
+            categories[idx] = ', '.join(found)
+        else:
+            # Keep original for unrecognized entries so they can be reviewed
+            categories[idx] = val.strip()
+
+    df['response_category'] = categories.astype('category')
+    df['response_percent']  = percents
+
+    print(f"\nResponse categories:\n{df['response_category'].value_counts(dropna=False).to_string()}")
+    print(f"\nResponse percent — {df['response_percent'].notna().sum()} entries with a numeric value:")
+    print(df['response_percent'].describe())
+    return df
+
+
+
 #%% Step 1: Forward-fill patient-level data within each patient group
 # Patient-level columns are constant across timepoints but only filled in the first row per patient
 
@@ -1674,17 +1407,65 @@ excluded_patients = df_cl_clean.loc[exclude_mask, 'Patient'].unique()
 print(f"Excluded {len(excluded_patients)} patients by keyword: {excluded_patients}")
 df_cl_clean = df_cl_clean[~exclude_mask]
 
-# Exclude patients with missing/invalid Response values
-invalid_response_mask = df_cl_clean['Response'].isna() | df_cl_clean['Response'].isin(['n.D', 'n.D.'])
-patients_invalid_response = df_cl_clean.loc[invalid_response_mask, 'Patient'].unique()
-df_cl_clean = df_cl_clean[~df_cl_clean['Patient'].isin(patients_invalid_response)]
-print(f"Excluded {len(patients_invalid_response)} patients with invalid Response: {patients_invalid_response}")
+# NOTE: Patients with missing/NaN Response are KEPT — response is NOT used as target variable.
+# We use pain_scale instead (see Step 9). Response column is retained as a metadata column only.
 
-# Drop no longer needed columns 'Unnamed: 2', ?
-cols_to_drop = ['Unnamed: 0', 'Comments questionnaire', 'further comments']
+# Drop the general health/function assessment questionnaire columns
+# ONLY the block from "Schwierigkeiten körperlicher Anstrengung" (inclusive) to
+# "Allgemeinzustand Gesundheit HEUTE" (inclusive) is removed.
+# Everything before this block (symptoms_months → pain_points) is KEPT.
+# Everything after this block (improvement_percent onwards) is also KEPT.
+try:
+    col_list = df_cl_clean.columns.tolist()
+
+    start_col = 'Schwierigkeiten körperlicher Anstrengung'
+
+    # Accept both correct spelling and known Excel typo ('Gesundheut' vs 'Gesundheit')
+    end_col_options = [
+        'Allgemeinzustand Gesundheit HEUTE',
+        'Allgemeinzustand Gesundheut HEUTE',
+    ]
+    end_col = next((c for c in end_col_options if c in col_list), None)
+
+    if start_col not in col_list:
+        print(f"Warning: start column '{start_col}' not found — no questionnaire columns dropped")
+    elif end_col is None:
+        print(f"Warning: end column 'Allgemeinzustand...' not found — no questionnaire columns dropped")
+    else:
+        start_idx      = col_list.index(start_col)
+        end_idx        = col_list.index(end_col)
+        q_cols_to_drop = col_list[start_idx : end_idx + 1]   # inclusive of both boundaries
+        df_cl_clean    = df_cl_clean.drop(columns=q_cols_to_drop)
+        print(f"Dropped {len(q_cols_to_drop)} health/function questionnaire columns")
+        print(f"  From : '{start_col}'")
+        print(f"  To   : '{end_col}'")
+        print(f"  Cols : {q_cols_to_drop}")
+except Exception as e:
+    print(f"Warning: Could not drop questionnaire columns: {e}")
+
+# Remove patients irradiated at MULTIPLE DIFFERENT body parts in the same treatment course.
+# E.g. shoulder + heel simultaneously — these are distinct from bilateral (same part, both sides).
+# Verify target volumes before removing.
+multi_body_patients = [184, 179, 156, 149, 54, 47, 128]
+print(f"\nVerifying multi-body-part patients (to be excluded):")
+for pid in multi_body_patients:
+    rows = df_cl_clean[df_cl_clean['Patient'] == pid]
+    if len(rows) > 0:
+        volumes = rows['Target volume'].dropna().unique()
+        print(f"  Patient {pid}: Target volume(s) = {volumes}")
+    else:
+        print(f"  Patient {pid}: not found in dataset")
+df_cl_clean = df_cl_clean[~df_cl_clean['Patient'].isin(multi_body_patients)]
+print(f"Removed {len(multi_body_patients)} multi-body-part patients")
+
+# Drop no longer needed columns
+cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'Comments questionnaire', 'further comments']
 df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
 
 print(f"\nAfter exclusions: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
+
+# Quick inspection after initial cleaning step
+TableReport(df_cl_clean, max_plot_columns=100)
 
 
 #%% Step 3: Rename columns (German to  English) + create baseline copy
@@ -1705,57 +1486,6 @@ clinical_names = {
     "tagsüber": "pain_daytime", "in Ruhe": "pain_at_rest",
     "bei ersten Schritten/Morgensteifigkeit": "morning_stiffness",
     "Schmerzskala": "pain_scale", "Schmerzpunkte": "pain_points",
-
-    # Functional limitations
-    "Schwierigkeiten körperlicher Anstrengung": "difficulty_physical_exertion",
-    "Schwierigkeiten bei längerem Spaziergang": "difficulty_long_walk",
-    "Schwierigkeiten bei kurzer Strecke": "difficulty_short_distance",
-    "tagsüber liegen oder sitzen": "difficulty_laying_sitting_daytime",
-    "Hilfe Essen, Anziehen, Waschen, Toilette": "help_with_adl",
-    "Einschränkung bei Alltag": "limitation_daily_life",
-    "Einschränkung bei Hobbys/Freizeit": "limitation_leisure",
-
-    # General health symptoms
-    "kurzatmig": "shortness_of_breath", "Schmerzen": "pain_general",
-    "Ausruhen": "need_to_rest", "Schlafstörungen": "sleep_disturbance",
-    "Schwach": "weakness", "Appetitmangel": "loss_of_appetite",
-    "Übelkeit": "nausea", "Erbrochen": "vomiting",
-    "Verstopfung": "constipation", "Durchfall": "diarrhea", "Müde": "fatigue",
-
-    # Cognitive/psychological impairments
-    "Beeinträchtigung im Alltag": "impairment_daily_life",
-    "Konzentrationsstörung": "concentration_difficulty",
-    "angespannt": "feeling_tense", "Sorgen gemacht": "worry",
-    "reizbar": "irritability", "niedergeschlagen": "depressed",
-    "Erinnerungsprobleme": "memory_problems",
-
-    # Social impairments
-    "Beeinträchtigung Familienleben": "family_life_impairment",
-    "Beeinträchtigung Zusammensein Menschen": "social_impairment",
-    "finanzielle Schwierigkeiten": "financial_difficulties",
-
-    # Quality of life
-    "Gesundheitszustand insgesamt": "health_status_overall",
-    "Lebensqualität insgesamt": "life_quality_overall",
-
-    # Daily tasks (physical function)
-    "Strecken": "stretching", "Heben und Tragen von 10kg": "lift_10kg",
-    "Waschen und Abtrocknen": "wash_and_dry", "Bücken": "bending",
-    "Haare Waschen im Waschbecken": "wash_hair", "Sitzen 1h": "sit_1h",
-    "Stehen 30min": "stand_30min", "Aufsetzen": "sit_up",
-    "Strümpfe an-/ausziehen": "put_on_socks",
-    "Gegenstand aus Sitzposition aufheben": "pick_object_seated",
-    "Gegenstand auf Tisch stellen": "place_object_table",
-    "Schnell laufen 100m": "run_fast_100m",
-
-    # EQ-5D-like questionnaire
-    "Beweglichkeit/Mobilität": "mobility", "für sich selbst sorgen": "self_care",
-    "alltägliche Tätigkeiten": "daily_activities",
-    "Schmerzen/körperliche Beschwerden": "pain_discomfort",
-    "Angst/Niedergeschlagenheit": "anxiety_depression",
-
-    # Clinical outcomes and treatment variables
-    "Allgemeinzustand Gesundheut HEUTE": "health_status_today",
     "Besserung nach Nachuntersuchung laut Arztbrief in %": "improvement_percent",
     "Diagnosis": "diagnosis", "Target volume": "target_volume",
     "single fraction": "single_fraction",
@@ -1765,8 +1495,11 @@ clinical_names = {
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
 print(f"Columns renamed: {len(clinical_names)}")
 
-# Baseline copy: raw data with timepoint column and English names (before any transforms)
-df_cl_reduced = df_cl_clean.copy()
+# Baseline copy: raw data with English column names, before any numeric transforms or imputation.
+# CatBoost can handle raw strings and missing values natively — this copy preserves that raw state.
+# Target variable (pain_scale_t2 / pain_scale_reduction) will be joined later from the clean dataset.
+df_cl_raw_baseline = df_cl_clean.copy()
+TableReport(df_cl_raw_baseline, max_plot_columns=100)
 
 
 #%% Step 4: Clean null markers
@@ -1806,9 +1539,10 @@ for col in df_cl_clean.columns:
 #%% Step 5: Extract/convert numeric values from mixed text/number columns
 
 # Ordinal questionnaire columns (scale 1-4 or 1-5): multi-select "1,2" -> avg
-# Skip: pain_points (categorical), pain_scale (continuous, comma = decimal), health_status_today (0-100 scale)
-all_cols = df_cl_clean.loc[:, 'pain_under_load':'health_status_today'].columns
-ordinal_cols = [c for c in all_cols if c not in ('pain_points', 'pain_scale', 'health_status_today')]
+# EORTC questionnaire columns already dropped at Step 2, so only pain columns remain.
+# Skip: pain_points (categorical string), pain_scale (continuous, comma = German decimal)
+all_cols = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].columns
+ordinal_cols = [c for c in all_cols if c not in ('pain_points', 'pain_scale')]
 
 print("\n=== Extracting numeric values (ordinal questionnaire columns) ===")
 n_converted = 0
@@ -1824,11 +1558,10 @@ for col in ordinal_cols:
 print(f"Total ordinal text entries converted: {n_converted}")
 
 
-# Continuous columns: comma = German decimal, ranges -> midpoint
-# pain_scale (1-10): "9,7" -> 9.7
-# health_status_today (0-100): "20-30" -> 25, "40 (left side)" -> 40
+# Continuous column: comma = German decimal, ranges -> midpoint
+# pain_scale (1-10): "9,7" -> 9.7, "7-8" -> 7.5
 print("\n=== Extracting numeric values (continuous columns) ===")
-for col in ['pain_scale', 'health_status_today']:
+for col in ['pain_scale']:
     if col in df_cl_clean.columns:
         original_numeric = pd.to_numeric(df_cl_clean[col], errors='coerce')
         extracted = extract_continuous(df_cl_clean[col])
@@ -1894,14 +1627,28 @@ no_improvement_mask = (
 df_cl_clean.loc[no_improvement_mask, 'improvement_percent'] = 0
 print(f"Improvement: filled {no_improvement_mask.sum()} NaN values with 0 for 'no improvement' responses")
 
+# Response: parse into response_category (CR/PR/NI or combinations) and response_percent (numeric).
+# response_category is metadata for reference; regression targets use pain_scale (see Step 9).
+df_cl_clean = standardize_response(df_cl_clean, response_col='response')
+df_cl_clean = move_column_after(df_cl_clean, 'response_category', 'response')
+df_cl_clean = move_column_after(df_cl_clean, 'response_percent', 'response_category')
 
-#%% Step 7: Remove empty questionnaire rows
 
-questionnaire_cols = df_cl_clean.loc[:, 'symptoms_months':'health_status_today'].columns
+#%% Step 7: Remove rows with no questionnaire data at all
+
+# A row is considered "empty" if ALL columns between 'date' and 'response' are NaN.
+# This covers: symptoms_months, previous_therapy, pain columns, pain_scale, pain_points.
+# (EORTC questionnaire columns already dropped at Step 2, so this range is narrower.)
+all_col_list = df_cl_clean.columns.tolist()
+date_idx = all_col_list.index('date') if 'date' in all_col_list else -1
+response_idx = all_col_list.index('response') if 'response' in all_col_list else len(all_col_list)
+questionnaire_cols = all_col_list[date_idx + 1:response_idx] if date_idx >= 0 else []
+print(f"Questionnaire columns checked for emptiness: {questionnaire_cols}")
+
 empty_questionnaire_mask = (
     df_cl_clean['date'].notna() &
     df_cl_clean[questionnaire_cols].isna().all(axis=1)
-)
+) if questionnaire_cols else pd.Series(False, index=df_cl_clean.index)
 print(f"\nRemoving {empty_questionnaire_mask.sum()} empty questionnaire rows")
 if empty_questionnaire_mask.sum() > 0:
     print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date', 'response', 'diagnosis']])
@@ -1909,20 +1656,20 @@ df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
 
 
 #%% Step 8: final dtype conversion
-# Cleaner auto-detects: dates -> datetime, numeric strings -> numeric, null strings -> NaN
 # measurement_timepoint is a panel group ID, not a date — keep as string
-# remove columns with more than 35% missing
+# Columns with more than 25% missing will be dropped later in this step.
 
 categorical_cols = [
     'gender', 'overweight', 'pain_points', 'diagnosis',
-    'target_volume', 'target_side', 'filter_material', 'response'
+    'target_volume', 'target_side', 'filter_material',
+    'response', 'response_category'          # response_percent stays float
 ]
 
 # Ensure id/date columns keep appropriate types
 if 'Patient' in df_cl_clean.columns:
-    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce').astype('Int64')
+    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce').astype('int64')
 if 'Timepoint' in df_cl_clean.columns:
-    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce').astype('Int64')
+    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce').astype('int64')
 if 'measurement_timepoint' in df_cl_clean.columns:
     df_cl_clean['measurement_timepoint'] = df_cl_clean['measurement_timepoint'].astype(str)
 if 'date' in df_cl_clean.columns:
@@ -1944,634 +1691,579 @@ print(df_cl_clean.dtypes.value_counts())
 TableReport(df_cl_clean, max_plot_columns=100)
 
 
+#%% Drop columns with >25% missing values
+
+# Protect pain_scale and improvement_percent from auto-dropping:
+# - pain_scale is the primary target variable (must be retained)
+# - improvement_percent is kept as supplementary metadata
+protected_cols = ['pain_scale', 'improvement_percent']
+
+missing_pct = df_cl_clean.isna().mean()
+cols_to_drop_na = [
+    c for c in missing_pct[missing_pct > 0.25].index
+    if c not in protected_cols
+]
+print(f"Dropping {len(cols_to_drop_na)} columns with >25% missing:")
+print(missing_pct[cols_to_drop_na].sort_values(ascending=False))
+
+df_cl_clean = df_cl_clean.drop(columns=cols_to_drop_na)
+print(f"\nColumns remaining: {len(df_cl_clean.columns)}")
 
 TableReport(df_cl_clean, max_plot_columns=100)
 
-#%%
-# Clean response variable to classes containing CR, PR or NI for no improvement.
 
-# Columns with "no improvement" AND CR at the same measurement will be put in PR category
-# Columns with CR AND PR at same measurement will be put in PR category.
-# This will most likely lead to a class imbalace where partial response is biggest?
+#%% Step 9: Prepare target variables and modeling datasets
 
-# Columns with notes indiciating partial response, change into PR:
-# recovery only on the right side", "improvement", "initial improvement", "subtotal remission" needs to be assigned to PR
-# one column with typo "no imrovement" needs to be assigned to NI
+# Save visualization copy BEFORE pain_scale filter — preserves ALL patients
+# (not limited to those with pain targets) for use in PCA / MFA / exploration.
+df_cl_for_viz = df_cl_clean.copy()
 
-def create_response_category(df, response_col='response'):
-    """Create variable response_category (CR, PR, NI) from the raw "response" column.
-    With groups CR, PR, NI. Mixed responses (CR+NI, CR+PR) -> PR.
-    """
-    df = df.copy()
-    clean = df[response_col].astype(str).str.strip().str.lower()
-    
-    # Fix specific entries and typo
-    pr_terms = ['recovery only on the right side', 'improvement', 'initial improvement', 'subtotal remission']
-    clean = clean.replace(pr_terms, 'pr')
-    clean = clean.str.replace('no imrovement', 'no improvement')
-    
-    # Detect patterns
-    has_cr = clean.str.contains(r'\bcr\b', na=False)
-    has_pr = clean.str.contains(r'\bpr\b', na=False)
-    has_ni = clean.str.contains(r'no\s*imp', na=False)
-    
-    # Mixed responses -> PR
-    clean = clean.where(~(has_cr & (has_ni | has_pr)), 'pr')
-    
-    # Recalculate after fixes
-    has_cr = clean.str.contains(r'\bcr\b', na=False)
-    has_ni = clean.str.contains(r'no\s*imp', na=False)
-    
-    # Assign categories (CR > PR > NI)
-    df['response_category'] = pd.NA
-    df.loc[has_ni, 'response_category'] = 'NI'
-    df.loc[clean.str.contains(r'\bpr\b', na=False), 'response_category'] = 'PR'
-    df.loc[has_cr, 'response_category'] = 'CR'
-    
-    print(f"Response categories:\n{df['response_category'].value_counts(dropna=False)}")
-    return df
-
-# creating cleaned response category
-df_cl_reduced1 = create_response_category(df_cl_reduced, response_col='response')
+# --- Filter: keep only rows/patients with a valid pain_scale value ---
+# pain_scale is the primary regression target. Rows without it cannot contribute
+# to target computation and are excluded now.
+print(f"\nRows before pain_scale filter: {len(df_cl_clean)}, patients: {df_cl_clean['Patient'].nunique()}")
+df_cl_clean = df_cl_clean[df_cl_clean['pain_scale'].notna()].copy()
+print(f"Rows after filter (pain_scale not NaN): {len(df_cl_clean)}, patients: {df_cl_clean['Patient'].nunique()}")
 
 
-#%% Plot response category distribution (unique patients)
-response_per_patient = df_cl_reduced1.drop_duplicates(subset='Patient')[['Patient', 'response_category']]
-counts = response_per_patient['response_category'].value_counts()
+# --- Compute regression targets ---
+# pain_scale_t2        : pain scale value AT timepoint T2 (post-treatment outcome)
+# pain_scale_reduction : T1 pain_scale MINUS T2 pain_scale
+#                        positive value = improvement, negative = worsening
 
-fig, ax = plt.subplots(figsize=(6, 4))
-counts.plot(kind='bar', ax=ax, color=sns.color_palette('mako', n_colors=len(counts)))
-ax.set_title('Response Category Distribution (unique patients) in Clin. Dataset')
-ax.set_xlabel('Response Category')
-ax.set_ylabel('Number of Patients')
-for i, (cat, count) in enumerate(counts.items()):
-    ax.text(i, count + 1, str(count), ha='center', fontweight='bold')
-ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+# Extract T1 and T2 pain_scale per patient
+pain_t1 = (
+    df_cl_clean[df_cl_clean['Timepoint'] == 1][['Patient', 'pain_scale']]
+    .rename(columns={'pain_scale': 'pain_scale_t1'})
+    .dropna(subset=['pain_scale_t1'])
+)
+pain_t2 = (
+    df_cl_clean[df_cl_clean['Timepoint'] == 2][['Patient', 'pain_scale']]
+    .rename(columns={'pain_scale': 'pain_scale_t2'})
+    .dropna(subset=['pain_scale_t2'])
+)
+
+# Keep only patients with BOTH T1 and T2 pain_scale values (needed for regression target)
+pain_targets = pain_t1.merge(pain_t2, on='Patient', how='inner')
+pain_targets['pain_scale_reduction'] = pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2']
+
+print(f"\nPatients with T1 + T2 pain_scale (usable for regression): {len(pain_targets)}")
+print(f"pain_scale_t2 range:        {pain_targets['pain_scale_t2'].min():.1f} — {pain_targets['pain_scale_t2'].max():.1f}")
+print(f"pain_scale_reduction range: {pain_targets['pain_scale_reduction'].min():.1f} — {pain_targets['pain_scale_reduction'].max():.1f}")
+print(f"  (positive = improvement, negative = worsening)")
+print(f"pain_scale_reduction stats:\n{pain_targets['pain_scale_reduction'].describe()}")
+
+# Filter clinical dataset to patients that have valid regression targets
+df_cl_clean = df_cl_clean[df_cl_clean['Patient'].isin(pain_targets['Patient'])].copy()
+
+# Add regression targets as patient-level columns (same value repeated across all timepoints per patient)
+df_cl_clean = df_cl_clean.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    on='Patient',
+    how='left'
+)
+print(f"\nFinal clinical dataset: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
+
+
+# --- Distribution of regression targets ---
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+targets_per_patient = df_cl_clean.drop_duplicates('Patient')
+
+# pain_scale_t2
+axes[0].hist(
+    targets_per_patient['pain_scale_t2'].dropna(),
+    bins=20,
+    color=sns.color_palette('mako', 3)[1]
+)
+axes[0].set_title('Distribution: pain_scale_t2 (T2 pain level)')
+axes[0].set_xlabel('Pain Scale (0-10)')
+axes[0].set_ylabel('Number of Patients')
+
+# pain_scale_reduction
+axes[1].hist(
+    targets_per_patient['pain_scale_reduction'].dropna(),
+    bins=20,
+    color=sns.color_palette('mako', 3)[2]
+)
+axes[1].set_title('Distribution: pain_scale_reduction (T1 - T2)')
+axes[1].set_xlabel('Pain Reduction (positive = improvement)')
+axes[1].set_ylabel('Number of Patients')
+axes[1].axvline(0, color='red', linestyle='--', linewidth=1, label='No change')
+axes[1].legend()
+
 plt.tight_layout()
 plt.show()
 
-print(f"Total unique patients: {len(response_per_patient)}")
-print(counts.to_string())
+
+# --- Copy for advanced modeling (before imputation) ---
+# Cleaned and transformed but NOT imputed. Used for the final nested-CV modeling pipeline (Phase 4).
+# Missing values will be handled inside the cross-validation loop to avoid leakage.
+df_cl_for_modeling = df_cl_clean.copy()
+print(f"\nAdvanced modeling dataset (before imputation): {df_cl_for_modeling['Patient'].nunique()} patients, {len(df_cl_for_modeling)} rows")
+TableReport(df_cl_for_modeling, max_plot_columns=100)
 
 
+# --- Merge immunological + clinical datasets (T1 baseline, for modeling) ---
+# Goal: predict post-treatment pain from PRE-treatment (T1) immunological + clinical values.
+# Both datasets are in their pre-imputation state so that imputation can be done inside CV.
+
+print("\n=== Merging immunological + clinical datasets (T1 baseline, before imputation) ===")
+
+# T1 immunological — uses df_im_reduced (columns dropped, not yet imputed)
+df_im_t1 = df_im_reduced[df_im_reduced['Timepoint'] == 1].copy()
+
+# T1 clinical — not imputed
+df_cl_t1 = df_cl_for_modeling[df_cl_for_modeling['Timepoint'] == 1].copy()
+
+# Inner join on Patient (only patients present in both datasets)
+# Drop Timepoint from clinical side to avoid duplication; suffix any other overlapping cols
+df_combined_t1 = df_im_t1.merge(
+    df_cl_t1.drop(columns=['Timepoint'], errors='ignore'),
+    on='Patient',
+    how='inner',
+    suffixes=('_im', '_cl')
+)
+
+print(f"Immunological T1:  {df_im_t1['Patient'].nunique()} patients")
+print(f"Clinical T1:       {df_cl_t1['Patient'].nunique()} patients")
+print(f"Combined T1:       {df_combined_t1['Patient'].nunique()} patients")
+print(f"\nTarget: pain_scale_t2\n{df_combined_t1['pain_scale_t2'].describe()}")
+print(f"\nTarget: pain_scale_reduction\n{df_combined_t1['pain_scale_reduction'].describe()}")
+
+TableReport(df_combined_t1, max_plot_columns=200)
 
 
-#%%  improvement_percent variable as a target variable
-
-def clean_improvement_percent(df, col='improvement_percent'):
-    """Clean improvement_percent column: handle ranges, L/R splits, special entries.
-    Returns df with numeric improvement_percent (0-100).
-    """
-    df = df.copy()
-    raw = df[col].astype(str).str.strip()
-    
-    # Step 1: Handle specific known entries
-    # "nicht schmerzfrei" (not pain-free) -> 0
-    raw = raw.replace({'nicht schmerzfrei': '0', 'nan': pd.NA, '': pd.NA})
-    
-    # "02/2017: 90; 08/2017: 50" -> take latest value (50)
-    date_pattern = raw.str.contains(r'\d{2}/\d{4}', na=False)
-    if date_pattern.any():
-        # Extract last number after the last colon
-        raw[date_pattern] = raw[date_pattern].str.extract(r'.*:\s*(\d+)')[0]
-    
-    # Step 2: Handle L/R entries (e.g., "L: 100 R:0", "links: 100%; rechts: 80-90")
-    lr_pattern = raw.str.contains(r'[LlRr]|links|rechts', na=False)
-    
-    def parse_lr(entry):
-        """Extract all numbers/ranges from L/R entries and average them."""
-        import re
-        # Find all numbers or ranges
-        parts = re.findall(r'(\d+)\s*-\s*(\d+)|(\d+)', entry)
-        values = []
-        for start, end, single in parts:
-            if start and end:  # range like 80-90
-                values.append((float(start) + float(end)) / 2)
-            elif single:  # single number
-                values.append(float(single))
-        return np.mean(values) if values else np.nan
-    
-    if lr_pattern.any():
-        raw[lr_pattern] = raw[lr_pattern].apply(parse_lr)
-    
-    # Step 3: Handle simple ranges (e.g., "80-90")
-    range_pattern = raw.astype(str).str.match(r'^\s*[<>~]?\s*\d+\s*-\s*\d+\s*$', na=False)
-    if range_pattern.any():
-        start = raw[range_pattern].str.extract(r'(\d+)\s*-')[0].astype(float)
-        end = raw[range_pattern].str.extract(r'-\s*(\d+)')[0].astype(float)
-        raw[range_pattern] = (start + end) / 2
-    
-    # Step 4: Convert to numeric
-    df[col] = pd.to_numeric(raw, errors='coerce')
-    
-    # Step 5: Remove patients with missing improvement_percent
-    before = df['Patient'].nunique()
-    missing_patients = df[df[col].isna()]['Patient'].unique()
-    df = df[~df['Patient'].isin(missing_patients)]
-    after = df['Patient'].nunique()
-    
-    print(f"\n=== Improvement Percent Cleaning ===")
-    print(f"Patients removed (missing): {len(missing_patients)}")
-    print(f"Patients remaining: {after} (was {before})")
-    print(f"\n=== Improvement Percent Stats ===")
-    print(df[col].describe())
-    print(f"\nValue counts:\n{df[col].value_counts().sort_index()}")
-    
-    return df
-
-# Usage:
-df_cl_reduced2 = clean_improvement_percent(df_cl_reduced)
+#%%############### VISUALIZATION DATASETS #####################################
+# All timepoints, fully cleaned + imputed.
+# Used for PCA, MFA, correlation analysis, and other exploratory visualisations.
+#
+#   df_im_imputed      : immunological — already prepared above (MICE imputation)
+#   df_cl_for_viz      : clinical before pain_scale filter — all patients
+#   df_cl_imputed      : clinical, median (numeric) + mode (categorical) imputed
+#   df_combined_imputed: merged im + cl on Patient + Timepoint (inner join)
 
 
-#%% Reduce clinical dataset?
+# Identify column groups in clinical (excluding IDs / target columns)
+_viz_id  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+_viz_cat = df_cl_for_viz.select_dtypes(
+    include=['category', 'object']).columns.difference(_viz_id).tolist()
+_viz_num = df_cl_for_viz.select_dtypes(
+    include=['float64', 'Int64', 'int64']).columns.difference(_viz_id).tolist()
 
-# remove all columns with more than 25% missing variables. 
+df_cl_imputed = df_cl_for_viz.copy()
 
+# Median imputation for numeric columns
+for _col in _viz_num:
+    if df_cl_imputed[_col].isna().any():
+        df_cl_imputed[_col] = df_cl_imputed[_col].fillna(df_cl_imputed[_col].median())
 
-missing_pct = df_cl_clean.isna().mean()
-cols_to_keep = missing_pct[missing_pct <= 0.35].index
-df_cl_red= df_cl_clean[cols_to_keep].copy()
+# Mode imputation for categorical columns
+for _col in _viz_cat:
+    if df_cl_imputed[_col].isna().any():
+        _mode = df_cl_imputed[_col].dropna().mode()
+        if len(_mode) > 0:
+            df_cl_imputed[_col] = df_cl_imputed[_col].fillna(_mode.iloc[0])
 
-# Verification
-print(f"Columns before: {len(df_cl_clean.columns)}")
-print(f"Columns after: {len(df_cl_red.columns)}")
-print(f"Dropped {len(df_cl_clean.columns) - len(df_cl_red.columns)} columns with >35% missing:")
-print(missing_pct[missing_pct > 0.35].sort_values(ascending=False))
+print(f"Clinical (viz, imputed): {df_cl_imputed['Patient'].nunique()} patients, {len(df_cl_imputed)} rows")
+TableReport(df_cl_imputed, max_plot_columns=100)
 
-TableReport(df_cl_red, max_plot_columns=100)
-
-
-#%% Basline model for immunological dataset - CatBoost
-
-TableReport(df_im_reduced, max_plot_columns=130)
-TableReport(df_cl_reduced1, max_plot_columns=130) # using category as target
-TableReport(df_cl_reduced2, max_plot_columns=130) # using improvement_percent as target
-
-#%% Step 9: Prepare baseline datasets for modeling
-
-# --- First, check what we have ---
-print("=== Dataset overview: Target variable: Response Category ===")
-print(f"Immunological (df_im_reduced): {df_im_reduced['Patient'].nunique()} patients, {len(df_im_reduced)} rows")
-print(f"Clinical (df_cl_reduced): {df_cl_reduced1['Patient'].nunique()} patients, {len(df_cl_reduced1)} rows")
-
-# --- Check common patients ---
-im_patients = set(df_im_reduced['Patient'].unique())
-cl_patients = set(df_cl_reduced1['Patient'].unique())
-common_patients = im_patients & cl_patients
-
-print(f"\n=== Patient overlap ===")
-print(f"Immunological only: {len(im_patients - cl_patients)}")
-print(f"Clinical only: {len(cl_patients - im_patients)}")
-print(f"Common patients: {len(common_patients)}")
+# Combined visualization dataset — inner join on Patient + Timepoint
+# Only rows where a patient has measurements in BOTH datasets at the SAME timepoint
+df_combined_imputed = df_im_imputed.merge(
+    df_cl_imputed,
+    on=['Patient', 'Timepoint'],
+    how='inner',
+    suffixes=('_im', '_cl')
+)
+print(f"\nCombined imputed (viz): {df_combined_imputed['Patient'].nunique()} patients, "
+      f"{len(df_combined_imputed)} rows")
+TableReport(df_combined_imputed, max_plot_columns=200)
 
 
-print('')
-print("=== Dataset overview: Target variable: Improvement in Percent ===")
-print(f"Immunological (df_im_reduced): {df_im_reduced['Patient'].nunique()} patients, {len(df_im_reduced)} rows")
-print(f"Clinical (df_cl_reduced2): {df_cl_reduced2['Patient'].nunique()} patients, {len(df_cl_reduced2)} rows")
+#%%############### BASELINE MODELING DATASETS #################################
+# Almost raw data: only exclusion criteria and empty rows removed.
+# NO transformation, parsing, or imputation applied.
+# Filtered to T1 only; only patients present in pain_targets (have both T1 + T2 pain_scale).
 
-# --- Check common patients ---
-im_patients = set(df_im_reduced['Patient'].unique())
-cl_patients = set(df_cl_reduced2['Patient'].unique())
-common_patients = im_patients & cl_patients
+# Patients eligible for modeling (have both T1 and T2 pain_scale)
+model_patients = set(pain_targets['Patient'].values)
 
-print(f"\n=== Patient overlap ===")
-print(f"Immunological only: {len(im_patients - cl_patients)}")
-print(f"Clinical only: {len(cl_patients - im_patients)}")
-print(f"Common patients: {len(common_patients)}")
+# --- Immunological raw T1 ---
+df_im_raw_t1 = (
+    df_im_reduced[
+        (df_im_reduced['Timepoint'] == 1) &
+        (df_im_reduced['Patient'].isin(model_patients))
+    ]
+    .copy()
+    .reset_index(drop=True)
+)
+# Attach regression targets so run_catboost_regressor can find the target column
+df_im_raw_t1 = df_im_raw_t1.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    on='Patient', how='left'
+)
 
+# --- Clinical raw T1: add pain targets (computed from cleaned data) ---
+# df_cl_raw_baseline = right after rename, before any numeric parsing or transforms
+df_cl_raw_t1 = (
+    df_cl_raw_baseline[
+        (df_cl_raw_baseline['Timepoint'] == 1) &
+        (df_cl_raw_baseline['Patient'].isin(model_patients))
+    ]
+    .copy()
+    .reset_index(drop=True)
+)
+# Attach regression targets (pain_scale is still a raw string here — treated as cat feature)
+df_cl_raw_t1 = df_cl_raw_t1.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    on='Patient', how='left'
+)
 
-#%% Check timepoint availability for common patients
+# --- Combined raw T1 ---
+df_combined_raw_t1 = df_im_raw_t1.merge(
+    df_cl_raw_t1.drop(columns=['Timepoint'], errors='ignore'),
+    on='Patient', how='inner',
+    suffixes=('_im', '_cl')
+)
 
-# Filter to common patients
-df_im_common = df_im_reduced[df_im_reduced['Patient'].isin(common_patients)]
-df_cl_common = df_cl_reduced2[df_cl_reduced2['Patient'].isin(common_patients)]
-
-# Check which timepoints each patient has in BOTH datasets
-im_pt = df_im_common.groupby('Patient')['Timepoint'].apply(set)
-cl_pt = df_cl_common.groupby('Patient')['Timepoint'].apply(set)
-
-# Combine to find common timepoints per patient
-common_timepoints = pd.DataFrame({'im': im_pt, 'cl': cl_pt}).dropna()
-common_timepoints['both'] = common_timepoints.apply(lambda x: x['im'] & x['cl'], axis=1)
-
-print("\nTimepoint availability (using improvement_percent as target")
-# Count patients with T1+T2+T3
-has_t123 = common_timepoints['both'].apply(lambda x: {1, 2, 3}.issubset(x)).sum()
-print(f"Patients with T1 + T2 + T3: {has_t123}")
-
-# Count patients with T1+T2
-has_t12 = common_timepoints['both'].apply(lambda x: {1, 2}.issubset(x)).sum()
-print(f"Patients with T1 + T2: {has_t12}")
-
-# Count patients with just T1
-has_t1 = common_timepoints['both'].apply(lambda x: 1 in x).sum()
-print(f"Patients with T1: {has_t1}")
-
-"""
-Immunological: 264 patients, 822 rows
-Clinical (Response category as target): 206 patients, 687 rows
-
-Using Response Cateory as Target
-=== Patient overlap ===
-Immunological only: 58
-Clinical only: 0
-Common patients: 206
-
-Patients with T1 + T2 + T3: 84
-Patients with T1 + T2: 140
-Patients with T1: 182
---------------------------------------------
-Using Improvement in percent as Target
-Immunological: 264 patients, 829 rows
-Clinical (df_cl_reduced2): 127 patients, 492 rows
-
-=== Patient overlap ===
-Immunological only: 138
-Clinical only: 0
-Common patients: 127
-
-Patients with T1 + T2 + T3: 62
-Patients with T1 + T2: 99
-Patients with T1: 111
-"""
+print(f"\nBaseline raw T1 datasets:")
+print(f"  Immunological: {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
+print(f"  Clinical:      {df_cl_raw_t1.shape},  patients: {df_cl_raw_t1['Patient'].nunique()}")
+print(f"  Combined:      {df_combined_raw_t1.shape}, patients: {df_combined_raw_t1['Patient'].nunique()}")
 
 
-#%% BASELINE DATASETS FOR CATBOOST MODEL USING RESPONSE CATEGORY AS TARGET
-# T1 only (pre-treatment) — one row per patient, raw data, no imputation
-# check if pre-treatment measurements alone predict treatment response?
+#%%############### REGRESSION HELPERS #########################################
 
-from catboost import CatBoostClassifier, Pool
-from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import RepeatedKFold
+from catboost import CatBoostRegressor, Pool
 import shap
-import numpy as np
-import pandas as pd
 
-target_col = 'response_category'
-id_cols = ['Patient', 'Timepoint']
-leaky_cols = ['response', 'improvement_percent']
 
-# --- Step 1: Add response_category to immunological dataset (patient-level label) ---
-response_map = df_cl_reduced1[['Patient', 'response_category']].drop_duplicates(subset='Patient')
-df_im_with_response = df_im_reduced.merge(response_map, on='Patient', how='left')
-df_im_with_response = df_im_with_response.dropna(subset=[target_col])
+def regression_metrics(y_true, y_pred):
+    """Return dict of MAE, MSE, RMSE, R² for a regression prediction."""
+    mae  = mean_absolute_error(y_true, y_pred)
+    mse  = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2   = r2_score(y_true, y_pred)
+    return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
 
-# --- Step 2: Create combined dataset (all timepoints), merge on Patient + Timepoint ---
-# response_category already in df_im_with_response from Step 1, drop from clinical to avoid duplication
-df_cl_for_merge = df_cl_reduced1.drop(columns=[target_col], errors='ignore')
-df_combined = df_im_with_response.merge(
-    df_cl_for_merge, on=['Patient', 'Timepoint'], how='inner',
-    suffixes=('_im', '_cl'))
 
-# --- Step 3: Filter to T1 for baseline ---
-df_im_baseline = df_im_with_response[df_im_with_response['Timepoint'] == 1].copy()
-#df_im_baseline = df_im_baseline.dropna(subset='response_category')
-df_cl_baseline = df_cl_reduced1[df_cl_reduced1['Timepoint'] == 1].copy()
-df_combined_baseline = df_combined[df_combined['Timepoint'] == 1].copy()
+def run_catboost_regressor(df_model, target_col, name,
+                           n_splits=5, n_repeats=5, random_state=42):
+    """5-fold × 5-repeat RepeatedKFold CatBoostRegressor. No hyperparameter tuning.
+    Returns (results_df, last_trained_model, X_features, y_pred_series).
 
-TableReport(df_im_baseline, max_plot_columns=180)
-TableReport(df_cl_baseline, max_plot_columns=180)
-TableReport(df_combined_baseline, max_plot_columns=180)
-
-#%% CatBoost baseline: 5-fold StratifiedKFold, built-in metrics
-# T1 only = one row per patient, so StratifiedKFold preserves class distribution
-
-def run_catboost_baseline(df_model, target_col, name):
-    """Run 5-fold StratifiedKFold CatBoost classifier on T1 data. No tuning.
-    Returns results_df (per-fold + mean), last trained model, X, y_pred.
+    Automatically excluded from features:
+      - ID columns  : Patient, Timepoint, Date, date, measurement_timepoint
+      - Leaky cols  : any column whose name contains 'response', 'improvement_percent',
+                      or 'pain_scale' (catches the raw score AND the other target)
     """
-    # Base exclusion list
-    exclude = ['Patient', 'Timepoint', target_col]
-    
-    # Add ALL leaky columns: response and improvement_percent (any variant)
-    # Catches: 'response', 'response_T1', 'response_T2', 'response_im', 'response_cl'
-    # Catches: 'improvement_percent', 'improvement_percent_T1', 'improvement_percent_T2', etc.
-    leaky_patterns = ['response', 'improvement_percent']
+    always_exclude  = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_patterns  = ['response', 'improvement_percent', 'pain_scale']
+    exclude = set(always_exclude + [target_col])
     for col in df_model.columns:
-        for pattern in leaky_patterns:
-            if pattern in col.lower():
-                exclude.append(col)
-                break
-    
-    # Remove duplicates and non-existent columns
-    exclude = list(set([col for col in exclude if col in df_model.columns]))
-    
-    
+        if any(pat in col.lower() for pat in leaky_patterns):
+            exclude.add(col)
+
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
     y = df_model[target_col].copy()
 
-    # Convert categoricals to string (CatBoost requirement for cat_features)
+    # Drop rows where target is NaN
+    valid = y.notna()
+    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    # CatBoost requires string for categorical features
     for col in X.select_dtypes(include=['category', 'object']).columns:
         X[col] = X[col].astype(str)
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
 
-    print(f"\n{'='*60}")
-    print(f"  CatBoost Baseline: {name}")
-    print(f"{'='*60}")
-    print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
+    print(f"\n{'='*65}")
+    print(f"  CatBoost Regressor Baseline — {name}")
+    print(f"  Target : {target_col}")
+    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
+    print(f"  CV     : {n_splits}-fold × {n_repeats} repeats = {n_splits * n_repeats} fits")
+    print(f"{'='*65}")
 
-    skf = StratifiedKFold(n_splits=5, n_repeats=5, random_state=42)
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
     fold_results = []
-    y_pred = pd.Series(index=X.index, dtype='object')
+    y_pred = pd.Series(np.nan, index=range(len(X)), dtype='float64')
 
-    for fold, (train_idx, test_idx) in enumerate(skf.split(X, y)):
+    for fold, (train_idx, test_idx) in enumerate(rkf.split(X)):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        train_pool = Pool(X_train, y_train, cat_features=cat_cols)
-        test_pool = Pool(X_test, y_test, cat_features=cat_cols)
-
-        model = CatBoostClassifier(
-            random_seed=42,
-            verbose=0,
-            iterations=0 # my laptop crashes due to large dataset
+        model = CatBoostRegressor(
+            iterations=300,
+            random_seed=random_state,
+            verbose=0
         )
-        model.fit(train_pool, eval_set=test_pool, use_best_model=False)
+        model.fit(
+            Pool(X_train, y_train, cat_features=cat_cols),
+            eval_set=Pool(X_test, y_test, cat_features=cat_cols),
+            use_best_model=False
+        )
 
-        # Predict class labels
-        preds = model.predict(test_pool, prediction_type='Class').flatten()
+        preds = model.predict(X_test)
         y_pred.iloc[test_idx] = preds
 
-        # Compute metrics using CatBoost eval_metrics (post-training)
-        metrics = model.eval_metrics(
-            test_pool,
-            ['Accuracy', 'TotalF1:average=Weighted', 'AUC:type=Mu', 'MCC']
-        )
-
-        fold_result = {
-            'Fold': fold + 1,
-            'Accuracy': metrics['Accuracy'][-1],
-            'F1_total': metrics['TotalF1:average=Weighted'][-1],
-            'AUC': metrics['AUC:type=Mu'][-1],
-            'MCC': metrics['MCC'][-1],
-            'Train_size': len(train_idx),
-            'Test_size': len(test_idx)
-        }
-        fold_results.append(fold_result)
-
-        print(f"  Fold {fold+1}: Acc={fold_result['Accuracy']:.4f}  "
-              f"F1={fold_result['F1_total']:.4f}  "
-              f"AUC={fold_result['AUC']:.4f}  "
-              f"MCC={fold_result['MCC']:.4f}")
+        m = regression_metrics(y_test, preds)
+        fold_results.append({'Fold': fold + 1, **m})
+        print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
+              f"RMSE={m['RMSE']:.3f}  R²={m['R2']:.3f}")
 
     results_df = pd.DataFrame(fold_results)
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df = pd.concat(
+        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    # Add mean row
-    metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
-    mean_row = {m: results_df[m].mean() for m in metric_cols}
-    mean_row['Fold'] = 'Mean'
-    results_df = pd.concat([results_df, pd.DataFrame([mean_row])], ignore_index=True)
-
-    print(f"\n  Mean Across 5 Folds")
+    print(f"\n  Summary ({n_splits}x{n_repeats} CV):")
     for m in metric_cols:
-        print(f"  {m}: {mean_row[m]:.4f}")
+        mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
+        sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
     return results_df, model, X, y_pred
 
 
-#%%
-# Run for all three datasets
-print("\n" + "="*70)
-print("  RUNNING CATBOOST BASELINES")
-print("="*70)
-
-target_col = 'response_category'
-res_im, model_im, X_im, y_pred_im = run_catboost_baseline(
-    df_im_baseline, target_col, "Immunological (T1 only)")
-
-res_cl, model_cl, X_cl, y_pred_cl = run_catboost_baseline(
-    df_cl_baseline, target_col, "Clinical (T1 only")
-
-res_comb, model_comb, X_comb, y_pred_comb = run_catboost_baseline(
-    df_combined_baseline, target_col, "Combined (T1 only")
-
-
-#%% Summary results table
-
-summary_rows = []
-metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
-for name, res in [("Immunological", res_im),
-                   ("Clinical", res_cl),
-                   ("Combined", res_comb)]:
-    fold_rows = res[res['Fold'] != 'Mean']
-    row = {'Dataset': name}
-    for m in metric_cols:
-        mean_val = fold_rows[m].mean()
-        std_val = fold_rows[m].std()
-        row[m] = f"{mean_val:.4f} ± {std_val:.4f}"
-    summary_rows.append(row)
-
-df_summary = pd.DataFrame(summary_rows)
-print("\n")
-print("  BASELINE CATBOOST MODEL (T1) RESULTS SUMMARY")
-print("="*70)
-print(df_summary.to_string(index=False))
-
-
-#%% SHAP analysis for each model
-# Compute SHAP values and plot summary for each dataset
-
-def compute_and_plot_shap(model, X, name):
-    """Compute SHAP values and create summary plot."""
+def plot_shap_regressor(model, X, name):
+    """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
     print(f"\n=== SHAP Analysis: {name} ===")
-    explainer = shap.TreeExplainer(model)
+    explainer   = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
 
-    # Convert list of arrays to numpy array for consistent shape handling
-    if isinstance(shap_values, list):
-        shap_values = np.array(shap_values)
-    print(f"  SHAP values shape: {shap_values.shape}, X shape: {X.shape}")
-
-    # Summary plot (bar) - mean absolute SHAP across all classes
-    shap.summary_plot(shap_values, X, plot_type="bar",
-                      class_names=list(model.classes_),
-                      show=False, max_display=25)
-    plt.title(f"SHAP Feature Importance - {name}")
+    # Bar plot: mean |SHAP| per feature
+    shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
+    plt.title(f"SHAP Feature Importance — {name}")
     plt.tight_layout()
     plt.show()
+
+    # Beeswarm: direction + magnitude
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title(f"SHAP Beeswarm — {name}")
+    plt.tight_layout()
+    plt.show()
+
     return shap_values
 
-shap_im = compute_and_plot_shap(model_im, X_im, "Immunological")
-shap_cl = compute_and_plot_shap(model_cl, X_cl, "Clinical")
-shap_comb = compute_and_plot_shap(model_comb, X_comb, "Combined")
+
+def print_regression_summary(results_dict, target_col):
+    """Print a mean ± std summary table across all datasets for a given target."""
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    rows = []
+    for ds_name, res_df in results_dict.items():
+        fold_rows = res_df[~res_df['Fold'].isin(['Mean', 'Std'])]
+        row = {'Dataset': ds_name}
+        for m in metric_cols:
+            row[m] = f"{fold_rows[m].mean():.3f} ± {fold_rows[m].std():.4f}"
+        rows.append(row)
+    summary = pd.DataFrame(rows)
+    print(f"\n{'='*70}")
+    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}")
+    print(f"{'='*70}")
+    print(summary.to_string(index=False))
+    return summary
 
 
-#%% ===================================================================
-# BASELINE MODEL 2: T1 + T2 (patients with both timepoints)
-# Pivot to wide format: one row per patient, features suffixed with _T1 / _T2
-# =====================================================================
+#%%############### BASELINE CATBOOST — pain_scale_reduction ###################
 
-# --- Step 1: Find patients that have BOTH T1 and T2 ---
-patients_t1_im = set(df_im_with_response[df_im_with_response['Timepoint'] == 1]['Patient'])
-patients_t2_im = set(df_im_with_response[df_im_with_response['Timepoint'] == 2]['Patient'])
-patients_t1t2_im = patients_t1_im & patients_t2_im
-
-patients_t1_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 1]['Patient'])
-patients_t2_cl = set(df_cl_reduced1[df_cl_reduced1['Timepoint'] == 2]['Patient'])
-patients_t1t2_cl = patients_t1_cl & patients_t2_cl
-
-def pivot_t1t2(df, patients_with_both, id_col='Patient', tp_col='Timepoint'):
-    """Pivot T1+T2 long format to wide: one row per patient.
-    Feature columns get _T1 / _T2 suffixes. Patient-level columns (same across
-    timepoints) are kept as single columns without suffix.
-    """
-    # Filter to patients with both T1 and T2, timepoints 1 and 2 only
-    df_filt = df[
-        (df[id_col].isin(patients_with_both)) &
-        (df[tp_col].isin([1, 2]))
-    ].copy()
-
-    # Separate T1 and T2
-    df_t1 = df_filt[df_filt[tp_col] == 1].set_index(id_col).drop(columns=[tp_col])
-    df_t2 = df_filt[df_filt[tp_col] == 2].set_index(id_col).drop(columns=[tp_col])
-
-    # Find columns that are identical across T1 and T2 (patient-level / static)
-    common_patients = df_t1.index.intersection(df_t2.index)
-    static_cols = []
-    for col in df_t1.columns:
-        if col in df_t2.columns:
-            t1_vals = df_t1.loc[common_patients, col].reset_index(drop=True)
-            t2_vals = df_t2.loc[common_patients, col].reset_index(drop=True)
-            # Check if values are identical (treating NaN == NaN)
-            if t1_vals.equals(t2_vals):
-                static_cols.append(col)
-
-    # Separate static and time-varying columns
-    varying_cols = [c for c in df_t1.columns if c not in static_cols]
-
-    # Build wide dataframe
-    df_static = df_t1.loc[common_patients, static_cols]
-    df_t1_varying = df_t1.loc[common_patients, varying_cols].add_suffix('_T1')
-    df_t2_varying = df_t2.loc[common_patients, varying_cols].add_suffix('_T2')
-
-    df_wide = pd.concat([df_static, df_t1_varying, df_t2_varying], axis=1)
-    df_wide = df_wide.reset_index()
-
-    print(f"  Pivot: {len(common_patients)} patients, "
-          f"{len(static_cols)} static cols, "
-          f"{len(varying_cols)} varying cols × 2 = {len(varying_cols)*2} cols, "
-          f"total features: {df_wide.shape[1] - 1}")
-
-    return df_wide
-
-# --- Step 2: Pivot each dataset to wide format ---
-print("\n=== Pivoting T1+T2 to wide format ===")
-
-print("\nImmunological:")
-df_im_baseline_t1t2 = pivot_t1t2(df_im_with_response, patients_t1t2_im)
-
-print("\nClinical:")
-df_cl_baseline_t1t2 = pivot_t1t2(df_cl_reduced1, patients_t1t2_cl)
-
-# --- Step 3: Combined dataset — merge wide immunological + wide clinical ---
-patients_t1t2_both = patients_t1t2_im & patients_t1t2_cl
-# Re-pivot with shared patient set for consistent merge
-print("\nCombined (re-pivot with shared patients):")
-df_im_wide_shared = pivot_t1t2(df_im_with_response, patients_t1t2_both)
-df_cl_wide_shared = pivot_t1t2(df_cl_reduced1, patients_t1t2_both)
-# Drop target from clinical side to avoid duplication
-df_cl_wide_for_merge = df_cl_wide_shared.drop(columns=[target_col], errors='ignore')
-df_combined_baseline_t1t2 = df_im_wide_shared.merge(
-    df_cl_wide_for_merge, on='Patient', how='inner', suffixes=('_im', '_cl'))
-
-print(f"\n=== T1+T2 Wide Baseline Datasets ===")
-print(f"Immunological: {df_im_baseline_t1t2.shape}, Patients: {df_im_baseline_t1t2['Patient'].nunique()}")
-print(f"Clinical: {df_cl_baseline_t1t2.shape}, Patients: {df_cl_baseline_t1t2['Patient'].nunique()}")
-print(f"Combined: {df_combined_baseline_t1t2.shape}, Patients: {df_combined_baseline_t1t2['Patient'].nunique()}")
-print(f"Target distribution:\n{df_im_baseline_t1t2[target_col].value_counts().to_string()}")
-
-TableReport(df_combined_baseline_t1t2, max_plot_columns=320)
-
-#%% Run T1+T2 baselines (wide format = one row per patient, reuse run_catboost_baseline)
 print("\n" + "="*70)
-print("  RUNNING CATBOOST BASELINE MODELS (T1+T2 wide)")
+print("  CATBOOST BASELINE REGRESSOR — Target: pain_scale_reduction")
 print("="*70)
 
-target_col= 'response_category'
+target = 'pain_scale_reduction'
 
-res_im_t1t2, model_im_t1t2, X_im_t1t2, y_pred_im_t1t2 = run_catboost_baseline(
-    df_im_baseline_t1t2, target_col, "Immunological (T1+T2)")
+res_im_red, model_im_red, X_im_red, ypred_im_red = run_catboost_regressor(
+    df_im_raw_t1, target, "Immunological (raw T1)")
 
-res_cl_t1t2, model_cl_t1t2, X_cl_t1t2, y_pred_cl_t1t2 = run_catboost_baseline(
-    df_cl_baseline_t1t2, target_col, "Clinical (T1+T2)")
+res_cl_red, model_cl_red, X_cl_red, ypred_cl_red = run_catboost_regressor(
+    df_cl_raw_t1, target, "Clinical (raw T1)")
 
-res_comb_t1t2, model_comb_t1t2, X_comb_t1t2, y_pred_comb_t1t2 = run_catboost_baseline(
-    df_combined_baseline_t1t2, target_col, "Combined (T1+T2)")
+res_comb_red, model_comb_red, X_comb_red, ypred_comb_red = run_catboost_regressor(
+    df_combined_raw_t1, target, "Combined (raw T1)")
+
+summary_cb_red = print_regression_summary(
+    {"Immunological": res_im_red, "Clinical": res_cl_red, "Combined": res_comb_red},
+    target
+)
+
+#%% SHAP — pain_scale_reduction
+
+shap_im_red   = plot_shap_regressor(model_im_red,   X_im_red,   "Immunological — pain_scale_reduction")
+shap_cl_red   = plot_shap_regressor(model_cl_red,   X_cl_red,   "Clinical — pain_scale_reduction")
+shap_comb_red = plot_shap_regressor(model_comb_red, X_comb_red, "Combined — pain_scale_reduction")
 
 
-#%% T1+T2 Summary results table
-summary_rows_t1t2 = []
-metric_cols = ['Accuracy', 'F1_total', 'AUC', 'MCC']
-for name, res in [("Immunological", res_im_t1t2),
-                   ("Clinical", res_cl_t1t2),
-                   ("Combined", res_comb_t1t2)]:
-    fold_rows = res[res['Fold'] != 'Mean']
-    row = {'Dataset': name}
+#%%############### BASELINE CATBOOST — pain_scale_t2 ##########################
+
+print("\n" + "="*70)
+print("  CATBOOST BASELINE REGRESSOR — Target: pain_scale_t2")
+print("="*70)
+
+target = 'pain_scale_t2'
+
+res_im_t2, model_im_t2, X_im_t2, ypred_im_t2 = run_catboost_regressor(
+    df_im_raw_t1, target, "Immunological (raw T1)")
+
+res_cl_t2, model_cl_t2, X_cl_t2, ypred_cl_t2 = run_catboost_regressor(
+    df_cl_raw_t1, target, "Clinical (raw T1)")
+
+res_comb_t2, model_comb_t2, X_comb_t2, ypred_comb_t2 = run_catboost_regressor(
+    df_combined_raw_t1, target, "Combined (raw T1)")
+
+summary_cb_t2 = print_regression_summary(
+    {"Immunological": res_im_t2, "Clinical": res_cl_t2, "Combined": res_comb_t2},
+    target
+)
+
+#%% SHAP — pain_scale_t2
+
+shap_im_t2   = plot_shap_regressor(model_im_t2,   X_im_t2,   "Immunological — pain_scale_t2")
+shap_cl_t2   = plot_shap_regressor(model_cl_t2,   X_cl_t2,   "Clinical — pain_scale_t2")
+shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_scale_t2")
+
+
+#%%############### ADVANCED MODELING DATASET ##################################
+# Cleaned + transformed + parsed, NOT imputed, T1 only.
+# df_combined_t1 (from Step 9) is already this dataset.
+# HistGradientBoostingRegressor handles numeric NaN natively.
+
+print(f"\nAdvanced modeling dataset (df_combined_t1): {df_combined_t1.shape}, "
+      f"patients: {df_combined_t1['Patient'].nunique()}")
+print(df_combined_t1[['pain_scale_reduction', 'pain_scale_t2']].describe())
+
+
+#%%############### ADVANCED MODELING: HistGradientBoosting ####################
+
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.compose import ColumnTransformer
+
+
+def run_hgb_regressor(df_model, target_col, name,
+                      n_splits=5, n_repeats=5, random_state=42):
+    """5-fold × 5-repeat RepeatedKFold HistGradientBoostingRegressor. No tuning.
+    Numeric NaN handled natively. Categorical columns encoded via OrdinalEncoder.
+    Returns (results_df, fitted_pipeline, X_features, y_pred_series).
+    """
+    always_exclude = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_patterns = ['response', 'improvement_percent', 'pain_scale']
+    exclude = set(always_exclude + [target_col])
+    for col in df_model.columns:
+        if any(pat in col.lower() for pat in leaky_patterns):
+            exclude.add(col)
+
+    feature_cols = [c for c in df_model.columns if c not in exclude]
+    X = df_model[feature_cols].copy().reset_index(drop=True)
+    y = df_model[target_col].copy().reset_index(drop=True)
+
+    # Drop rows with NaN target
+    valid = y.notna()
+    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+
+    # Pipeline: OrdinalEncoder for categoricals (NaN → -2, unknown → -1),
+    # numeric columns passed through (HGB handles NaN natively)
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('cat', OrdinalEncoder(
+                handle_unknown='use_encoded_value',
+                unknown_value=-1,
+                encoded_missing_value=-2
+            ), cat_cols),
+        ],
+        remainder='passthrough',
+        verbose_feature_names_out=False
+    )
+
+    pipeline = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', HistGradientBoostingRegressor(
+            max_iter=500,
+            random_state=random_state
+        ))
+    ])
+
+    print(f"\n{'='*65}")
+    print(f"  HistGradientBoosting Regressor — {name}")
+    print(f"  Target : {target_col}")
+    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
+    print(f"  CV     : {n_splits}-fold × {n_repeats} repeats = {n_splits * n_repeats} fits")
+    print(f"{'='*65}")
+
+    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
+    fold_results = []
+    y_pred_arr = np.full(len(y), np.nan)
+
+    for fold, (train_idx, test_idx) in enumerate(rkf.split(X)):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
+        y_pred_arr[test_idx] = preds
+
+        m = regression_metrics(y_test, preds)
+        fold_results.append({'Fold': fold + 1, **m})
+        print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
+              f"RMSE={m['RMSE']:.3f}  R²={m['R2']:.3f}")
+
+    results_df = pd.DataFrame(fold_results)
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df = pd.concat(
+        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    print(f"\n  Summary ({n_splits}x{n_repeats} CV):")
     for m in metric_cols:
-        mean_val = fold_rows[m].mean()
-        std_val = fold_rows[m].std()
-        row[m] = f"{mean_val:.4f} ± {std_val:.4f}"
-    summary_rows_t1t2.append(row)
+        mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
+        sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
-df_summary_t1t2 = pd.DataFrame(summary_rows_t1t2)
-print("\n")
-print("  BASELINE CATBOOST MODEL (T1+T2 wide) RESULTS SUMMARY")
+    return results_df, pipeline, X, pd.Series(y_pred_arr, name='y_pred')
+
+
+#%%############### RUN HGB — pain_scale_reduction #############################
+
+print("\n" + "="*70)
+print("  HGB ADVANCED MODELING — Target: pain_scale_reduction")
 print("="*70)
-print(df_summary_t1t2.to_string(index=False))
 
+res_hgb_red, pipeline_hgb_red, X_hgb_red, ypred_hgb_red = run_hgb_regressor(
+    df_combined_t1, 'pain_scale_reduction', "Combined clean T1")
 
-#%% Classification plots for T1+T2 models
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
+# Built-in feature importance from the HGB model
+hgb_model     = pipeline_hgb_red.named_steps['model']
+try:
+    feat_names = pipeline_hgb_red.named_steps['preprocess'].get_feature_names_out()
+except Exception:
+    feat_names = X_hgb_red.columns.tolist()
 
-target_col = 'response_category'
-class_order = ['CR', 'PR', 'NI']
+importance_df = pd.DataFrame({
+    'Feature':    feat_names,
+    'Importance': hgb_model.feature_importances_
+}).sort_values('Importance', ascending=False).reset_index(drop=True)
 
-# --- Confusion matrices (one per dataset) ---
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-for ax, (name, df_src, y_pred) in zip(axes, [
-    ("Immunological (T1+T2)", df_im_baseline_t1t2, y_pred_im_t1t2),
-    ("Clinical (T1+T2)", df_cl_baseline_t1t2, y_pred_cl_t1t2),
-    ("Combined (T1+T2)", df_combined_baseline_t1t2, y_pred_comb_t1t2),
-]):
-    y_true = df_src[target_col].loc[y_pred.index]
-    cm = confusion_matrix(y_true, y_pred, labels=class_order)
-    disp = ConfusionMatrixDisplay(cm, display_labels=class_order)
-    disp.plot(ax=ax, cmap='Blues', colorbar=False)
-    ax.set_title(name, fontsize=12)
-fig.suptitle("Confusion Matrices — CatBoost Baseline (T1+T2)", fontsize=14, y=1.02)
+print(f"\nTop 20 features by HGB importance (pain_scale_reduction):")
+print(importance_df.head(20).to_string(index=False))
+
+# Bar plot of feature importance
+plt.figure(figsize=(10, 8))
+sns.barplot(
+    data=importance_df.head(20),
+    x='Importance', y='Feature',
+    palette='mako', orient='h'
+)
+plt.title("HGB Feature Importance — pain_scale_reduction", fontweight='bold')
+plt.xlabel('Importance')
 plt.tight_layout()
 plt.show()
-
-# --- Predicted vs True class distribution ---
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-for ax, (name, df_src, y_pred) in zip(axes, [
-    ("Immunological (T1+T2)", df_im_baseline_t1t2, y_pred_im_t1t2),
-    ("Clinical (T1+T2)", df_cl_baseline_t1t2, y_pred_cl_t1t2),
-    ("Combined (T1+T2)", df_combined_baseline_t1t2, y_pred_comb_t1t2),
-]):
-    y_true = df_src[target_col].loc[y_pred.index]
-    true_counts = y_true.value_counts().reindex(class_order, fill_value=0)
-    pred_counts = y_pred.value_counts().reindex(class_order, fill_value=0)
-    x = np.arange(len(class_order))
-    width = 0.35
-    ax.bar(x - width/2, true_counts.values, width, label='True', color='steelblue')
-    ax.bar(x + width/2, pred_counts.values, width, label='Predicted', color='salmon')
-    ax.set_xticks(x)
-    ax.set_xticklabels(class_order)
-    ax.set_ylabel('Count')
-    ax.set_title(name, fontsize=12)
-    ax.legend()
-fig.suptitle("True vs Predicted Class Distribution — CatBoost (T1+T2)", fontsize=14, y=1.02)
-plt.tight_layout()
-plt.show()
-
-
-#%% SHAP analysis for T1+T2 models
-shap_im_t1t2 = compute_and_plot_shap(model_im_t1t2, X_im_t1t2, "Immunological (T1+T2)")
-shap_cl_t1t2 = compute_and_plot_shap(model_cl_t1t2, X_cl_t1t2, "Clinical (T1+T2)")
-shap_comb_t1t2 = compute_and_plot_shap(model_comb_t1t2, X_comb_t1t2, "Combined (T1+T2)")
-
-
 
 # %%
