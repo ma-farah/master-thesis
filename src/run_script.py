@@ -612,6 +612,7 @@ for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t
     print("\n")
 
 
+# Trajectory pca plot....
 
 
 #%%############ MFA for timepoints 1, 2 and 3 combined 
@@ -791,20 +792,23 @@ print(f"Total: {len(outlier_candidates)}")
 print(outlier_candidates.to_string())
 
 
-# %%################ RAW CLINICAL DATASET #############################
 
+
+
+
+
+
+
+
+
+
+
+
+# %%################ RAW CLINICAL DATASET #############################
 
 # Table report of clinical dataset
 print("TableReport of raw clinical dataset:")
 TableReport(df_cl, max_plot_columns=138)
-
-# A lot of null values dues to empty rows (1658 rows),
-# as well as other comments/notes in the excel sheet.
-# Need to structure data based on timepoints 1,2,3,4...
-# Patients with missing treatment/ response information - remove
-# Patients with "Ausschluss/ Exclude" - remove
-# Patients with only 1 measured timepoint - remove
-# Combine Survey questions/columns ?
 
 # na analysis of clinical dataset
 print("Na analysis of clinical dataset:")
@@ -823,7 +827,6 @@ na.altair.plot_heatmap(df_cl)
 # Pipeline: Forward-fill -> Exclude patients -> Rename -> Define nulls ->
 # Deduplicate categories -> Extract numerics -> Transform columns -> Change dtype 
 # -> drop na>25% columns -> visualize -> prepare target before modeling
-
 
 
 #%% Clinical preprocessing: helper functions
@@ -864,16 +867,27 @@ def extract_numeric(series):
 
 
 def extract_continuous(series):
-    """Extract numeric value from continuous scale entries (e.g., pain_scale 1-10. Comma is German decimal ("9,7" = 9.7).
-    Handles: German decimals, ranges "20-30" -> midpoint, trailing text "40 (left side)" -> 40.
+    """Extract numeric value from continuous scale entries (e.g., pain_scale 1-10).
+    Comma is German decimal ("9,7" = 9.7).
+    Handles:
+      - German decimals: "9,7" -> 9.7
+      - Ranges: "20-30" -> midpoint 25.0
+      - Trailing text: "40 (left side)" -> 40
+      - Ruhe (at rest) entries: "7,3-dauernd bei Belastung, 10 aus der Ruhe" -> 10
+        (prefer the resting pain value when both load and rest values are given)
     """
     s = series.astype(str).str.strip()
 
     def parse_entry(val):
         if val in ('nan', '', 'None'):
             return np.nan
-        # Range: "20-30", "10 - 20"
-        m = re.match(r'^(\d+[.,]?\d*)\s*[-–]\s*(\d+[.,]?\d*)', val)
+        # Ruhe (at rest): extract the number directly before "Ruhe" or "aus der Ruhe"
+        # e.g. "7,3-dauernd bei Belastung, 10 aus der Ruhe" -> 10
+        m_ruhe = re.search(r'(\d+[.,]?\d*)\s*(?:aus\s+der\s+)?[Rr]uhe', val)
+        if m_ruhe:
+            return float(m_ruhe.group(1).replace(',', '.'))
+        # Pure range: "20-30", "10 - 20" -> midpoint
+        m = re.match(r'^(\d+[.,]?\d*)\s*[-–]\s*(\d+[.,]?\d*)\s*$', val)
         if m:
             return (float(m.group(1).replace(',', '.')) +
                     float(m.group(2).replace(',', '.'))) / 2
@@ -1006,8 +1020,7 @@ def standardize_target_volume(series):
     body_part_map = [
         ('Achilles Tendon', ['achillessehne', 'achilles tendon']),
         ('Heel',            ['heel', 'ferse']),
-        ('Foot',            ['foot']),
-        ('Forefoot',        ['forefoot']),
+        ('Foot',            ['foot', 'forefoot']),
         ('Ankle',           ['ankle']),
         ('Knee',            ['knee', 'knie']),
         ('Hip',             ['hip', 'hüfte']),
@@ -1219,7 +1232,35 @@ def standardize_pain_points(series):
 
         if not results:
             return s.strip()  # keep original if nothing matched
-        return ', '.join(results)
+
+        # Collapse same body part with both L and R sides into B
+        # e.g. ["Heel R", "Heel L"] -> ["Heel B"]
+        from collections import defaultdict
+        sides_by_part = defaultdict(set)
+        order = []
+        for entry in results:
+            parts = entry.rsplit(' ', 1)
+            if len(parts) == 2 and parts[1] in ('L', 'R', 'B'):
+                part, side = parts
+            else:
+                part, side = entry, ''
+            if part not in order:
+                order.append(part)
+            sides_by_part[part].add(side)
+
+        merged = []
+        for part in order:
+            sides = sides_by_part[part]
+            if 'B' in sides or ('L' in sides and 'R' in sides):
+                merged.append(f"{part} B")
+            elif 'L' in sides:
+                merged.append(f"{part} L")
+            elif 'R' in sides:
+                merged.append(f"{part} R")
+            else:
+                merged.append(part)
+
+        return ', '.join(merged)
 
     return series.apply(parse_entry)
 
@@ -1232,7 +1273,7 @@ def split_filter_column(df, col_name='filter'):
 
     def parse_filter(val):
         if pd.isna(val):
-            return pd.NA, pd.N
+            return pd.NA, pd.NA
         s = str(val).strip()
         # Handle duplicate entries like "0,2\n0,2" — take the first
         s = s.split('\n')[0].strip()
@@ -1443,10 +1484,13 @@ try:
 except Exception as e:
     print(f"Warning: Could not drop questionnaire columns: {e}")
 
+
+
+
 # Remove patients irradiated at MULTIPLE DIFFERENT body parts in the same treatment course.
 # E.g. shoulder + heel simultaneously — these are distinct from bilateral (same part, both sides).
 # Verify target volumes before removing.
-multi_body_patients = [184, 179, 156, 149, 54, 47, 128]
+multi_body_patients = [3, 45, 184, 162, 179, 156, 54, 47, 219]
 print(f"\nVerifying multi-body-part patients (to be excluded):")
 for pid in multi_body_patients:
     rows = df_cl_clean[df_cl_clean['Patient'] == pid]
@@ -1504,36 +1548,32 @@ TableReport(df_cl_raw_baseline, max_plot_columns=100)
 
 #%% Step 4: Clean null markers
 
-# Fix duplicate entries separated by newlines (e.g., "3\n3" → "3")
-print("=== Removing newline-duplicated entries ===")
-for col in df_cl_clean.columns:
-    str_col = df_cl_clean[col].astype(str)
-    has_newline = str_col.str.contains('\n', na=False)
-    if has_newline.sum() > 0:
-        def dedup_newline(val):
-            if pd.isna(val):
-                return val
-            s = str(val)
-            if '\n' not in s:
-                return val
-            parts = [p.strip() for p in s.split('\n') if p.strip()]
-            if len(parts) > 1 and len(set(parts)) == 1:
-                return parts[0]  # all parts identical → keep one
-            return parts[0]  # different parts → keep first
-        df_cl_clean[col] = df_cl_clean[col].apply(dedup_newline)
-        print(f"  {col}: fixed {has_newline.sum()} entries with newlines")
-
-
 # Replace German missing markers across ALL columns: k.A./ka/kA and n.D./n.D
+# Skip ID columns — Patient and Timepoint must never be nulled out here
 null_pattern = r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$'
+null_skip = {'Patient', 'Timepoint'}
 print("\n=== Replacing null markers ('kA' and 'nD' varations) ===")
 for col in df_cl_clean.columns:
+    if col in null_skip:
+        continue
     str_col = df_cl_clean[col].astype(str).str.strip()
     mask = str_col.str.match(null_pattern, na=False)
     if mask.sum() > 0:
         print(f"  {col}: replaced {mask.sum()} null markers")
         df_cl_clean.loc[mask, col] = pd.NA
 
+
+# Manual data corrections (known entry errors identified by inspection)
+# These are applied before numeric extraction so the corrected value goes through
+# the normal parsing pipeline.
+
+# Patient 248, T2: pain_daytime was entered as "22" — confirmed typo, should be 2
+mask_248 = (df_cl_clean['Patient'] == 248) & (df_cl_clean['Timepoint'] == 2)
+if mask_248.sum() > 0:
+    df_cl_clean.loc[mask_248, 'pain_daytime'] == 2.0
+    print("Manual correction: Patient 248 T2 pain_daytime set to 2 (was '22')")
+else:
+    print("Warning: Patient 248 T2 not found — correction skipped")
 
 
 #%% Step 5: Extract/convert numeric values from mixed text/number columns
@@ -1543,6 +1583,14 @@ for col in df_cl_clean.columns:
 # Skip: pain_points (categorical string), pain_scale (continuous, comma = German decimal)
 all_cols = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].columns
 ordinal_cols = [c for c in all_cols if c not in ('pain_points', 'pain_scale')]
+
+print("\n=== Unique raw values — ordinal questionnaire columns (before extraction) ===")
+for col in ordinal_cols:
+    if col in df_cl_clean.columns:
+        uniq = df_cl_clean[col].dropna().unique()
+        print(f"\n  {col} ({len(uniq)} unique):")
+        for v in sorted(uniq, key=lambda x: str(x)):
+            print(f"    {repr(v)}")
 
 print("\n=== Extracting numeric values (ordinal questionnaire columns) ===")
 n_converted = 0
@@ -1560,6 +1608,13 @@ print(f"Total ordinal text entries converted: {n_converted}")
 
 # Continuous column: comma = German decimal, ranges -> midpoint
 # pain_scale (1-10): "9,7" -> 9.7, "7-8" -> 7.5
+print("\n=== Unique raw values — pain_scale (before extraction) ===")
+if 'pain_scale' in df_cl_clean.columns:
+    uniq_ps = df_cl_clean['pain_scale'].dropna().unique()
+    print(f"  pain_scale ({len(uniq_ps)} unique):")
+    for v in sorted(uniq_ps, key=lambda x: str(x)):
+        print(f"    {repr(v)}")
+
 print("\n=== Extracting numeric values (continuous columns) ===")
 for col in ['pain_scale']:
     if col in df_cl_clean.columns:
@@ -1569,8 +1624,12 @@ for col in ['pain_scale']:
         if was_text.sum() > 0:
             print(f"  {col}: extracted {was_text.sum()} values from text entries")
         df_cl_clean[col] = extracted
+        uniq_after = sorted(df_cl_clean[col].dropna().unique())
+        print(f"\n  pain_scale unique values after extraction ({len(uniq_after)}):")
+        for v in uniq_after:
+            print(f"    {v}")
 
-
+TableReport(df_cl_clean)
 
 #%% Step 6: Column-specific transformations
 
@@ -1589,29 +1648,41 @@ print(f"  Target side: {df_cl_clean['target_side'].value_counts().to_dict()}")
 # Pain points: standardize body part names + side per body part
 df_cl_clean['pain_points'] = standardize_pain_points(df_cl_clean['pain_points'])
 print(f"\nPain points: {df_cl_clean['pain_points'].nunique()} unique categories (was 149)")
-print(f"  Top 10: {df_cl_clean['pain_points'].value_counts().head(10).to_dict()}")
+print(f"  Top 20: {df_cl_clean['pain_points'].value_counts().head(40).to_dict()}")
+
 
 # Filter: split into filter_mm (thickness) and filter_material (Cu/Al)
 df_cl_clean = split_filter_column(df_cl_clean)
 print(f"\nFilter mm: {sorted(df_cl_clean['filter_mm'].dropna().unique())}")
 print(f"Filter material: {df_cl_clean['filter_material'].value_counts().to_dict()}")
 
-df_cl_clean['cumulative_dose'] = df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose)
+
+df_cl_clean['cumulative_dose'] = pd.to_numeric(
+    df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose),
+    errors='coerce'
+)
 print(f"\nCumulative dose: {sorted(df_cl_clean['cumulative_dose'].dropna().unique())}")
+
 
 # Gender: standardize 'w' (German: weiblich) to 'f' (female)
 df_cl_clean['gender'] = df_cl_clean['gender'].replace('w', 'f')
 print(f"\nGender: {df_cl_clean['gender'].value_counts().to_dict()}")
+
 
 # BMI: split overweight_bmi -> overweight (ja/nein) + bmi (float)
 df_cl_clean = split_bmi_column(df_cl_clean)
 missing_bmi = (df_cl_clean['bmi'].isna() & df_cl_clean['overweight'].notna()).sum()
 print(f"BMI split: {missing_bmi} patients with overweight status but missing BMI value")
 
+
 # Symptoms duration: German strings to numeric months
-df_cl_clean['symptoms_months'] = parse_symptoms_duration(df_cl_clean['symptoms_months'], df_cl_clean['date'])
+df_cl_clean['symptoms_months'] = pd.to_numeric(
+    parse_symptoms_duration(df_cl_clean['symptoms_months'], df_cl_clean['date']),
+    errors='coerce'
+)
 print(f"Symptoms: range {df_cl_clean['symptoms_months'].min():.0f}-{df_cl_clean['symptoms_months'].max():.0f} months, "
       f"{df_cl_clean['symptoms_months'].isna().sum()} missing")
+
 
 # Previous therapy: comma-separated codes (1-7) to binary columns
 df_cl_clean = encode_therapy_columns(df_cl_clean)
@@ -1619,13 +1690,6 @@ therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)]
 print(f"Therapy encoding: {df_cl_clean[therapy_cols].sum().to_dict()}")
 
 
-# Improvement percent: fill 0 for patients with "no improvement" response
-no_improvement_mask = (
-    df_cl_clean['response'].str.lower().str.startswith('no', na=False) &
-    df_cl_clean['improvement_percent'].isna()
-)
-df_cl_clean.loc[no_improvement_mask, 'improvement_percent'] = 0
-print(f"Improvement: filled {no_improvement_mask.sum()} NaN values with 0 for 'no improvement' responses")
 
 # Response: parse into response_category (CR/PR/NI or combinations) and response_percent (numeric).
 # response_category is metadata for reference; regression targets use pain_scale (see Step 9).
@@ -1639,20 +1703,42 @@ df_cl_clean = move_column_after(df_cl_clean, 'response_percent', 'response_categ
 # A row is considered "empty" if ALL columns between 'date' and 'response' are NaN.
 # This covers: symptoms_months, previous_therapy, pain columns, pain_scale, pain_points.
 # (EORTC questionnaire columns already dropped at Step 2, so this range is narrower.)
-all_col_list = df_cl_clean.columns.tolist()
-date_idx = all_col_list.index('date') if 'date' in all_col_list else -1
-response_idx = all_col_list.index('response') if 'response' in all_col_list else len(all_col_list)
-questionnaire_cols = all_col_list[date_idx + 1:response_idx] if date_idx >= 0 else []
-print(f"Questionnaire columns checked for emptiness: {questionnaire_cols}")
+n_before = len(df_cl_clean)
+df_cl_clean = df_cl_clean[df_cl_clean['pain_scale'].notna()].copy()
+print(f"\nRemoved {n_before - len(df_cl_clean)} rows with missing pain_scale "
+      f"({df_cl_clean['Patient'].nunique()} patients remaining)")
 
-empty_questionnaire_mask = (
-    df_cl_clean['date'].notna() &
-    df_cl_clean[questionnaire_cols].isna().all(axis=1)
-) if questionnaire_cols else pd.Series(False, index=df_cl_clean.index)
-print(f"\nRemoving {empty_questionnaire_mask.sum()} empty questionnaire rows")
-if empty_questionnaire_mask.sum() > 0:
-    print(df_cl_clean.loc[empty_questionnaire_mask, ['Patient', 'Timepoint', 'date', 'response', 'diagnosis']])
-df_cl_clean = df_cl_clean[~empty_questionnaire_mask]
+TableReport(df_cl_clean)
+
+
+# distribution of pain_scale at T1-T5: T1/T2/T3 top row, T4/T5 bottom row
+timepoints = [1, 2, 3, 4, 5]
+colors = sns.color_palette('mako', 5)
+fig = plt.figure(figsize=(15, 8))
+
+# Top row: T1, T2, T3 (3 columns)
+top_axes = [fig.add_subplot(2, 3, i + 1) for i in range(3)]
+# Bottom row: T4, T5 centred using columns 1 and 2 of a 3-col grid
+bot_axes = [fig.add_subplot(2, 3, 5), fig.add_subplot(2, 3, 6)]
+
+plot_axes = top_axes + bot_axes
+
+for ax, tp, color in zip(plot_axes, timepoints, colors):
+    data = df_cl_clean.loc[df_cl_clean['Timepoint'] == tp, 'pain_scale'].dropna()
+    ax.hist(data, bins=15, color=color, edgecolor='white')
+    ax.set_title(f'T{tp}  (n={len(data)})')
+    ax.set_xlabel('Pain Scale (0-10)')
+    ax.set_ylabel('Count')
+    if len(data) > 0:
+        ax.axvline(data.median(), color='white', linestyle='--', linewidth=1.5,
+                   label=f'Median {data.median():.1f}')
+        ax.legend(fontsize=9)
+
+plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+print(df_cl_clean.groupby('Timepoint')['pain_scale'].describe())
 
 
 #%% Step 8: final dtype conversion
@@ -1667,9 +1753,19 @@ categorical_cols = [
 
 # Ensure id/date columns keep appropriate types
 if 'Patient' in df_cl_clean.columns:
-    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce').astype('int64')
+    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce')
 if 'Timepoint' in df_cl_clean.columns:
-    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce').astype('int64')
+    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce')
+
+# Drop rows where Patient or Timepoint couldn't be parsed — they are unusable
+n_before = len(df_cl_clean)
+df_cl_clean = df_cl_clean.dropna(subset=['Patient', 'Timepoint'])
+n_dropped = n_before - len(df_cl_clean)
+if n_dropped > 0:
+    print(f"Dropped {n_dropped} rows with unparseable Patient or Timepoint values")
+
+df_cl_clean['Patient']   = df_cl_clean['Patient'].astype('int64')
+df_cl_clean['Timepoint'] = df_cl_clean['Timepoint'].astype('int64')
 if 'measurement_timepoint' in df_cl_clean.columns:
     df_cl_clean['measurement_timepoint'] = df_cl_clean['measurement_timepoint'].astype(str)
 if 'date' in df_cl_clean.columns:
@@ -1717,13 +1813,6 @@ TableReport(df_cl_clean, max_plot_columns=100)
 # Save visualization copy BEFORE pain_scale filter — preserves ALL patients
 # (not limited to those with pain targets) for use in PCA / MFA / exploration.
 df_cl_for_viz = df_cl_clean.copy()
-
-# --- Filter: keep only rows/patients with a valid pain_scale value ---
-# pain_scale is the primary regression target. Rows without it cannot contribute
-# to target computation and are excluded now.
-print(f"\nRows before pain_scale filter: {len(df_cl_clean)}, patients: {df_cl_clean['Patient'].nunique()}")
-df_cl_clean = df_cl_clean[df_cl_clean['pain_scale'].notna()].copy()
-print(f"Rows after filter (pain_scale not NaN): {len(df_cl_clean)}, patients: {df_cl_clean['Patient'].nunique()}")
 
 
 # --- Compute regression targets ---
