@@ -181,6 +181,9 @@ TableReport(df_im, max_plot_columns=180)
 na_frac = df_im.isna().mean()
 cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
 df_im = df_im.drop(columns=cols_to_drop).copy()
+
+df_im_mod = df_im.copy() # copy for modeling!
+
 print('Dropped columns:', cols_to_drop)
 
 """ 
@@ -1473,9 +1476,11 @@ def standardize_response(df, response_col='response'):
 
 
 
-#%% Step 1: Forward-fill patient-level data within each patient group
-# Patient-level columns are constant across timepoints but only filled in the first row per patient
+#%% 1 — Forward fill + timepoint + clean copy
+########################################################
+# TableReport(df_cl) + NA heatmap + raw statistics: already run above (lines ~800-870)
 
+# Patient-level columns: constant across timepoints, only filled in first row per patient
 patient_level_cols = [
     'Patient', 'Unnamed: 2', 'Age at start', 'Gender', 'Weight [kg]', 'Height [cm]',
     'Overweight? BMI', 'Besserung nach Nachuntersuchung laut Arztbrief in %',
@@ -1490,69 +1495,28 @@ df_cl[patient_level_cols + ['Unnamed: 0']] = (
 )
 df_cl = df_cl.drop(columns=['Patient_Group'])
 
-
-#%% Step 2: Extract timepoint, filter rows, exclude patients
-
-# Extract timepoint number from Erfassungszeitpunkt (e.g., "01.01.1" -> 1)
+# Extract timepoint number from Erfassungszeitpunkt (e.g., "01.01.1" → 1)
 df_cl['Timepoint'] = (
     df_cl['Erfassungszeitpunkt']
     .str.extract(r'\d+\.\d+\.(\d+)')[0]
     .astype(float)
 )
-df_cl = move_column_after(df_cl, 'Timepoint', 'Patient')
 
-# Keep only rows with actual measurement data
-df_cl_clean = df_cl[df_cl['Datum'].notna()].copy()
-print(f"\nRows with measurement data: {len(df_cl_clean)}")
+# Working copy — date filter deferred to step 4 so Ausschluss check (Unnamed:0) still works
+df_cl_clean = df_cl.copy()
+print(f"\ndf_cl_clean initialised: {df_cl_clean.shape[0]} rows × {df_cl_clean.shape[1]} columns")
 
-# Exclude patients marked with "Ausschluss" keyword
+
+#%% 2 — Exclusions + EORTC column drop
+########################################################
+
+# Exclude patients marked with "Ausschluss" keyword (uses Unnamed: 0, before it's dropped)
 exclude_mask = df_cl_clean['Unnamed: 0'].str.contains('Ausschluss', case=False, na=False)
-excluded_patients = df_cl_clean.loc[exclude_mask, 'Patient'].unique()
-print(f"Excluded {len(excluded_patients)} patients by keyword: {excluded_patients}")
+excluded_patients = df_cl_clean.loc[exclude_mask, 'Patient'].dropna().unique()
+print(f"Excluded {len(excluded_patients)} patients by Ausschluss keyword: {excluded_patients}")
 df_cl_clean = df_cl_clean[~exclude_mask]
 
-# NOTE: Patients with missing/NaN Response are KEPT — response is NOT used as target variable.
-# We use pain_scale instead (see Step 9). Response column is retained as a metadata column only.
-
-# Drop the general health/function assessment questionnaire columns
-# ONLY the block from "Schwierigkeiten körperlicher Anstrengung" (inclusive) to
-# "Allgemeinzustand Gesundheit HEUTE" (inclusive) is removed.
-# Everything before this block (symptoms_months → pain_points) is KEPT.
-# Everything after this block (improvement_percent onwards) is also KEPT.
-try:
-    col_list = df_cl_clean.columns.tolist()
-
-    start_col = 'Schwierigkeiten körperlicher Anstrengung'
-
-    # Accept both correct spelling and known Excel typo ('Gesundheut' vs 'Gesundheit')
-    end_col_options = [
-        'Allgemeinzustand Gesundheit HEUTE',
-        'Allgemeinzustand Gesundheut HEUTE',
-    ]
-    end_col = next((c for c in end_col_options if c in col_list), None)
-
-    if start_col not in col_list:
-        print(f"Warning: start column '{start_col}' not found — no questionnaire columns dropped")
-    elif end_col is None:
-        print(f"Warning: end column 'Allgemeinzustand...' not found — no questionnaire columns dropped")
-    else:
-        start_idx      = col_list.index(start_col)
-        end_idx        = col_list.index(end_col)
-        q_cols_to_drop = col_list[start_idx : end_idx + 1]   # inclusive of both boundaries
-        df_cl_clean    = df_cl_clean.drop(columns=q_cols_to_drop)
-        print(f"Dropped {len(q_cols_to_drop)} health/function questionnaire columns")
-        print(f"  From : '{start_col}'")
-        print(f"  To   : '{end_col}'")
-        print(f"  Cols : {q_cols_to_drop}")
-except Exception as e:
-    print(f"Warning: Could not drop questionnaire columns: {e}")
-
-
-
-
-# Remove patients irradiated at MULTIPLE DIFFERENT body parts in the same treatment course.
-# E.g. shoulder + heel simultaneously — these are distinct from bilateral (same part, both sides).
-# Verify target volumes before removing.
+# Exclude patients irradiated at MULTIPLE DIFFERENT body parts in the same course
 multi_body_patients = [3, 45, 184, 162, 179, 156, 54, 47, 219]
 print(f"\nVerifying multi-body-part patients (to be excluded):")
 for pid in multi_body_patients:
@@ -1565,17 +1529,36 @@ for pid in multi_body_patients:
 df_cl_clean = df_cl_clean[~df_cl_clean['Patient'].isin(multi_body_patients)]
 print(f"Removed {len(multi_body_patients)} multi-body-part patients")
 
-# Drop no longer needed columns
-cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'Comments questionnaire', 'further comments']
-df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
+# Drop EORTC health/function questionnaire columns
+try:
+    col_list = df_cl_clean.columns.tolist()
+    start_col = 'Schwierigkeiten körperlicher Anstrengung'
+    end_col_options = [
+        'Allgemeinzustand Gesundheit HEUTE',
+        'Allgemeinzustand Gesundheut HEUTE',
+    ]
+    end_col = next((c for c in end_col_options if c in col_list), None)
+    if start_col not in col_list:
+        print(f"Warning: EORTC start column '{start_col}' not found — no columns dropped")
+    elif end_col is None:
+        print(f"Warning: EORTC end column not found — no columns dropped")
+    else:
+        start_idx      = col_list.index(start_col)
+        end_idx        = col_list.index(end_col)
+        q_cols_to_drop = col_list[start_idx : end_idx + 1]
+        df_cl_clean    = df_cl_clean.drop(columns=q_cols_to_drop)
+        print(f"\nDropped {len(q_cols_to_drop)} EORTC questionnaire columns:")
+        print(f"  From: '{start_col}'")
+        print(f"  To  : '{end_col}'")
+        print(f"  Cols: {q_cols_to_drop}")
+except Exception as e:
+    print(f"Warning: Could not drop EORTC columns: {e}")
 
 print(f"\nAfter exclusions: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
 
-# Quick inspection after initial cleaning step
-TableReport(df_cl_clean, max_plot_columns=100)
 
-
-#%% Step 3: Rename columns (German to  English) + create baseline copy
+#%% 3 — Rename columns
+########################################################
 
 clinical_names = {
     # Patient demographics
@@ -1600,22 +1583,183 @@ clinical_names = {
     "FHA": "fha", "kV": "kv", "mA": "ma", "Filter": "filter", "Response": "response",
 }
 df_cl_clean = df_cl_clean.rename(columns=clinical_names)
+df_cl_clean = move_column_after(df_cl_clean, 'Timepoint', 'Patient')
 print(f"Columns renamed: {len(clinical_names)}")
 
-# Baseline copy: raw data with English column names, before any numeric transforms or imputation.
-# CatBoost can handle raw strings and missing values natively — this copy preserves that raw state.
-# Target variable (pain_scale_t2 / pain_scale_reduction) will be joined later from the clean dataset.
-df_cl_raw_baseline = df_cl_clean.copy()
-TableReport(df_cl_raw_baseline, max_plot_columns=100)
+
+#%% 4 — Drop unused columns + empty rows
+########################################################
+
+# Drop metadata/admin columns not needed for analysis
+cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire']
+df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
+
+# Drop rows with no measurement date (empty slots)
+n_before = len(df_cl_clean)
+df_cl_clean = df_cl_clean[df_cl_clean['date'].notna()].copy()
+print(f"Dropped {n_before - len(df_cl_clean)} rows with no date (empty measurement slots)")
+
+# Drop rows where ALL questionnaire columns are NaN (completely empty questionnaire rows)
+questionnaire_range = df_cl_clean.loc[:, 'symptoms_months':'improvement_percent'].columns
+n_before = len(df_cl_clean)
+all_q_nan = df_cl_clean[questionnaire_range].isna().all(axis=1)
+dropped_q = df_cl_clean[all_q_nan][['Patient', 'Timepoint']]
+if len(dropped_q) > 0:
+    print(f"\nDropping {all_q_nan.sum()} rows with all questionnaire columns NaN:")
+    print(dropped_q.to_string())
+df_cl_clean = df_cl_clean[~all_q_nan].copy()
+print(f"\nAfter step 4: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
 
 
-#%% Step 4: Clean null markers
+#%% 5 — Baseline copy + quick inspect
+########################################################
 
-# Replace German missing markers across ALL columns: k.A./ka/kA and n.D./n.D
-# Skip ID columns — Patient and Timepoint must never be nulled out here
+# df_cl_reduced: English column names, raw (unparsed) values.
+# CatBoost handles raw strings natively — this is the baseline modeling input.
+# Regression targets will be joined later from pain_targets (step 12).
+df_cl_reduced = df_cl_clean.copy()
+TableReport(df_cl_reduced, max_plot_columns=100)
+
+
+#%% 6a — Manual corrections
+########################################################
+
+# Patient 248 T2: pain_daytime was entered as "22" — confirmed typo, should be 2
+mask_248 = (df_cl_clean['Patient'] == 248) & (df_cl_clean['Timepoint'] == 2)
+if mask_248.sum() > 0:
+    df_cl_clean.loc[mask_248, 'pain_daytime'] = '2'
+    print("Manual correction: Patient 248 T2 pain_daytime set to '2' (was '22')")
+else:
+    print("Warning: Patient 248 T2 not found — correction skipped")
+# Add further manual corrections here if needed
+
+
+#%% 6b — Parse/transform columns
+########################################################
+
+# 1 — diagnosis
+print("\n=== diagnosis (before) ===")
+print(df_cl_clean['diagnosis'].value_counts(dropna=False).to_string())
+df_cl_clean['diagnosis'] = standardize_diagnosis(df_cl_clean['diagnosis'])
+print("\n=== diagnosis (after) ===")
+print(df_cl_clean['diagnosis'].value_counts().to_dict())
+
+# 2 — target_volume: standardize + combine into "BodyPart Side"
+print("\n=== target_volume (before) ===")
+print(df_cl_clean['target_volume'].value_counts(dropna=False).head(20).to_string())
+df_cl_clean['target_volume'], df_cl_clean['target_side'] = standardize_target_volume(
+    df_cl_clean['target_volume'])
+df_cl_clean = move_column_after(df_cl_clean, 'target_side', 'target_volume')
+df_cl_clean['target_volume'] = df_cl_clean.apply(
+    lambda r: f"{r['target_volume']} {r['target_side']}".strip()
+              if pd.notna(r['target_volume']) and pd.notna(r['target_side']) and r['target_side'] != ''
+              else r['target_volume'],
+    axis=1
+)
+df_cl_clean = df_cl_clean.drop(columns=['target_side'])
+print("\n=== target_volume (after) ===")
+print(df_cl_clean['target_volume'].value_counts().to_dict())
+
+# 3 — pain_points
+print("\n=== pain_points (before) ===")
+print(df_cl_clean['pain_points'].value_counts(dropna=False).head(20).to_string())
+df_cl_clean['pain_points'] = standardize_pain_points(df_cl_clean['pain_points'])
+print("\n=== pain_points (after) ===")
+print(df_cl_clean['pain_points'].value_counts().head(20).to_dict())
+
+# 4 — filter → filter_mm + filter_material
+print("\n=== filter (before) ===")
+print(df_cl_clean['filter'].value_counts(dropna=False).to_string())
+df_cl_clean = split_filter_column(df_cl_clean)
+print("\n=== filter (after) ===")
+print(f"filter_mm    : {sorted(df_cl_clean['filter_mm'].dropna().unique())}")
+print(f"filter_material: {df_cl_clean['filter_material'].value_counts().to_dict()}")
+
+# 5 — cumulative_dose
+print("\n=== cumulative_dose (before) ===")
+print(df_cl_clean['cumulative_dose'].value_counts(dropna=False).to_string())
+df_cl_clean['cumulative_dose'] = pd.to_numeric(
+    df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose),
+    errors='coerce'
+)
+print("\n=== cumulative_dose (after) ===")
+print(sorted(df_cl_clean['cumulative_dose'].dropna().unique()))
+
+# 6 — gender: 'w' → 'f'
+print("\n=== gender (before) ===")
+print(df_cl_clean['gender'].value_counts(dropna=False).to_string())
+df_cl_clean['gender'] = df_cl_clean['gender'].replace('w', 'f')
+print("\n=== gender (after) ===")
+print(df_cl_clean['gender'].value_counts().to_dict())
+
+# 7 — overweight_bmi → overweight + bmi
+print("\n=== overweight_bmi (before) ===")
+print(df_cl_clean['overweight_bmi'].value_counts(dropna=False).head(20).to_string())
+df_cl_clean = split_bmi_column(df_cl_clean)
+print("\n=== overweight / bmi (after) ===")
+print(f"overweight: {df_cl_clean['overweight'].value_counts().to_dict()}")
+print(f"bmi: range {df_cl_clean['bmi'].min():.1f}–{df_cl_clean['bmi'].max():.1f}, "
+      f"{df_cl_clean['bmi'].isna().sum()} missing")
+
+# 8 — symptoms_months
+print("\n=== symptoms_months (before) ===")
+print(df_cl_clean['symptoms_months'].value_counts(dropna=False).head(20).to_string())
+df_cl_clean['symptoms_months'] = pd.to_numeric(
+    parse_symptoms_duration(df_cl_clean['symptoms_months'], df_cl_clean['date']),
+    errors='coerce'
+)
+print("\n=== symptoms_months (after) ===")
+print(f"range {df_cl_clean['symptoms_months'].min():.0f}–{df_cl_clean['symptoms_months'].max():.0f} months, "
+      f"{df_cl_clean['symptoms_months'].isna().sum()} missing")
+
+# 9 — previous_therapy → binary columns
+print("\n=== previous_therapy (before) ===")
+print(df_cl_clean['previous_therapy'].value_counts(dropna=False).head(20).to_string())
+df_cl_clean = encode_therapy_columns(df_cl_clean)
+therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)]
+print("\n=== previous_therapy (after: binary columns) ===")
+print(df_cl_clean[therapy_cols].sum().to_dict())
+
+# 10 — response → response_category + response_percent
+df_cl_clean = standardize_response(df_cl_clean, response_col='response')
+df_cl_clean = move_column_after(df_cl_clean, 'response_category', 'response')
+df_cl_clean = move_column_after(df_cl_clean, 'response_percent', 'response_category')
+
+# 11 — Ordinal questionnaire columns
+ordinal_cols = ['pain_under_load', 'pain_at_rest', 'pain_daytime', 'pain_night', 'morning_stiffness']
+print("\n=== Ordinal questionnaire columns (before extraction) ===")
+for col in ordinal_cols:
+    if col in df_cl_clean.columns:
+        uniq = df_cl_clean[col].dropna().unique()
+        print(f"\n  {col} ({len(uniq)} unique):")
+        for v in sorted(uniq, key=lambda x: str(x)):
+            print(f"    {repr(v)}")
+
+print("\n=== Extracting ordinal values ===")
+for col in ordinal_cols:
+    if col in df_cl_clean.columns:
+        df_cl_clean[col] = extract_numeric(df_cl_clean[col])
+        print(f"  {col}: unique after = {sorted(df_cl_clean[col].dropna().unique())}")
+
+# 12 — pain_scale (continuous)
+print("\n=== pain_scale (before extraction) ===")
+uniq_ps = df_cl_clean['pain_scale'].dropna().unique()
+print(f"  pain_scale ({len(uniq_ps)} unique):")
+for v in sorted(uniq_ps, key=lambda x: str(x)):
+    print(f"    {repr(v)}")
+
+df_cl_clean['pain_scale'] = extract_continuous(df_cl_clean['pain_scale'])
+print("\n=== pain_scale (after extraction) ===")
+uniq_after = sorted(df_cl_clean['pain_scale'].dropna().unique())
+print(f"  pain_scale ({len(uniq_after)} unique): {uniq_after}")
+
+
+#%% 7 — Replace missing markers
+########################################################
+
 null_pattern = r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$'
 null_skip = {'Patient', 'Timepoint'}
-print("\n=== Replacing null markers ('kA' and 'nD' varations) ===")
+print("\n=== Replacing null markers ('kA' and 'nD' variants) ===")
 for col in df_cl_clean.columns:
     if col in null_skip:
         continue
@@ -1625,212 +1769,28 @@ for col in df_cl_clean.columns:
         print(f"  {col}: replaced {mask.sum()} null markers")
         df_cl_clean.loc[mask, col] = pd.NA
 
-
-# Manual data corrections (known entry errors identified by inspection)
-# These are applied before numeric extraction so the corrected value goes through
-# the normal parsing pipeline.
-
-# Patient 248, T2: pain_daytime was entered as "22" — confirmed typo, should be 2
-mask_248 = (df_cl_clean['Patient'] == 248) & (df_cl_clean['Timepoint'] == 2)
-if mask_248.sum() > 0:
-    df_cl_clean.loc[mask_248, 'pain_daytime'] == 2.0
-    print("Manual correction: Patient 248 T2 pain_daytime set to 2 (was '22')")
-else:
-    print("Warning: Patient 248 T2 not found — correction skipped")
+# Safety check: Patient and Timepoint must not have NaN
+for id_col in ['Patient', 'Timepoint']:
+    nan_count = df_cl_clean[id_col].isna().sum()
+    if nan_count > 0:
+        print(f"Warning: {nan_count} NaN in {id_col} — will be dropped in step 8")
+    else:
+        print(f"OK: {id_col} has no NaN values")
 
 
-#%% Step 5: Extract/convert numeric values from mixed text/number columns
-
-# Ordinal questionnaire columns (scale 1-4 or 1-5): multi-select "1,2" -> avg
-# EORTC questionnaire columns already dropped at Step 2, so only pain columns remain.
-# Skip: pain_points (categorical string), pain_scale (continuous, comma = German decimal)
-all_cols = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].columns
-ordinal_cols = [c for c in all_cols if c not in ('pain_points', 'pain_scale')]
-
-print("\n=== Unique raw values — ordinal questionnaire columns (before extraction) ===")
-for col in ordinal_cols:
-    if col in df_cl_clean.columns:
-        uniq = df_cl_clean[col].dropna().unique()
-        print(f"\n  {col} ({len(uniq)} unique):")
-        for v in sorted(uniq, key=lambda x: str(x)):
-            print(f"    {repr(v)}")
-
-print("\n=== Extracting numeric values (ordinal questionnaire columns) ===")
-n_converted = 0
-for col in ordinal_cols:
-    if col in df_cl_clean.columns:
-        original_numeric = pd.to_numeric(df_cl_clean[col], errors='coerce')
-        extracted = extract_numeric(df_cl_clean[col])
-        was_text = original_numeric.isna() & extracted.notna()
-        if was_text.sum() > 0:
-            print(f"  {col}: extracted {was_text.sum()} values from text entries")
-            n_converted += was_text.sum()
-        df_cl_clean[col] = extracted
-print(f"Total ordinal text entries converted: {n_converted}")
-
-
-# Continuous column: comma = German decimal, ranges -> midpoint
-# pain_scale (1-10): "9,7" -> 9.7, "7-8" -> 7.5
-print("\n=== Unique raw values — pain_scale (before extraction) ===")
-if 'pain_scale' in df_cl_clean.columns:
-    uniq_ps = df_cl_clean['pain_scale'].dropna().unique()
-    print(f"  pain_scale ({len(uniq_ps)} unique):")
-    for v in sorted(uniq_ps, key=lambda x: str(x)):
-        print(f"    {repr(v)}")
-
-print("\n=== Extracting numeric values (continuous columns) ===")
-for col in ['pain_scale']:
-    if col in df_cl_clean.columns:
-        original_numeric = pd.to_numeric(df_cl_clean[col], errors='coerce')
-        extracted = extract_continuous(df_cl_clean[col])
-        was_text = original_numeric.isna() & extracted.notna()
-        if was_text.sum() > 0:
-            print(f"  {col}: extracted {was_text.sum()} values from text entries")
-        df_cl_clean[col] = extracted
-        uniq_after = sorted(df_cl_clean[col].dropna().unique())
-        print(f"\n  pain_scale unique values after extraction ({len(uniq_after)}):")
-        for v in uniq_after:
-            print(f"    {v}")
-
-TableReport(df_cl_clean)
-
-#%% Step 6: Column-specific transformations
-
-# Diagnosis: standardize names (side extracted from target_volume instead)
-df_cl_clean['diagnosis'] = standardize_diagnosis(df_cl_clean['diagnosis'])
-print(f"\nDiagnosis: {df_cl_clean['diagnosis'].nunique()} unique categories")
-print(f"  Categories: {df_cl_clean['diagnosis'].value_counts().to_dict()}")
-
-# Target volume: standardize body part names + extract treatment side
-df_cl_clean['target_volume'], df_cl_clean['target_side'] = standardize_target_volume(df_cl_clean['target_volume'])
-df_cl_clean = move_column_after(df_cl_clean, 'target_side', 'target_volume')
-
-# FOR NOW, TESTING: Combine into "Bodypart Side" format (e.g. "Heel L", "Knee B")
-# target_side is kept as a separate column for now
-df_cl_clean['target_volume'] = df_cl_clean.apply(
-    lambda r: f"{r['target_volume']} {r['target_side']}".strip()
-              if pd.notna(r['target_volume']) and pd.notna(r['target_side']) and r['target_side'] != ''
-              else r['target_volume'],
-    axis=1
-)
-# drop target side for now.
-df_cl_clean = df_cl_clean.drop(columns=['target_side'])
-print(f"\nTarget volume: {df_cl_clean['target_volume'].nunique()} unique categories")
-print(f"  Categories: {df_cl_clean['target_volume'].value_counts().to_dict()}")
-
-
-# Pain points: standardize body part names + side per body part
-df_cl_clean['pain_points'] = standardize_pain_points(df_cl_clean['pain_points'])
-print(f"\nPain points: {df_cl_clean['pain_points'].nunique()} unique categories (was 149)")
-print(f"  Top 20: {df_cl_clean['pain_points'].value_counts().head(40).to_dict()}")
-
-
-# Filter: split into filter_mm (thickness) and filter_material (Cu/Al)
-df_cl_clean = split_filter_column(df_cl_clean)
-print(f"\nFilter mm: {sorted(df_cl_clean['filter_mm'].dropna().unique())}")
-print(f"Filter material: {df_cl_clean['filter_material'].value_counts().to_dict()}")
-
-# Extract cumulative dose values
-df_cl_clean['cumulative_dose'] = pd.to_numeric(
-    df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose),
-    errors='coerce'
-)
-print(f"\nCumulative dose: {sorted(df_cl_clean['cumulative_dose'].dropna().unique())}")
-
-
-# Gender: standardize 'w' (German: weiblich) to 'f' (female)
-df_cl_clean['gender'] = df_cl_clean['gender'].replace('w', 'f')
-print(f"\nGender: {df_cl_clean['gender'].value_counts().to_dict()}")
-
-
-# BMI: split overweight_bmi -> overweight (ja/nein) + bmi (float)
-df_cl_clean = split_bmi_column(df_cl_clean)
-missing_bmi = (df_cl_clean['bmi'].isna() & df_cl_clean['overweight'].notna()).sum()
-print(f"BMI split: {missing_bmi} patients with overweight status but missing BMI value")
-
-
-# Symptoms duration: German strings to numeric months
-df_cl_clean['symptoms_months'] = pd.to_numeric(
-    parse_symptoms_duration(df_cl_clean['symptoms_months'], df_cl_clean['date']),
-    errors='coerce'
-)
-print(f"Symptoms: range {df_cl_clean['symptoms_months'].min():.0f}-{df_cl_clean['symptoms_months'].max():.0f} months, "
-      f"{df_cl_clean['symptoms_months'].isna().sum()} missing")
-
-
-# Previous therapy: comma-separated codes (1-7) to binary columns
-df_cl_clean = encode_therapy_columns(df_cl_clean)
-therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)]
-print(f"Therapy encoding: {df_cl_clean[therapy_cols].sum().to_dict()}")
-
-
-
-# Response: parse into response_category (CR/PR/NI or combinations) and response_percent (numeric).
-df_cl_clean = standardize_response(df_cl_clean, response_col='response')
-df_cl_clean = move_column_after(df_cl_clean, 'response_category', 'response')
-df_cl_clean = move_column_after(df_cl_clean, 'response_percent', 'response_category')
-
-
-#%% Step 7: Remove rows with no questionnaire data at all
-
-# A row is considered "empty" if ALL columns between 'date' and 'response' are NaN.
-# This covers: symptoms_months, previous_therapy, pain columns, pain_scale, pain_points.
-# (EORTC questionnaire columns already dropped at Step 2, so this range is narrower.)
-n_before = len(df_cl_clean)
-df_cl_clean = df_cl_clean[df_cl_clean['pain_scale'].notna()].copy()
-print(f"\nRemoved {n_before - len(df_cl_clean)} rows with missing pain_scale "
-      f"({df_cl_clean['Patient'].nunique()} patients remaining)")
-
-TableReport(df_cl_clean)
-
-
-# distribution of pain_scale at T1-T5: T1/T2/T3 top row, T4/T5 bottom row
-timepoints = [1, 2, 3, 4, 5]
-colors = sns.color_palette('mako', 5)
-fig = plt.figure(figsize=(15, 8))
-
-# Top row: T1, T2, T3 (3 columns)
-top_axes = [fig.add_subplot(2, 3, i + 1) for i in range(3)]
-# Bottom row: T4, T5 centred using columns 1 and 2 of a 3-col grid
-bot_axes = [fig.add_subplot(2, 3, 5), fig.add_subplot(2, 3, 6)]
-
-plot_axes = top_axes + bot_axes
-
-for ax, tp, color in zip(plot_axes, timepoints, colors):
-    data = df_cl_clean.loc[df_cl_clean['Timepoint'] == tp, 'pain_scale'].dropna()
-    ax.hist(data, bins=15, color=color, edgecolor='white')
-    ax.set_title(f'T{tp}  (n={len(data)})')
-    ax.set_xlabel('Pain Scale (0-10)')
-    ax.set_ylabel('Count')
-    if len(data) > 0:
-        ax.axvline(data.median(), color='white', linestyle='--', linewidth=1.5,
-                   label=f'Median {data.median():.1f}')
-        ax.legend(fontsize=9)
-
-plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
-plt.tight_layout()
-plt.show()
-
-print(df_cl_clean.groupby('Timepoint')['pain_scale'].describe())
-
-
-#%% Step 8: final dtype conversion
-# measurement_timepoint is a panel group ID, not a date — keep as string
-# Columns with more than 25% missing will be dropped later in this step.
+#%% 8 — Dtype conversion + visualization copy
+########################################################
 
 categorical_cols = [
     'gender', 'overweight', 'pain_points', 'diagnosis',
     'target_volume', 'filter_material',
-    'response', 'response_category'          # response_percent stays float
+    'response', 'response_category'       # response_percent stays float
 ]
 
-# Ensure id/date columns keep appropriate types
-if 'Patient' in df_cl_clean.columns:
-    df_cl_clean['Patient'] = pd.to_numeric(df_cl_clean['Patient'], errors='coerce')
-if 'Timepoint' in df_cl_clean.columns:
-    df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce')
+# Coerce ids first; drop any rows where they cannot be parsed
+df_cl_clean['Patient']   = pd.to_numeric(df_cl_clean['Patient'],   errors='coerce')
+df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce')
 
-# Drop rows where Patient or Timepoint couldn't be parsed — they are unusable
 n_before = len(df_cl_clean)
 df_cl_clean = df_cl_clean.dropna(subset=['Patient', 'Timepoint'])
 n_dropped = n_before - len(df_cl_clean)
@@ -1839,81 +1799,88 @@ if n_dropped > 0:
 
 df_cl_clean['Patient']   = df_cl_clean['Patient'].astype('int64')
 df_cl_clean['Timepoint'] = df_cl_clean['Timepoint'].astype('int64')
+
 if 'measurement_timepoint' in df_cl_clean.columns:
     df_cl_clean['measurement_timepoint'] = df_cl_clean['measurement_timepoint'].astype(str)
 if 'date' in df_cl_clean.columns:
     df_cl_clean['date'] = pd.to_datetime(df_cl_clean['date'], errors='coerce')
 
-# Cast categorical string columns to 'category' (if present)
 for col in categorical_cols:
     if col in df_cl_clean.columns:
         df_cl_clean[col] = df_cl_clean[col].astype('category')
 
-# All remaining columns (except ids, date, measurement_timepoint, and categoricals) -> float
 exclude_for_float = set(categorical_cols) | {'Patient', 'Timepoint', 'measurement_timepoint', 'date'}
 cols_to_float = [c for c in df_cl_clean.columns if c not in exclude_for_float]
-df_cl_clean[cols_to_float] = df_cl_clean[cols_to_float].apply(lambda s: pd.to_numeric(s, errors='coerce')).astype('float64')
+df_cl_clean[cols_to_float] = (
+    df_cl_clean[cols_to_float]
+    .apply(lambda s: pd.to_numeric(s, errors='coerce'))
+    .astype('float64')
+)
 
-# Verification
-print("\n=== Manual dtype assignment (clinical) ===")
+print("\n=== Dtype summary (clinical) ===")
 print(df_cl_clean.dtypes.value_counts())
+print(f"Shape: {df_cl_clean.shape}, Patients: {df_cl_clean['Patient'].nunique()}")
 TableReport(df_cl_clean, max_plot_columns=100)
 
-
-#%% Drop columns with >25% missing values
-
-# Protect pain_scale and improvement_percent from auto-dropping:
-# - pain_scale is the primary target variable (must be retained)
-# - improvement_percent is kept as supplementary metadata
-protected_cols = ['pain_scale', 'improvement_percent']
-
-missing_pct = df_cl_clean.isna().mean()
-cols_to_drop_na = [
-    c for c in missing_pct[missing_pct > 0.25].index
-    if c not in protected_cols
-]
-print(f"Dropping {len(cols_to_drop_na)} columns with >25% missing:")
-print(missing_pct[cols_to_drop_na].sort_values(ascending=False))
-
-df_cl_clean = df_cl_clean.drop(columns=cols_to_drop_na)
-print(f"\nColumns remaining: {len(df_cl_clean.columns)}")
-
-TableReport(df_cl_clean, max_plot_columns=100)
+# Visualization copy: all timepoints, all patients, after dtype — not filtered to model patients
+df_cl_vis = df_cl_clean.copy()
 
 
-#%% Step 9: Prepare target variables and modeling datasets
+#%%##### VISUALIZATION (placeholder) ###########################################
+# TODO: Use df_cl_vis (all timepoints, all patients, not imputed)
+#
+# Option A — if columns have <25% missing: use directly for PCA/correlation
+# Option B — if high missingness: drop >25% missing cols first, then impute
+#            (median for numeric, mode for categorical) ONLY for viz purposes
+#
+# Planned visualisations:
+#   - Distribution plots per feature / per timepoint
+#   - PCA (prince library — handles NaN via imputation internally, or
+#           use sklearn PCA after imputing a viz copy)
+#   - Correlation matrix (phik.phik_matrix — handles mixed types and NaN)
+#   - NA heatmap
+################################################################################
 
-# Save visualization copy BEFORE pain_scale filter — preserves ALL patients
-# (not limited to those with pain targets) for use in PCA / MFA / exploration.
-df_cl_for_viz = df_cl_clean.copy()
+
+#%% 10 — Modeling copy (df_cl_mod)
+########################################################
+
+df_cl_mod = df_cl_clean.copy()
+
+# Drop rows where pain_scale is NaN — these cannot contribute to regression targets
+n_before = len(df_cl_mod)
+dropped = df_cl_mod[df_cl_mod['pain_scale'].isna()][['Patient', 'Timepoint']]
+if len(dropped) > 0:
+    print(f"\nRows dropped (pain_scale NaN):")
+    print(dropped.to_string())
+df_cl_mod = df_cl_mod[df_cl_mod['pain_scale'].notna()].copy()
+print(f"Dropped {n_before - len(df_cl_mod)} rows with missing pain_scale; "
+      f"{df_cl_mod['Patient'].nunique()} patients remain")
 
 
-# --- Compute regression targets ---
-# pain_scale_t2      : pain scale value AT timepoint T2 (post-treatment outcome)
-# pain_scale_reduction : raw point change T1 - T2 (kept for reference/plotting only)
-# pain_reduction_pct : percent improvement relative to T1 baseline
-#                      positive = improvement, negative = worsening
+#%% 11 — Target variables + distributions
+########################################################
 
 # Extract T1 and T2 pain_scale per patient
 pain_t1 = (
-    df_cl_clean[df_cl_clean['Timepoint'] == 1][['Patient', 'pain_scale']]
+    df_cl_mod[df_cl_mod['Timepoint'] == 1][['Patient', 'pain_scale']]
     .rename(columns={'pain_scale': 'pain_scale_t1'})
     .dropna(subset=['pain_scale_t1'])
 )
 pain_t2 = (
-    df_cl_clean[df_cl_clean['Timepoint'] == 2][['Patient', 'pain_scale']]
+    df_cl_mod[df_cl_mod['Timepoint'] == 2][['Patient', 'pain_scale']]
     .rename(columns={'pain_scale': 'pain_scale_t2'})
     .dropna(subset=['pain_scale_t2'])
 )
 
-# Keep only patients with BOTH T1 and T2 pain_scale values (needed for regression target)
+# Inner join: only patients with BOTH T1 and T2 pain_scale values
 pain_targets = pain_t1.merge(pain_t2, on='Patient', how='inner')
 
-# Raw point reduction (kept for plotting/reference)
+# Raw point reduction (reference only — not modeling target)
 pain_targets['pain_scale_reduction'] = pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2']
 
 # Percent reduction relative to T1 — primary modeling target
-# T1 = 0 is undefined: flag immediately rather than silently produce NaN/inf
+# T1 = 0 is undefined: raise immediately rather than silently produce NaN/inf
 zero_t1 = pain_targets[pain_targets['pain_scale_t1'] == 0]
 if len(zero_t1) > 0:
     raise ValueError(
@@ -1926,46 +1893,38 @@ pain_targets['pain_reduction_pct'] = (
 )
 
 print(f"\nPatients with T1 + T2 pain_scale (usable for regression): {len(pain_targets)}")
-print(f"pain_scale_t2 range:      {pain_targets['pain_scale_t2'].min():.1f} — {pain_targets['pain_scale_t2'].max():.1f}")
-print(f"pain_scale_reduction:     {pain_targets['pain_scale_reduction'].min():.1f} — {pain_targets['pain_scale_reduction'].max():.1f} pts")
-print(f"pain_reduction_pct range: {pain_targets['pain_reduction_pct'].min():.1f} — {pain_targets['pain_reduction_pct'].max():.1f} %")
+print(f"pain_scale_t2 range:      {pain_targets['pain_scale_t2'].min():.1f} – {pain_targets['pain_scale_t2'].max():.1f}")
+print(f"pain_scale_reduction:     {pain_targets['pain_scale_reduction'].min():.1f} – {pain_targets['pain_scale_reduction'].max():.1f} pts")
+print(f"pain_reduction_pct range: {pain_targets['pain_reduction_pct'].min():.1f} – {pain_targets['pain_reduction_pct'].max():.1f} %")
 print(f"  (positive = improvement, negative = worsening)")
 print(f"pain_reduction_pct stats:\n{pain_targets['pain_reduction_pct'].describe()}")
 
-# Filter clinical dataset to patients that have valid regression targets
-df_cl_clean = df_cl_clean[df_cl_clean['Patient'].isin(pain_targets['Patient'])].copy()
-
-# Add regression targets as patient-level columns (same value repeated across all timepoints per patient)
-df_cl_clean = df_cl_clean.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+# Merge targets into df_cl_mod (patient-level; same value repeated across all timepoints per patient)
+df_cl_mod = df_cl_mod.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction', 'pain_reduction_pct']],
     on='Patient',
     how='left'
 )
-print(f"\nFinal clinical dataset: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
+print(f"\ndf_cl_mod: {df_cl_mod['Patient'].nunique()} patients, {len(df_cl_mod)} rows")
 
-
-# --- Distribution of regression targets ---
+# Distribution of regression targets (one row per patient)
 fig, axes = plt.subplots(1, 3, figsize=(18, 4))
-
-targets_per_patient = df_cl_clean.drop_duplicates('Patient')
+targets_per_patient = df_cl_mod.drop_duplicates('Patient')
 colors = sns.color_palette('mako', 5)
 
-# pain_scale_t2
 axes[0].hist(targets_per_patient['pain_scale_t2'].dropna(), bins=20, color=colors[1])
 axes[0].set_title('pain_scale_t2 (T2 pain level)')
 axes[0].set_xlabel('Pain Scale (0–10)')
 axes[0].set_ylabel('Number of Patients')
 
-# pain_scale_reduction (raw points, reference only — not modeling target)
 axes[1].hist(targets_per_patient['pain_scale_reduction'].dropna(), bins=20, color=colors[2])
 axes[1].set_title('pain_scale_reduction (T1 − T2 pts, reference)')
 axes[1].set_xlabel('Point Reduction (positive = improvement)')
 axes[1].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
 axes[1].legend()
 
-# pain_reduction_pct (primary modeling target)
 axes[2].hist(targets_per_patient['pain_reduction_pct'].dropna(), bins=20, color=colors[3])
-axes[2].set_title('pain_reduction_pct (% relative to T1)')
+axes[2].set_title('pain_reduction_pct (% relative to T1, primary target)')
 axes[2].set_xlabel('Pain Reduction (%)')
 axes[2].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
 axes[2].legend()
@@ -1974,145 +1933,38 @@ plt.suptitle('Distribution of Regression Targets', fontweight='bold')
 plt.tight_layout()
 plt.show()
 
+# Distribution of pain_scale by timepoint (T1–T5, 2-row layout)
+timepoints = [1, 2, 3, 4, 5]
+colors_tp = sns.color_palette('mako', 5)
+fig = plt.figure(figsize=(15, 8))
 
-# --- Copy for advanced modeling (before imputation) ---
-# Cleaned and transformed but NOT imputed. Used for the final nested-CV modeling pipeline (Phase 4).
-# Missing values will be handled inside the cross-validation loop to avoid leakage.
-df_cl_for_modeling = df_cl_clean.copy()
-print(f"\nAdvanced modeling dataset (before imputation): {df_cl_for_modeling['Patient'].nunique()} patients, {len(df_cl_for_modeling)} rows")
-TableReport(df_cl_for_modeling, max_plot_columns=100)
+top_axes = [fig.add_subplot(2, 3, i + 1) for i in range(3)]
+bot_axes = [fig.add_subplot(2, 3, 5), fig.add_subplot(2, 3, 6)]
+plot_axes = top_axes + bot_axes
 
+for ax, tp, color in zip(plot_axes, timepoints, colors_tp):
+    data = df_cl_mod.loc[df_cl_mod['Timepoint'] == tp, 'pain_scale'].dropna()
+    ax.hist(data, bins=15, color=color, edgecolor='white')
+    ax.set_title(f'T{tp}  (n={len(data)})')
+    ax.set_xlabel('Pain Scale (0–10)')
+    ax.set_ylabel('Count')
+    if len(data) > 0:
+        ax.axvline(data.median(), color='white', linestyle='--', linewidth=1.5,
+                   label=f'Median {data.median():.1f}')
+        ax.legend(fontsize=9)
 
-# --- Merge immunological + clinical datasets (T1 baseline, for modeling) ---
-# Goal: predict post-treatment pain from PRE-treatment (T1) immunological + clinical values.
-# Both datasets are in their pre-imputation state so that imputation can be done inside CV.
+plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
+plt.tight_layout()
+plt.show()
 
-print("\n=== Merging immunological + clinical datasets (T1 baseline, before imputation) ===")
-
-# T1 immunological — uses df_im_reduced (columns dropped, not yet imputed)
-df_im_t1 = df_im_reduced[df_im_reduced['Timepoint'] == 1].copy()
-
-# T1 clinical — not imputed
-df_cl_t1 = df_cl_for_modeling[df_cl_for_modeling['Timepoint'] == 1].copy()
-
-# Inner join on Patient (only patients present in both datasets)
-# Drop Timepoint from clinical side to avoid duplication; suffix any other overlapping cols
-df_combined_t1 = df_im_t1.merge(
-    df_cl_t1.drop(columns=['Timepoint'], errors='ignore'),
-    on='Patient',
-    how='inner',
-    suffixes=('_im', '_cl')
-)
-
-print(f"Immunological T1:  {df_im_t1['Patient'].nunique()} patients")
-print(f"Clinical T1:       {df_cl_t1['Patient'].nunique()} patients")
-print(f"Combined T1:       {df_combined_t1['Patient'].nunique()} patients")
-print(f"\nTarget: pain_scale_t2\n{df_combined_t1['pain_scale_t2'].describe()}")
-print(f"\nTarget: pain_reduction_pct\n{df_combined_t1['pain_reduction_pct'].describe()}")
-
-TableReport(df_combined_t1, max_plot_columns=200)
+print(df_cl_mod.groupby('Timepoint')['pain_scale'].describe())
+TableReport(df_cl_mod, max_plot_columns=100)
 
 
-#%%############### VISUALIZATION DATASETS #####################################
-# All timepoints, fully cleaned + imputed.
-# Used for PCA, MFA, correlation analysis, and other exploratory visualisations.
-#
-#   df_im_imputed      : immunological — already prepared above (MICE imputation)
-#   df_cl_for_viz      : clinical before pain_scale filter — all patients
-#   df_cl_imputed      : clinical, median (numeric) + mode (categorical) imputed
-#   df_combined_imputed: merged im + cl on Patient + Timepoint (inner join)
+#%%##### BASELINE CATBOOST #####################################################
 
-
-# Identify column groups in clinical (excluding IDs / target columns)
-_viz_id  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
-_viz_cat = df_cl_for_viz.select_dtypes(
-    include=['category', 'object']).columns.difference(_viz_id).tolist()
-_viz_num = df_cl_for_viz.select_dtypes(
-    include=['float64', 'Int64', 'int64']).columns.difference(_viz_id).tolist()
-
-df_cl_imputed = df_cl_for_viz.copy()
-
-# Median imputation for numeric columns
-for _col in _viz_num:
-    if df_cl_imputed[_col].isna().any():
-        df_cl_imputed[_col] = df_cl_imputed[_col].fillna(df_cl_imputed[_col].median())
-
-# Mode imputation for categorical columns
-for _col in _viz_cat:
-    if df_cl_imputed[_col].isna().any():
-        _mode = df_cl_imputed[_col].dropna().mode()
-        if len(_mode) > 0:
-            df_cl_imputed[_col] = df_cl_imputed[_col].fillna(_mode.iloc[0])
-
-print(f"Clinical (viz, imputed): {df_cl_imputed['Patient'].nunique()} patients, {len(df_cl_imputed)} rows")
-TableReport(df_cl_imputed, max_plot_columns=100)
-
-# Combined visualization dataset — inner join on Patient + Timepoint
-# Only rows where a patient has measurements in BOTH datasets at the SAME timepoint
-df_combined_imputed = df_im_imputed.merge(
-    df_cl_imputed,
-    on=['Patient', 'Timepoint'],
-    how='inner',
-    suffixes=('_im', '_cl')
-)
-print(f"\nCombined imputed (viz): {df_combined_imputed['Patient'].nunique()} patients, "
-      f"{len(df_combined_imputed)} rows")
-TableReport(df_combined_imputed, max_plot_columns=200)
-
-
-#%%############### BASELINE MODELING DATASETS #################################
-# Almost raw data: only exclusion criteria and empty rows removed.
-# NO transformation, parsing, or imputation applied.
-# Filtered to T1 only; only patients present in pain_targets (have both T1 + T2 pain_scale).
-
-# Patients eligible for modeling (have both T1 and T2 pain_scale)
-model_patients = set(pain_targets['Patient'].values)
-
-# --- Immunological raw T1 ---
-df_im_raw_t1 = (
-    df_im_reduced[
-        (df_im_reduced['Timepoint'] == 1) &
-        (df_im_reduced['Patient'].isin(model_patients))
-    ]
-    .copy()
-    .reset_index(drop=True)
-)
-# Attach regression targets so run_catboost_regressor can find the target column
-df_im_raw_t1 = df_im_raw_t1.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
-    on='Patient', how='left'
-)
-
-# --- Clinical raw T1: add pain targets (computed from cleaned data) ---
-# df_cl_raw_baseline = right after rename, before any numeric parsing or transforms
-df_cl_raw_t1 = (
-    df_cl_raw_baseline[
-        (df_cl_raw_baseline['Timepoint'] == 1) &
-        (df_cl_raw_baseline['Patient'].isin(model_patients))
-    ]
-    .copy()
-    .reset_index(drop=True)
-)
-# Attach regression targets (pain_scale is still a raw string here — treated as cat feature)
-df_cl_raw_t1 = df_cl_raw_t1.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
-    on='Patient', how='left'
-)
-
-# --- Combined raw T1 ---
-df_combined_raw_t1 = df_im_raw_t1.merge(
-    df_cl_raw_t1.drop(columns=['Timepoint'], errors='ignore'),
-    on='Patient', how='inner',
-    suffixes=('_im', '_cl')
-)
-
-print(f"\nBaseline raw T1 datasets:")
-print(f"  Immunological: {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
-print(f"  Clinical:      {df_cl_raw_t1.shape},  patients: {df_cl_raw_t1['Patient'].nunique()}")
-print(f"  Combined:      {df_combined_raw_t1.shape}, patients: {df_combined_raw_t1['Patient'].nunique()}")
-
-
-#%%############### REGRESSION HELPERS #########################################
+#%% 12 — Prepare baseline datasets + regression helpers
+########################################################
 
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import RepeatedKFold
@@ -2130,17 +1982,17 @@ def regression_metrics(y_true, y_pred):
 
 
 def run_catboost_regressor(df_model, target_col, name,
-                           n_splits=5, n_repeats=5, random_state=42):
-    """5-fold × 5-repeat RepeatedKFold CatBoostRegressor. No hyperparameter tuning.
+                           n_splits=5, n_repeats=4, random_state=42):
+    """5-fold × 4-repeat RepeatedKFold CatBoostRegressor. No hyperparameter tuning.
     Returns (results_df, last_trained_model, X_features, y_pred_series).
 
     Automatically excluded from features:
       - ID columns  : Patient, Timepoint, Date, date, measurement_timepoint
       - Leaky cols  : any column whose name contains 'response', 'improvement_percent',
-                      or 'pain_scale' (catches the raw score AND the other target)
+                      'pain_scale', or 'pain_reduction_pct'
     """
-    always_exclude  = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns  = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
+    always_exclude = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_patterns = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
     exclude = set(always_exclude + [target_col])
     for col in df_model.columns:
         if any(pat in col.lower() for pat in leaky_patterns):
@@ -2150,11 +2002,9 @@ def run_catboost_regressor(df_model, target_col, name,
     X = df_model[feature_cols].copy()
     y = df_model[target_col].copy()
 
-    # Drop rows where target is NaN
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    # CatBoost requires string for categorical features
     for col in X.select_dtypes(include=['category', 'object']).columns:
         X[col] = X[col].astype(str)
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
@@ -2174,11 +2024,7 @@ def run_catboost_regressor(df_model, target_col, name,
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        model = CatBoostRegressor(
-            iterations=300,
-            random_seed=random_state,
-            verbose=0
-        )
+        model = CatBoostRegressor(iterations=300, random_seed=random_state, verbose=0)
         model.fit(
             Pool(X_train, y_train, cat_features=cat_cols),
             eval_set=Pool(X_test, y_test, cat_features=cat_cols),
@@ -2215,13 +2061,11 @@ def plot_shap_regressor(model, X, name):
     explainer   = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
 
-    # Bar plot: mean |SHAP| per feature
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
     plt.title(f"SHAP Feature Importance — {name}")
     plt.tight_layout()
     plt.show()
 
-    # Beeswarm: direction + magnitude
     shap.summary_plot(shap_values, X, show=False, max_display=20)
     plt.title(f"SHAP Beeswarm — {name}")
     plt.tight_layout()
@@ -2248,7 +2092,52 @@ def print_regression_summary(results_dict, target_col):
     return summary
 
 
-#%%############### BASELINE CATBOOST — pain_reduction_pct #####################
+# Patients eligible for baseline modeling (have both T1 and T2 pain_scale)
+model_patients = set(pain_targets['Patient'].values)
+
+# Immunological T1 baseline: from df_im_reduced (pre-imputation), filtered to model_patients
+df_im_raw_t1 = (
+    df_im_reduced[
+        (df_im_reduced['Timepoint'] == 1) &
+        (df_im_reduced['Patient'].isin(model_patients))
+    ]
+    .copy()
+    .reset_index(drop=True)
+)
+df_im_raw_t1 = df_im_raw_t1.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+    on='Patient', how='left'
+)
+
+# Clinical T1 baseline: from df_cl_reduced (English names, raw unparsed values)
+df_cl_reduced_t1 = (
+    df_cl_reduced[
+        (df_cl_reduced['Timepoint'] == 1) &
+        (df_cl_reduced['Patient'].isin(model_patients))
+    ]
+    .copy()
+    .reset_index(drop=True)
+)
+df_cl_reduced_t1 = df_cl_reduced_t1.merge(
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+    on='Patient', how='left'
+)
+
+# Combined T1 baseline: inner join on Patient
+df_combined_reduced_t1 = df_im_raw_t1.merge(
+    df_cl_reduced_t1.drop(columns=['Timepoint'], errors='ignore'),
+    on='Patient', how='inner',
+    suffixes=('_im', '_cl')
+)
+
+print(f"\nBaseline T1 datasets:")
+print(f"  Immunological : {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
+print(f"  Clinical      : {df_cl_reduced_t1.shape},  patients: {df_cl_reduced_t1['Patient'].nunique()}")
+print(f"  Combined      : {df_combined_reduced_t1.shape}, patients: {df_combined_reduced_t1['Patient'].nunique()}")
+
+
+#%% 12b — Run baseline CatBoost
+########################################################
 
 print("\n" + "="*70)
 print("  CATBOOST BASELINE REGRESSOR — Target: pain_reduction_pct")
@@ -2260,10 +2149,10 @@ res_im_red, model_im_red, X_im_red, ypred_im_red = run_catboost_regressor(
     df_im_raw_t1, target, "Immunological (raw T1)")
 
 res_cl_red, model_cl_red, X_cl_red, ypred_cl_red = run_catboost_regressor(
-    df_cl_raw_t1, target, "Clinical (raw T1)")
+    df_cl_reduced_t1, target, "Clinical (reduced T1)")
 
 res_comb_red, model_comb_red, X_comb_red, ypred_comb_red = run_catboost_regressor(
-    df_combined_raw_t1, target, "Combined (raw T1)")
+    df_combined_reduced_t1, target, "Combined (reduced T1)")
 
 summary_cb_red = print_regression_summary(
     {"Immunological": res_im_red, "Clinical": res_cl_red, "Combined": res_comb_red},
@@ -2277,8 +2166,6 @@ shap_cl_red   = plot_shap_regressor(model_cl_red,   X_cl_red,   "Clinical — pa
 shap_comb_red = plot_shap_regressor(model_comb_red, X_comb_red, "Combined — pain_reduction_pct")
 
 
-#%%############### BASELINE CATBOOST — pain_scale_t2 ##########################
-
 print("\n" + "="*70)
 print("  CATBOOST BASELINE REGRESSOR — Target: pain_scale_t2")
 print("="*70)
@@ -2289,10 +2176,10 @@ res_im_t2, model_im_t2, X_im_t2, ypred_im_t2 = run_catboost_regressor(
     df_im_raw_t1, target, "Immunological (raw T1)")
 
 res_cl_t2, model_cl_t2, X_cl_t2, ypred_cl_t2 = run_catboost_regressor(
-    df_cl_raw_t1, target, "Clinical (raw T1)")
+    df_cl_reduced_t1, target, "Clinical (reduced T1)")
 
 res_comb_t2, model_comb_t2, X_comb_t2, ypred_comb_t2 = run_catboost_regressor(
-    df_combined_raw_t1, target, "Combined (raw T1)")
+    df_combined_reduced_t1, target, "Combined (reduced T1)")
 
 summary_cb_t2 = print_regression_summary(
     {"Immunological": res_im_t2, "Clinical": res_cl_t2, "Combined": res_comb_t2},
@@ -2306,143 +2193,36 @@ shap_cl_t2   = plot_shap_regressor(model_cl_t2,   X_cl_t2,   "Clinical — pain_
 shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_scale_t2")
 
 
-#%%############### ADVANCED MODELING DATASET ##################################
-# Cleaned + transformed + parsed, NOT imputed, T1 only.
-# df_combined_t1 (from Step 9) is already this dataset.
-# HistGradientBoostingRegressor handles numeric NaN natively.
-
-print(f"\nAdvanced modeling dataset (df_combined_t1): {df_combined_t1.shape}, "
-      f"patients: {df_combined_t1['Patient'].nunique()}")
-print(df_combined_t1[['pain_reduction_pct', 'pain_scale_t2']].describe())
 
 
-#%%############### ADVANCED MODELING: HistGradientBoosting ####################
+#%%##### ADVANCED CATBOOST (placeholder) #######################################
 
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OrdinalEncoder
-from sklearn.compose import ColumnTransformer
-
-
-def run_hgb_regressor(df_model, target_col, name,
-                      n_splits=5, n_repeats=5, random_state=42):
-    """5-fold × 5-repeat RepeatedKFold HistGradientBoostingRegressor. No tuning.
-    Numeric NaN handled natively. Categorical columns encoded via OrdinalEncoder.
-    Returns (results_df, fitted_pipeline, X_features, y_pred_series).
-    """
-    always_exclude = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
-    exclude = set(always_exclude + [target_col])
-    for col in df_model.columns:
-        if any(pat in col.lower() for pat in leaky_patterns):
-            exclude.add(col)
-
-    feature_cols = [c for c in df_model.columns if c not in exclude]
-    X = df_model[feature_cols].copy().reset_index(drop=True)
-    y = df_model[target_col].copy().reset_index(drop=True)
-
-    # Drop rows with NaN target
-    valid = y.notna()
-    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-
-    # Pipeline: OrdinalEncoder for categoricals (NaN → -2, unknown → -1),
-    # numeric columns passed through (HGB handles NaN natively)
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('cat', OrdinalEncoder(
-                handle_unknown='use_encoded_value',
-                unknown_value=-1,
-                encoded_missing_value=-2
-            ), cat_cols),
-        ],
-        remainder='passthrough',
-        verbose_feature_names_out=False
-    )
-
-    pipeline = Pipeline([
-        ('preprocess', preprocessor),
-        ('model', HistGradientBoostingRegressor(
-            max_iter=500,
-            random_state=random_state
-        ))
-    ])
-
-    print(f"\n{'='*65}")
-    print(f"  HistGradientBoosting Regressor — {name}")
-    print(f"  Target : {target_col}")
-    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
-    print(f"  CV     : {n_splits}-fold × {n_repeats} repeats = {n_splits * n_repeats} fits")
-    print(f"{'='*65}")
-
-    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
-    fold_results = []
-    y_pred_arr = np.full(len(y), np.nan)
-
-    for fold, (train_idx, test_idx) in enumerate(rkf.split(X)):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-        pipeline.fit(X_train, y_train)
-        preds = pipeline.predict(X_test)
-        y_pred_arr[test_idx] = preds
-
-        m = regression_metrics(y_test, preds)
-        fold_results.append({'Fold': fold + 1, **m})
-        print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
-              f"RMSE={m['RMSE']:.3f}  R²={m['R2']:.3f}")
-
-    results_df = pd.DataFrame(fold_results)
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
-    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
-    results_df = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
-    print(f"\n  Summary ({n_splits}x{n_repeats} CV):")
-    for m in metric_cols:
-        mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
-        sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
-
-    return results_df, pipeline, X, pd.Series(y_pred_arr, name='y_pred')
+#%% 13 — Prepare combined clean dataset
+# df_im_t1: T1 rows from df_im_imputed (or df_im_reduced?), filtered to model_patients
+# df_cl_mod_t1: T1 rows from df_cl_mod, filtered to model_patients
+# df_combined_mod_t1: inner join on Patient → combined clean+transformed, NOT imputed
+# TableReport + print patient count
+#
+# Nested CV structure:
+#   Outer: 5-fold KFold (evaluation)
+#   Inner: 4-fold KFold (hyperparameter tuning via Optuna)
+#   Imputation: fit on outer train fold only (no leakage)
+#   Objective: minimize RMSE
+#   Report: avg MAE, MSE, RMSE, R² across outer folds
+#   SHAP: fit final model on full training data, explain test predictions
 
 
-#%%############### RUN HGB — pain_reduction_pct ###############################
 
-print("\n" + "="*70)
-print("  HGB ADVANCED MODELING — Target: pain_reduction_pct")
-print("="*70)
 
-res_hgb_red, pipeline_hgb_red, X_hgb_red, ypred_hgb_red = run_hgb_regressor(
-    df_combined_t1, 'pain_reduction_pct', "Combined clean T1")
 
-# Built-in feature importance from the HGB model
-hgb_model     = pipeline_hgb_red.named_steps['model']
-try:
-    feat_names = pipeline_hgb_red.named_steps['preprocess'].get_feature_names_out()
-except Exception:
-    feat_names = X_hgb_red.columns.tolist()
+#%%##### ADVANCED HGB (placeholder) ############################################
 
-importance_df = pd.DataFrame({
-    'Feature':    feat_names,
-    'Importance': hgb_model.feature_importances_
-}).sort_values('Importance', ascending=False).reset_index(drop=True)
-
-print(f"\nTop 20 features by HGB importance (pain_reduction_pct):")
-print(importance_df.head(20).to_string(index=False))
-
-# Bar plot of feature importance
-plt.figure(figsize=(10, 8))
-sns.barplot(
-    data=importance_df.head(20),
-    x='Importance', y='Feature',
-    palette='mako', orient='h'
-)
-plt.title("HGB Feature Importance — pain_reduction_pct", fontweight='bold')
-plt.xlabel('Importance')
-plt.tight_layout()
-plt.show()
+#%% 14 — HistGradientBoosting advanced model
+# Same nested CV structure as section 13 above
+# Handles numeric NaN natively → simpler imputation strategy (categoricals only)
+# OrdinalEncoder for categorical features inside pipeline
+# Objective: minimize RMSE
+# Report: avg MAE, MSE, RMSE, R² across outer folds
+# Feature importance: HGB built-in + SHAP
 
 # %%
