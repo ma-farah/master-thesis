@@ -682,7 +682,7 @@ mfa.partial_row_coordinates(dataset)
 # https://gitlab.com/zryan.rz/master_outlier_detection_h23
 #
 # Pipeline:
-#   1. Miceforest-imputed and median-imputed immunological data -> StandardScaler
+#   1. Miceforest-imputed / median-imputed immunological data -> scale with StandardScaler
 #   2. GEC (Gaussian Ensemble Comparison): fits all candidate algorithms and
 #      selects the 6 most *dissimilar* ones to form a diverse ensemble
 #   3. visualiser_OD: fits the 6 selected algorithms, aggregates scores via
@@ -691,13 +691,13 @@ mfa.partial_row_coordinates(dataset)
 #        - Scatter: median probability vs. average confidence (marker size =
 #          std of confidence, colour = std of probability)
 #        - Pairplots of PC1-5 coloured by median probability / confidence
-#   Contamination is fixed at 0.1
+#   Contamination is fixed at 0.1 / 0.05 (trying both)
 
 import sys
 import random
 from pathlib import Path
 
-# Make pyod_zyran importable from src/
+# Make pyod_zyran folder importable into this file from src/ 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pyod_zyran.GEC import calculate_GEC
@@ -719,8 +719,8 @@ from pyod.models.lscp import LSCP
 if not hasattr(np, 'bool'):
     np.bool = bool
 
-# --- Data: median-imputed immunological dataset (already computed above) ---
-# Drop ID columns, scale to zero mean / unit variance
+# --- Data: imputed immunological dataset (with miceforest) ---
+# Drop ID columns, scale data
 X_ens = df_im_imputed[feature_cols].copy()
 patient_labels = (
     df_im_imputed["Patient"].astype(str) + "-T" + df_im_imputed["Timepoint"].astype(str)
@@ -729,8 +729,8 @@ patient_labels = (
 scaler_ens = StandardScaler()
 X_sc = pd.DataFrame(scaler_ens.fit_transform(X_ens), columns=X_ens.columns)
 
-# --- Build candidate algorithm list (matches notebook) ---
-contamination = 0.05
+# --- Build candidate algorithm list  ---
+contamination = 0.05 # set to 0.1 for standard contamination value?
 random.seed(42)
 detector_list_lscp = [IForest_od(n_estimators=n) for n in random.sample(range(5, 200), 10)]
 
@@ -741,7 +741,7 @@ list_OD_init      = [LSCP(detector_list=detector_list_lscp, contamination=contam
                      else cls(contamination=contamination)
                      for cls in list_OD_classes]
 
-# --- Step 1: GEC — select 6 most dissimilar algorithms ---
+# --- GEC function — select 6 most dissimilar algorithms ---
 print("Running GEC to select 6 most dissimilar algorithms...")
 final_selected_algos, tau_dissimilarity_df = calculate_GEC(
     X_sc.values,
@@ -751,11 +751,8 @@ final_selected_algos, tau_dissimilarity_df = calculate_GEC(
 )
 print(f"GEC selected algorithms: {final_selected_algos}")
 
-"""
-GEC selected algorithms: ['LODA', 'ECOD', 'COPOD', 'HBOS', 'QMCD', 'IForest']
-"""
 
-# --- Step 2: Re-initialise only the selected 6 algorithms ---
+# --- Re-initialise only the selected 6 algorithms ---
 algo_class_map     = {cls.__name__: cls for cls in list_OD_classes}
 initialized_modules = [
     algo_class_map[name](contamination=contamination)
@@ -764,7 +761,7 @@ initialized_modules = [
 ]
 print(f"Ensemble: {len(initialized_modules)} algorithms with contamination={contamination}")
 
-# --- Step 3: visualiser_OD ---
+# --- Plot using visualiser_OD ---
 print("Running visualiser_OD...")
 no_od_df, y_prob_mean, y_conf_mean, y_prob_arr, y_conf_arr, train_scores_ens = visualiser_OD(
     X_sc_ens,
@@ -772,7 +769,6 @@ no_od_df, y_prob_mean, y_conf_mean, y_prob_arr, y_conf_arr, train_scores_ens = v
     patient_labels,
     visualize=True
 )
-
 
 # --- Summary ---
 print(f"\n=== Outlier Detection Summary (contamination={contamination}) ===")
@@ -790,8 +786,6 @@ outlier_candidates = outlier_candidates.sort_values('Median_Probability', ascend
 print(f"\n=== Upper-right Quadrant Observations (median prob. > 0.9  &  avg confidence > 0.9) ===")
 print(f"Total: {len(outlier_candidates)}")
 print(outlier_candidates.to_string())
-
-
 
 
 
@@ -1641,9 +1635,20 @@ print(f"  Categories: {df_cl_clean['diagnosis'].value_counts().to_dict()}")
 # Target volume: standardize body part names + extract treatment side
 df_cl_clean['target_volume'], df_cl_clean['target_side'] = standardize_target_volume(df_cl_clean['target_volume'])
 df_cl_clean = move_column_after(df_cl_clean, 'target_side', 'target_volume')
+
+# FOR NOW, TESTING: Combine into "Bodypart Side" format (e.g. "Heel L", "Knee B")
+# target_side is kept as a separate column for now
+df_cl_clean['target_volume'] = df_cl_clean.apply(
+    lambda r: f"{r['target_volume']} {r['target_side']}".strip()
+              if pd.notna(r['target_volume']) and pd.notna(r['target_side']) and r['target_side'] != ''
+              else r['target_volume'],
+    axis=1
+)
+# drop target side for now.
+df_cl_clean = df_cl_clean.drop(columns=['target_side'])
 print(f"\nTarget volume: {df_cl_clean['target_volume'].nunique()} unique categories")
 print(f"  Categories: {df_cl_clean['target_volume'].value_counts().to_dict()}")
-print(f"  Target side: {df_cl_clean['target_side'].value_counts().to_dict()}")
+
 
 # Pain points: standardize body part names + side per body part
 df_cl_clean['pain_points'] = standardize_pain_points(df_cl_clean['pain_points'])
@@ -1656,7 +1661,7 @@ df_cl_clean = split_filter_column(df_cl_clean)
 print(f"\nFilter mm: {sorted(df_cl_clean['filter_mm'].dropna().unique())}")
 print(f"Filter material: {df_cl_clean['filter_material'].value_counts().to_dict()}")
 
-
+# Extract cumulative dose values
 df_cl_clean['cumulative_dose'] = pd.to_numeric(
     df_cl_clean['cumulative_dose'].apply(parse_cumulative_dose),
     errors='coerce'
@@ -1692,7 +1697,6 @@ print(f"Therapy encoding: {df_cl_clean[therapy_cols].sum().to_dict()}")
 
 
 # Response: parse into response_category (CR/PR/NI or combinations) and response_percent (numeric).
-# response_category is metadata for reference; regression targets use pain_scale (see Step 9).
 df_cl_clean = standardize_response(df_cl_clean, response_col='response')
 df_cl_clean = move_column_after(df_cl_clean, 'response_category', 'response')
 df_cl_clean = move_column_after(df_cl_clean, 'response_percent', 'response_category')
@@ -1747,7 +1751,7 @@ print(df_cl_clean.groupby('Timepoint')['pain_scale'].describe())
 
 categorical_cols = [
     'gender', 'overweight', 'pain_points', 'diagnosis',
-    'target_volume', 'target_side', 'filter_material',
+    'target_volume', 'filter_material',
     'response', 'response_category'          # response_percent stays float
 ]
 
@@ -1816,9 +1820,10 @@ df_cl_for_viz = df_cl_clean.copy()
 
 
 # --- Compute regression targets ---
-# pain_scale_t2        : pain scale value AT timepoint T2 (post-treatment outcome)
-# pain_scale_reduction : T1 pain_scale MINUS T2 pain_scale
-#                        positive value = improvement, negative = worsening
+# pain_scale_t2      : pain scale value AT timepoint T2 (post-treatment outcome)
+# pain_scale_reduction : raw point change T1 - T2 (kept for reference/plotting only)
+# pain_reduction_pct : percent improvement relative to T1 baseline
+#                      positive = improvement, negative = worsening
 
 # Extract T1 and T2 pain_scale per patient
 pain_t1 = (
@@ -1834,20 +1839,36 @@ pain_t2 = (
 
 # Keep only patients with BOTH T1 and T2 pain_scale values (needed for regression target)
 pain_targets = pain_t1.merge(pain_t2, on='Patient', how='inner')
+
+# Raw point reduction (kept for plotting/reference)
 pain_targets['pain_scale_reduction'] = pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2']
 
+# Percent reduction relative to T1 — primary modeling target
+# T1 = 0 is undefined: flag immediately rather than silently produce NaN/inf
+zero_t1 = pain_targets[pain_targets['pain_scale_t1'] == 0]
+if len(zero_t1) > 0:
+    raise ValueError(
+        f"Cannot compute pain_reduction_pct: {len(zero_t1)} patient(s) have "
+        f"pain_scale_t1 = 0: {zero_t1['Patient'].tolist()}"
+    )
+pain_targets['pain_reduction_pct'] = (
+    (pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2'])
+    / pain_targets['pain_scale_t1'] * 100
+)
+
 print(f"\nPatients with T1 + T2 pain_scale (usable for regression): {len(pain_targets)}")
-print(f"pain_scale_t2 range:        {pain_targets['pain_scale_t2'].min():.1f} — {pain_targets['pain_scale_t2'].max():.1f}")
-print(f"pain_scale_reduction range: {pain_targets['pain_scale_reduction'].min():.1f} — {pain_targets['pain_scale_reduction'].max():.1f}")
+print(f"pain_scale_t2 range:      {pain_targets['pain_scale_t2'].min():.1f} — {pain_targets['pain_scale_t2'].max():.1f}")
+print(f"pain_scale_reduction:     {pain_targets['pain_scale_reduction'].min():.1f} — {pain_targets['pain_scale_reduction'].max():.1f} pts")
+print(f"pain_reduction_pct range: {pain_targets['pain_reduction_pct'].min():.1f} — {pain_targets['pain_reduction_pct'].max():.1f} %")
 print(f"  (positive = improvement, negative = worsening)")
-print(f"pain_scale_reduction stats:\n{pain_targets['pain_scale_reduction'].describe()}")
+print(f"pain_reduction_pct stats:\n{pain_targets['pain_reduction_pct'].describe()}")
 
 # Filter clinical dataset to patients that have valid regression targets
 df_cl_clean = df_cl_clean[df_cl_clean['Patient'].isin(pain_targets['Patient'])].copy()
 
 # Add regression targets as patient-level columns (same value repeated across all timepoints per patient)
 df_cl_clean = df_cl_clean.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
     on='Patient',
     how='left'
 )
@@ -1855,32 +1876,32 @@ print(f"\nFinal clinical dataset: {df_cl_clean['Patient'].nunique()} patients, {
 
 
 # --- Distribution of regression targets ---
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+fig, axes = plt.subplots(1, 3, figsize=(18, 4))
 
 targets_per_patient = df_cl_clean.drop_duplicates('Patient')
+colors = sns.color_palette('mako', 5)
 
 # pain_scale_t2
-axes[0].hist(
-    targets_per_patient['pain_scale_t2'].dropna(),
-    bins=20,
-    color=sns.color_palette('mako', 3)[1]
-)
-axes[0].set_title('Distribution: pain_scale_t2 (T2 pain level)')
-axes[0].set_xlabel('Pain Scale (0-10)')
+axes[0].hist(targets_per_patient['pain_scale_t2'].dropna(), bins=20, color=colors[1])
+axes[0].set_title('pain_scale_t2 (T2 pain level)')
+axes[0].set_xlabel('Pain Scale (0–10)')
 axes[0].set_ylabel('Number of Patients')
 
-# pain_scale_reduction
-axes[1].hist(
-    targets_per_patient['pain_scale_reduction'].dropna(),
-    bins=20,
-    color=sns.color_palette('mako', 3)[2]
-)
-axes[1].set_title('Distribution: pain_scale_reduction (T1 - T2)')
-axes[1].set_xlabel('Pain Reduction (positive = improvement)')
-axes[1].set_ylabel('Number of Patients')
-axes[1].axvline(0, color='red', linestyle='--', linewidth=1, label='No change')
+# pain_scale_reduction (raw points, reference only — not modeling target)
+axes[1].hist(targets_per_patient['pain_scale_reduction'].dropna(), bins=20, color=colors[2])
+axes[1].set_title('pain_scale_reduction (T1 − T2 pts, reference)')
+axes[1].set_xlabel('Point Reduction (positive = improvement)')
+axes[1].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
 axes[1].legend()
 
+# pain_reduction_pct (primary modeling target)
+axes[2].hist(targets_per_patient['pain_reduction_pct'].dropna(), bins=20, color=colors[3])
+axes[2].set_title('pain_reduction_pct (% relative to T1)')
+axes[2].set_xlabel('Pain Reduction (%)')
+axes[2].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
+axes[2].legend()
+
+plt.suptitle('Distribution of Regression Targets', fontweight='bold')
 plt.tight_layout()
 plt.show()
 
@@ -1918,7 +1939,7 @@ print(f"Immunological T1:  {df_im_t1['Patient'].nunique()} patients")
 print(f"Clinical T1:       {df_cl_t1['Patient'].nunique()} patients")
 print(f"Combined T1:       {df_combined_t1['Patient'].nunique()} patients")
 print(f"\nTarget: pain_scale_t2\n{df_combined_t1['pain_scale_t2'].describe()}")
-print(f"\nTarget: pain_scale_reduction\n{df_combined_t1['pain_scale_reduction'].describe()}")
+print(f"\nTarget: pain_reduction_pct\n{df_combined_t1['pain_reduction_pct'].describe()}")
 
 TableReport(df_combined_t1, max_plot_columns=200)
 
@@ -1989,7 +2010,7 @@ df_im_raw_t1 = (
 )
 # Attach regression targets so run_catboost_regressor can find the target column
 df_im_raw_t1 = df_im_raw_t1.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
     on='Patient', how='left'
 )
 
@@ -2005,7 +2026,7 @@ df_cl_raw_t1 = (
 )
 # Attach regression targets (pain_scale is still a raw string here — treated as cat feature)
 df_cl_raw_t1 = df_cl_raw_t1.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction']],
+    pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
     on='Patient', how='left'
 )
 
@@ -2050,7 +2071,7 @@ def run_catboost_regressor(df_model, target_col, name,
                       or 'pain_scale' (catches the raw score AND the other target)
     """
     always_exclude  = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns  = ['response', 'improvement_percent', 'pain_scale']
+    leaky_patterns  = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
     exclude = set(always_exclude + [target_col])
     for col in df_model.columns:
         if any(pat in col.lower() for pat in leaky_patterns):
@@ -2158,13 +2179,13 @@ def print_regression_summary(results_dict, target_col):
     return summary
 
 
-#%%############### BASELINE CATBOOST — pain_scale_reduction ###################
+#%%############### BASELINE CATBOOST — pain_reduction_pct #####################
 
 print("\n" + "="*70)
-print("  CATBOOST BASELINE REGRESSOR — Target: pain_scale_reduction")
+print("  CATBOOST BASELINE REGRESSOR — Target: pain_reduction_pct")
 print("="*70)
 
-target = 'pain_scale_reduction'
+target = 'pain_reduction_pct'
 
 res_im_red, model_im_red, X_im_red, ypred_im_red = run_catboost_regressor(
     df_im_raw_t1, target, "Immunological (raw T1)")
@@ -2180,11 +2201,11 @@ summary_cb_red = print_regression_summary(
     target
 )
 
-#%% SHAP — pain_scale_reduction
+#%% SHAP — pain_reduction_pct
 
-shap_im_red   = plot_shap_regressor(model_im_red,   X_im_red,   "Immunological — pain_scale_reduction")
-shap_cl_red   = plot_shap_regressor(model_cl_red,   X_cl_red,   "Clinical — pain_scale_reduction")
-shap_comb_red = plot_shap_regressor(model_comb_red, X_comb_red, "Combined — pain_scale_reduction")
+shap_im_red   = plot_shap_regressor(model_im_red,   X_im_red,   "Immunological — pain_reduction_pct")
+shap_cl_red   = plot_shap_regressor(model_cl_red,   X_cl_red,   "Clinical — pain_reduction_pct")
+shap_comb_red = plot_shap_regressor(model_comb_red, X_comb_red, "Combined — pain_reduction_pct")
 
 
 #%%############### BASELINE CATBOOST — pain_scale_t2 ##########################
@@ -2223,7 +2244,7 @@ shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_
 
 print(f"\nAdvanced modeling dataset (df_combined_t1): {df_combined_t1.shape}, "
       f"patients: {df_combined_t1['Patient'].nunique()}")
-print(df_combined_t1[['pain_scale_reduction', 'pain_scale_t2']].describe())
+print(df_combined_t1[['pain_reduction_pct', 'pain_scale_t2']].describe())
 
 
 #%%############### ADVANCED MODELING: HistGradientBoosting ####################
@@ -2241,7 +2262,7 @@ def run_hgb_regressor(df_model, target_col, name,
     Returns (results_df, fitted_pipeline, X_features, y_pred_series).
     """
     always_exclude = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns = ['response', 'improvement_percent', 'pain_scale']
+    leaky_patterns = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
     exclude = set(always_exclude + [target_col])
     for col in df_model.columns:
         if any(pat in col.lower() for pat in leaky_patterns):
@@ -2319,14 +2340,14 @@ def run_hgb_regressor(df_model, target_col, name,
     return results_df, pipeline, X, pd.Series(y_pred_arr, name='y_pred')
 
 
-#%%############### RUN HGB — pain_scale_reduction #############################
+#%%############### RUN HGB — pain_reduction_pct ###############################
 
 print("\n" + "="*70)
-print("  HGB ADVANCED MODELING — Target: pain_scale_reduction")
+print("  HGB ADVANCED MODELING — Target: pain_reduction_pct")
 print("="*70)
 
 res_hgb_red, pipeline_hgb_red, X_hgb_red, ypred_hgb_red = run_hgb_regressor(
-    df_combined_t1, 'pain_scale_reduction', "Combined clean T1")
+    df_combined_t1, 'pain_reduction_pct', "Combined clean T1")
 
 # Built-in feature importance from the HGB model
 hgb_model     = pipeline_hgb_red.named_steps['model']
@@ -2340,7 +2361,7 @@ importance_df = pd.DataFrame({
     'Importance': hgb_model.feature_importances_
 }).sort_values('Importance', ascending=False).reset_index(drop=True)
 
-print(f"\nTop 20 features by HGB importance (pain_scale_reduction):")
+print(f"\nTop 20 features by HGB importance (pain_reduction_pct):")
 print(importance_df.head(20).to_string(index=False))
 
 # Bar plot of feature importance
@@ -2350,7 +2371,7 @@ sns.barplot(
     x='Importance', y='Feature',
     palette='mako', orient='h'
 )
-plt.title("HGB Feature Importance — pain_scale_reduction", fontweight='bold')
+plt.title("HGB Feature Importance — pain_reduction_pct", fontweight='bold')
 plt.xlabel('Importance')
 plt.tight_layout()
 plt.show()
