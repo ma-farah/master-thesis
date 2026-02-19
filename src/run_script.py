@@ -797,7 +797,6 @@ print(outlier_candidates.to_string())
 
 
 
-
 # %%################ RAW CLINICAL DATASET #############################
 
 # Table report of clinical dataset
@@ -810,9 +809,65 @@ na.altair.plot_heatmap(df_cl)
 
 
 # Raw clinical dataset statistics
+print(f"\n=== Raw clinical dataset overview ===")
+print(f"  Shape         : {df_cl.shape[0]} rows × {df_cl.shape[1]} columns")
+print(f"  Patients      : {df_cl['Patient'].dropna().nunique()}")
+print(f"  Missing values: {df_cl.isna().sum().sum()} total "
+      f"({df_cl.isna().mean().mean()*100:.1f}% of all cells)")
 
+# Missing values per column (top 15 most incomplete)
+missing = (df_cl.isna().mean() * 100).sort_values(ascending=False)
+print(f"\nTop 15 columns by missingness (%):\n{missing.head(15).round(1).to_string()}")
 
+# Patient count per timepoint (using Erfassungszeitpunkt)
+if 'Erfassungszeitpunkt' in df_cl.columns:
+    tp_counts = (
+        df_cl[df_cl['Datum'].notna()]
+        ['Erfassungszeitpunkt']
+        .str.extract(r'\d+\.\d+\.(\d+)')[0]
+        .value_counts()
+        .sort_index()
+    )
+    print(f"\nRows per timepoint:\n{tp_counts.to_string()}")
 
+# --- Plots ---
+fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+colors = sns.color_palette('mako', 5)
+
+# 1. Missing value rate per column
+missing_plot = missing[missing > 0]
+axes[0].barh(range(min(20, len(missing_plot))),
+             missing_plot.values[:20][::-1],
+             color=colors[2])
+axes[0].set_yticks(range(min(20, len(missing_plot))))
+axes[0].set_yticklabels(missing_plot.index[:20][::-1], fontsize=7)
+axes[0].set_xlabel('Missing (%)')
+axes[0].set_title('Top 20 columns by missingness')
+
+# 2. Rows per timepoint
+if 'Erfassungszeitpunkt' in df_cl.columns:
+    axes[1].bar(tp_counts.index.astype(str), tp_counts.values, color=colors[1])
+    axes[1].set_xlabel('Timepoint')
+    axes[1].set_ylabel('Row count')
+    axes[1].set_title('Rows per timepoint')
+
+# 3. Age distribution (if column present)
+age_col = next((c for c in df_cl.columns if 'age' in c.lower() or 'alter' in c.lower()), None)
+if age_col:
+    age_vals = pd.to_numeric(df_cl[age_col], errors='coerce').dropna()
+    axes[2].hist(age_vals, bins=20, color=colors[3], edgecolor='white')
+    axes[2].set_xlabel('Age')
+    axes[2].set_ylabel('Count')
+    axes[2].set_title(f'Age distribution (n={len(age_vals)})')
+    print(f"\nAge — mean: {age_vals.mean():.1f}, "
+          f"median: {age_vals.median():.1f}, "
+          f"range: {age_vals.min():.0f}–{age_vals.max():.0f}")
+else:
+    axes[2].set_visible(False)
+
+plt.suptitle('Raw Clinical Dataset — Overview', fontweight='bold')
+plt.tight_layout()
+plt.show()
 
 
 
@@ -823,7 +878,7 @@ na.altair.plot_heatmap(df_cl)
 # -> drop na>25% columns -> visualize -> prepare target before modeling
 
 
-#%% Clinical preprocessing: helper functions
+# Clinical preprocessing: helper functions
 
 def move_column_after(df, col_to_move, after_col):
     """Move a column to position right after another column."""
@@ -930,9 +985,13 @@ def parse_symptoms_duration(series, date_series=None):
             return pd.NA
         s = str(val).strip()
 
+        # "einige Jahre" / "einge j." = approximately 1 year → 12 months
+        if s.lower() in ('einige jahre', 'einige j.', 'einge j.'):
+            return 12.0
+
         # Vague / unparseable entries → NaN
         if s.lower() in ('jahre', 'jahre ', 'mehrere', 'mehrere jahre',
-                         'mehreren mo.', 'einige jahre', 'einge j.', 'täglich'):
+                         'mehrere monate', 'mehreren mo.', 'täglich'):
             return pd.NA
 
         # Full date string: "2023-04-01 00:00:00" → calc months from measurement date
@@ -940,6 +999,16 @@ def parse_symptoms_duration(series, date_series=None):
         if date_match:
             if pd.notna(meas_date):
                 symptom_date = pd.Timestamp(f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        # German date "01.04.2023" (DD.MM.YYYY) → calc months from measurement date
+        de_date_match = re.match(r'^~?(\d{1,2})\.(\d{1,2})\.(\d{4})$', s.strip())
+        if de_date_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(
+                    f"{de_date_match.group(3)}-{int(de_date_match.group(2)):02d}-{int(de_date_match.group(1)):02d}"
+                )
                 return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
             return pd.NA
 
