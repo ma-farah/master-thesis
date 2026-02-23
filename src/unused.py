@@ -1,5 +1,87 @@
 
-# Old pyOD outlier detection code:
+#%% old trajecotry pca
+
+# Combined PCA for timepoint t1-t2, t2-t3 and t1-t3 
+
+# finding common patients with measuements at t1 and t2:
+patients_t12 = set(df_t1["Patient"]) & set(df_t2["Patient"])
+# common patients with measuements at t1 and t3:
+patients_t13 = set(df_t1["Patient"]) & set(df_t3["Patient"])
+# common patients with measuements at t2 and t3:
+patients_t23 = set(df_t2["Patient"]) & set(df_t3["Patient"])
+
+# function to sort dataframe by patient ids
+def sortdfs(df, patients):
+    return (
+        df[df["Patient"].isin(patients)]
+        .sort_values("Patient")
+        .set_index("Patient")
+    )
+
+t12 = sortdfs(df_t1, patients_t12)
+t22 = sortdfs(df_t2, patients_t12)
+t13 = sortdfs(df_t1, patients_t13)
+t23 = sortdfs(df_t3, patients_t13)
+t32 = sortdfs(df_t2, patients_t23)
+t33 = sortdfs(df_t3, patients_t23)
+
+print('Combined PCA:')
+
+# PCA for timepoints combined
+for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t32, t33, "T2 and T3")]:
+    # Patient is already index, drop only Timepoint and Date
+    X_a = df_a.drop(columns=['Timepoint', 'Date'])
+    X_b = df_b.drop(columns=['Timepoint', 'Date'])
+
+    X_combined = pd.concat([X_a, X_b], axis=0)
+
+    pca = ps.PCA(
+        n_components=3,
+        n_iter=3,
+        copy=True,
+        engine='sklearn',
+        check_input=True,
+        random_state=42
+    )
+
+    pca = pca.fit(X_combined)
+
+    # plotting results of PCA (Patient ID as index but not shown)
+    chart = pca.plot(
+        X_combined,
+        x_component=0,
+        y_component=1,
+        show_row_markers=True,
+        show_column_markers=False,
+        show_row_labels=False,  # Don't show patient IDs
+        show_column_labels=False
+    ).properties(
+        title=f'PCA of Immunological Data at {label}'
+    )
+    chart.display()
+
+    # Scores (coordinates) for each patient
+    # sort after patient id that has longest distance away from the center in the PCA plot, to see if they are outliers in the raw data as well.
+    row_coords = pca.transform(X_combined)
+    row_coords['Distance'] = np.sqrt(row_coords[0]**2 + row_coords[1]**2)
+    row_coords = row_coords.sort_values('Distance', ascending=False)
+    print(f"Top 10 Patients with highest distance from center for {label}:")
+    print(row_coords.head(10))
+    print("\n")
+
+    # Top contributing variables to PC1 and PC2
+    loading_scores = pca.column_correlations  # property, not method
+    print(f"Top contributing variables to PC1 for {label}:")
+    print(loading_scores[0].abs().sort_values(ascending=False).head(10))
+    print("\n")
+    print(f"Top contributing variables to PC2 for {label}:")
+    print(loading_scores[1].abs().sort_values(ascending=False).head(10))
+    print("\n")
+
+
+
+
+#%% Old pyOD outlier detection code:
 
 # Using an ensemble of outlier detection methods from pyod package:
 # Isolation Forest (IForest): tree-based method, very different from pca, great for high-dimensional continous data
