@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import prince as ps
 import pyod as pyod
 from skrub import Cleaner
-from missing_methods import pca as mm_pca
+from missing_methods import pca as mm_pca, rv2 as mm_rv2
 from missing_methods.sk import StandardScaler as MM_StandardScaler
 
 
@@ -212,97 +212,6 @@ for col in feature_cols:
     df_im[col] = pd.to_numeric(df_im[col], errors="coerce")
 
 TableReport(df_im, max_plot_columns=180)
-
-
-
-
-
-
-
-
-# Removing columns with more than 25% missing values:
-na_frac = df_im.isna().mean()
-cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
-df_im = df_im.drop(columns=cols_to_drop).copy()
-
-df_im_mod = df_im.copy() # copy for modeling!
-
-print('Dropped columns:', cols_to_drop)
-
-""" 
-Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 
-'NK_HLADRhi', 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 
-'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
-"""
-
-# New Tablereport
-TableReport(df_im, max_plot_columns=138)
-
-
-#%%########### Imputing missing values using miceforest and median
-
-# handling name issues - mice forest does not take symbols
-feature_cols = df_im.columns.difference(exclude_cols)
-
-def clean_colname(col):
-    col = col.strip()
-    col = re.sub(r"[^\w]", "_", col)
-    col = re.sub(r"_+", "_", col)
-    return col
-
-# map for renaming columns
-rename_map = {c: clean_colname(c) for c in feature_cols}
-
-# rename columns
-df_im2 = df_im.reset_index(drop=True).rename(columns=rename_map)
-
-# imputing with miceforest with renamed columns
-X_im = df_im2[list(rename_map.values())].copy()
-
-import miceforest as mf
-
-# MICE imputation with mean matching
-kernel = mf.ImputationKernel(
-    X_im,
-    num_datasets=5,
-    mean_match_candidates=5,  # impute from 5 nearest observed values
-    random_state=42
-)
-
-kernel.mice(10)    # 10 iterations
-
-# Average imputed values across all 5 datasets
-imputed_datasets = [kernel.complete_data(dataset=i) for i in range(5)]
-X_imputed_renamed = sum(imputed_datasets) / len(imputed_datasets)
-
-# changing back to original column names
-reverse_rename_map = {v: k for k, v in rename_map.items()}
-X_imputed = X_imputed_renamed.rename(columns=reverse_rename_map)
-
-# reindex to preserve original column order
-X_imputed = X_imputed.reindex(columns=feature_cols)
-
-# final imputation
-df_im_imputed = pd.concat(
-    [
-        df_im[exclude_cols].reset_index(drop=True),
-        X_imputed.reset_index(drop=True)
-    ],
-    axis=1
-)
-
-# ensure final dataframe has columns in same order as original
-df_im_imputed = df_im_imputed[df_im.columns]
-
-# New tablereport of imputed data
-TableReport(df_im_imputed, max_plot_columns=138)
-
-
-# Median imputation:
-df_im_median = df_im.copy()
-for col in feature_cols:
-    median_value = df_im_median[col].median()
-    df_im_median[col] = df_im_median[col].fillna(median_value)  
 
 
 
@@ -520,6 +429,7 @@ plt.tight_layout()
 plt.show()
 
 
+
 #%% ############## PCA analysis immu dataset ########################
 # using prince package for pca analysis:
 
@@ -578,86 +488,6 @@ for t in timepoints:
     
        
 
-
-
-#%%  Combined PCA for timepoint t1-t2, t2-t3 and t1-t3 
-
-# finding common patients with measuements at t1 and t2:
-patients_t12 = set(df_t1["Patient"]) & set(df_t2["Patient"])
-# common patients with measuements at t1 and t3:
-patients_t13 = set(df_t1["Patient"]) & set(df_t3["Patient"])
-# common patients with measuements at t2 and t3:
-patients_t23 = set(df_t2["Patient"]) & set(df_t3["Patient"])
-
-# function to sort dataframe by patient ids
-def sortdfs(df, patients):
-    return (
-        df[df["Patient"].isin(patients)]
-        .sort_values("Patient")
-        .set_index("Patient")
-    )
-
-t12 = sortdfs(df_t1, patients_t12)
-t22 = sortdfs(df_t2, patients_t12)
-t13 = sortdfs(df_t1, patients_t13)
-t23 = sortdfs(df_t3, patients_t13)
-t32 = sortdfs(df_t2, patients_t23)
-t33 = sortdfs(df_t3, patients_t23)
-
-print('Combined PCA:')
-
-# PCA for timepoints combined
-for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t32, t33, "T2 and T3")]:
-    # Patient is already index, drop only Timepoint and Date
-    X_a = df_a.drop(columns=['Timepoint', 'Date'])
-    X_b = df_b.drop(columns=['Timepoint', 'Date'])
-
-    X_combined = pd.concat([X_a, X_b], axis=0)
-
-    pca = ps.PCA(
-        n_components=3,
-        n_iter=3,
-        copy=True,
-        engine='sklearn',
-        check_input=True,
-        random_state=42
-    )
-
-    pca = pca.fit(X_combined)
-
-    # plotting results of PCA (Patient ID as index but not shown)
-    chart = pca.plot(
-        X_combined,
-        x_component=0,
-        y_component=1,
-        show_row_markers=True,
-        show_column_markers=False,
-        show_row_labels=False,  # Don't show patient IDs
-        show_column_labels=False
-    ).properties(
-        title=f'PCA of Immunological Data at {label}'
-    )
-    chart.display()
-
-    # Scores (coordinates) for each patient
-    # sort after patient id that has longest distance away from the center in the PCA plot, to see if they are outliers in the raw data as well.
-    row_coords = pca.transform(X_combined)
-    row_coords['Distance'] = np.sqrt(row_coords[0]**2 + row_coords[1]**2)
-    row_coords = row_coords.sort_values('Distance', ascending=False)
-    print(f"Top 10 Patients with highest distance from center for {label}:")
-    print(row_coords.head(10))
-    print("\n")
-
-    # Top contributing variables to PC1 and PC2
-    loading_scores = pca.column_correlations  # property, not method
-    print(f"Top contributing variables to PC1 for {label}:")
-    print(loading_scores[0].abs().sort_values(ascending=False).head(10))
-    print("\n")
-    print(f"Top contributing variables to PC2 for {label}:")
-    print(loading_scores[1].abs().sort_values(ascending=False).head(10))
-    print("\n")
-
-
 #%% ########## Trajectory PCA: T1↔T2, T2↔T3, T1↔T3 (NIPALS, missing-methods) ###
 
 print("Trajectory PCA — immunological dataset")
@@ -667,8 +497,8 @@ print("Trajectory PCA — immunological dataset")
 # so we do not need to impute before this analysis.
 id_cols_im = ["Patient", "Timepoint", "Date"]
 
-# Colour palette: one colour per timepoint, consistent across all three plots.
-# T1 = mako[0], T2 = mako[2], T3 = mako[4]  (spread across the palette range)
+# Colour palette: consistently one colour per timepoint across all plots.
+# T1 = mako[0], T2 = mako[2], T3 = mako[4] 
 _mako5     = sns.color_palette("mako", 5)
 tp_colors  = {1: _mako5[0], 2: _mako5[2], 3: _mako5[4]}
 tp_labels  = {1: "T1", 2: "T2", 3: "T3"}
@@ -726,19 +556,21 @@ for tp_a, tp_b, arrow_color, label in pairs:
     scaler = MM_StandardScaler()
     X_pair = scaler.fit_transform(X_pair)
 
-    # ── 5. NIPALS PCA ─────────────────────────────────────────────────────────
+    # ── 5. NIPALS PCA using missing-methods ────────────────────────────────────
     res         = mm_pca(X_pair, ncomp=ncomp)
     scores      = res["scores"]    # (2*n_pair, ncomp)
     explained   = res["explained"] # (ncomp,)  — raw sum-of-squares, NOT %
 
-    # ── 6. Split scores back into the two timepoint blocks ────────────────────
+    # ── 6. Split scores + recover patient IDs ────────────────────────────────
+    # Patient IDs preserved from the sorted filter — row i = same patient in A and B.
+    patient_ids = df_a["Patient"].values
     sc_a = scores[:n_pair, :]
     sc_b = scores[n_pair:, :]
 
     # ── 7. Explained variance % ───────────────────────────────────────────────
     exp_pct = explained / explained.sum() * 100
 
-    # ── 7. Scree plot ─────────────────────────────────────────────────────────
+    # ── 8. Scree plot ─────────────────────────────────────────────────────────
     bar_colors = sns.color_palette("mako", ncomp)
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -747,46 +579,84 @@ for tp_a, tp_b, arrow_color, label in pairs:
         range(1, ncomp + 1), np.cumsum(exp_pct),
         marker="o", color=cum_color, linewidth=1.5, label="Cumulative %"
     )
-    ax.set_xlabel("Principal Component")
+    ax.set_xticks(range(1, ncomp + 1))   # show every integer 1–10
+    ax.set_xlabel("Principal Components.")
     ax.set_ylabel("Explained Variance (%)")
-    ax.set_title(f"Scree Plot — Immunological Dataset)")
+    ax.set_title(f"Scree Plot — Immunological Dataset\n{label}")
     ax.legend()
     plt.tight_layout()
     plt.show()
 
-    # ── 8. Trajectory score plot ──────────────────────────────────────────────
-    # Dots: one per patient per timepoint.
-    # Arrows: tail at timepoint A, arrowhead at timepoint B.
-    # A consistent arrow colour (destination timepoint colour) makes the
-    # direction of change immediately readable across all three plots.
+    # ── 9. Longest trajectories — printed table ───────────────────────────────
+    # For trajectory PCA the meaningful metric is arrow length: how much did
+    # each patient's immune profile shift between the two timepoints?
+    # (Distance from origin belongs in single-timepoint outlier analysis.)
+    N_PRINT    = 20
 
-    fig, ax = plt.subplots(figsize=(9, 7))
+    traj_len = np.sqrt(
+        (sc_b[:, 0] - sc_a[:, 0])**2 +
+        (sc_b[:, 1] - sc_a[:, 1])**2
+    )
+    top_traj_idx = np.argsort(traj_len)[::-1][:N_PRINT]
+
+    print(f"\n  Top {N_PRINT} Largest Trajecotry Lengths {label}:")
+    print(f"  {'Patient':>10}  {'PC1 T'+str(tp_a):>9}  {'PC2 T'+str(tp_a):>9}"
+          f"  {'PC1 T'+str(tp_b):>9}  {'PC2 T'+str(tp_b):>9}  {'Traj. length':>13}")
+    for i in top_traj_idx:
+        print(f"  {patient_ids[i]:>10}"
+              f"  {sc_a[i,0]:>9.3f}  {sc_a[i,1]:>9.3f}"
+              f"  {sc_b[i,0]:>9.3f}  {sc_b[i,1]:>9.3f}"
+              f"  {traj_len[i]:>13.3f}")
+
+    # ── 10. Trajectory score plot ─────────────────────────────────────────────
+    from adjustText import adjust_text
+
+    # Top 20 by trajectory length get labelled.
+    label_idx = np.argsort(traj_len)[::-1][:20]
+
+    fig, ax = plt.subplots(figsize=(11, 9))
 
     ax.scatter(
         sc_a[:, 0], sc_a[:, 1],
         c=[tp_colors[tp_a]], label=tp_labels[tp_a],
-        s=45, zorder=3, edgecolors="white", linewidth=0.4
+        s=40, zorder=3, edgecolors="white", linewidth=0.4, alpha=0.8
     )
     ax.scatter(
         sc_b[:, 0], sc_b[:, 1],
         c=[tp_colors[tp_b]], label=tp_labels[tp_b],
-        s=45, zorder=3, edgecolors="white", linewidth=0.4
+        s=40, zorder=3, edgecolors="white", linewidth=0.4, alpha=0.8
     )
 
-    # One arrow per patient from A → B
+    # One arrow per patient from A → B.
+    # annotation_clip=False prevents arrows from being cut off at the axes edge.
     for i in range(n_pair):
         ax.annotate(
             "",
-            xy    =(sc_b[i, 0], sc_b[i, 1]),   # arrowhead at destination (B)
-            xytext=(sc_a[i, 0], sc_a[i, 1]),   # tail at origin (A)
+            xy    =(sc_b[i, 0], sc_b[i, 1]),
+            xytext=(sc_a[i, 0], sc_a[i, 1]),
+            annotation_clip=False,
             arrowprops=dict(
                 arrowstyle="-|>",
                 color=arrow_color,
-                lw=0.9,
-                alpha=0.4,
-                mutation_scale=8,
+                lw=0.8,
+                alpha=0.3,
+                mutation_scale=7,
             ),
         )
+
+    # Label top 20 by trajectory length — placed at arrow midpoint, non-overlapping.
+    texts = []
+    for i in label_idx:
+        mx = (sc_a[i, 0] + sc_b[i, 0]) / 2
+        my = (sc_a[i, 1] + sc_b[i, 1]) / 2
+        texts.append(ax.text(mx, my, str(patient_ids[i]),
+                             fontsize=8, fontweight="bold",
+                             color="black", zorder=5))
+    adjust_text(
+        texts, ax=ax,
+        expand=(1.5, 1.5),
+        arrowprops=dict(arrowstyle="-", color="grey", lw=0.6)
+    )
 
     ax.axhline(0, color="grey", lw=0.5, linestyle="--")
     ax.axvline(0, color="grey", lw=0.5, linestyle="--")
@@ -794,11 +664,12 @@ for tp_a, tp_b, arrow_color, label in pairs:
     ax.set_ylabel(f"PC2 ({exp_pct[1]:.1f}% variance)")
     ax.set_title(
         f"Trajectory PCA — Immunological Dataset\n"
-        f"{label}  (arrows per patient)"
+        f"{label}  (top 20 longest trajectories labelled)"
     )
     ax.legend(loc="best")
     plt.tight_layout()
     plt.show()
+
 
 
 #%%############ MFA for timepoints 1, 2 and 3 combined
@@ -860,6 +731,95 @@ mfa.plot(
 # Scores for each patient at different timepoints-groups
 # sort ater patient id that has longest distance away from the center in the MFA plot, to see if they are outliers in the raw data as well.
 mfa.partial_row_coordinates(dataset)
+
+
+
+#%%########### Imputing missing values using miceforest and median
+# in order to be able to run pyod outlier detection
+
+
+# Removing columns with more than 25% missing values:
+na_frac = df_im.isna().mean()
+cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
+df_im = df_im.drop(columns=cols_to_drop).copy()
+
+df_im_mod = df_im.copy() # copy for modeling!
+
+print('Dropped columns:', cols_to_drop)
+
+""" 
+Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 
+'NK_HLADRhi', 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 
+'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
+"""
+
+# New Tablereport
+TableReport(df_im, max_plot_columns=138)
+
+
+
+# handling name issues - mice forest does not take symbols
+feature_cols = df_im.columns.difference(exclude_cols)
+
+def clean_colname(col):
+    col = col.strip()
+    col = re.sub(r"[^\w]", "_", col)
+    col = re.sub(r"_+", "_", col)
+    return col
+
+# map for renaming columns
+rename_map = {c: clean_colname(c) for c in feature_cols}
+
+# rename columns
+df_im2 = df_im.reset_index(drop=True).rename(columns=rename_map)
+
+# imputing with miceforest with renamed columns
+X_im = df_im2[list(rename_map.values())].copy()
+
+import miceforest as mf
+
+# MICE imputation with mean matching
+kernel = mf.ImputationKernel(
+    X_im,
+    num_datasets=5,
+    mean_match_candidates=5,  # impute from 5 nearest observed values
+    random_state=42
+)
+
+kernel.mice(10)    # 10 iterations
+
+# Average imputed values across all 5 datasets
+imputed_datasets = [kernel.complete_data(dataset=i) for i in range(5)]
+X_imputed_renamed = sum(imputed_datasets) / len(imputed_datasets)
+
+# changing back to original column names
+reverse_rename_map = {v: k for k, v in rename_map.items()}
+X_imputed = X_imputed_renamed.rename(columns=reverse_rename_map)
+
+# reindex to preserve original column order
+X_imputed = X_imputed.reindex(columns=feature_cols)
+
+# final imputation
+df_im_imputed = pd.concat(
+    [
+        df_im[exclude_cols].reset_index(drop=True),
+        X_imputed.reset_index(drop=True)
+    ],
+    axis=1
+)
+
+# ensure final dataframe has columns in same order as original
+df_im_imputed = df_im_imputed[df_im.columns]
+
+# New tablereport of imputed data
+TableReport(df_im_imputed, max_plot_columns=138)
+
+
+# Median imputation:
+df_im_median = df_im.copy()
+for col in feature_cols:
+    median_value = df_im_median[col].median()
+    df_im_median[col] = df_im_median[col].fillna(median_value)  
 
 
 #%%######### PyOD Ensemble Outlier Detection (Zyran approach) - Immunological Dataset ########
@@ -972,7 +932,6 @@ outlier_candidates = outlier_candidates.sort_values('Median_Probability', ascend
 print(f"\n=== Upper-right Quadrant Observations (median prob. > 0.9  &  avg confidence > 0.9) ===")
 print(f"Total: {len(outlier_candidates)}")
 print(outlier_candidates.to_string())
-
 
 
 
