@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import prince as ps
 import pyod as pyod
 from skrub import Cleaner
+from missing_methods import pca as mm_pca
 
 
 #%%############# Loading raw datasets ###########################
@@ -615,10 +616,143 @@ for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t
     print("\n")
 
 
-# Trajectory pca plot....
+#%% ########## Trajectory PCA: T1↔T2, T2↔T3, T1↔T3 (NIPALS, missing-methods) ###
+
+print("Trajectory PCA — immunological dataset (three separate pairwise plots)")
+
+# We use df_im_reduced (cleaned but NOT imputed).
+# missing-methods NIPALS handles NaN natively via scaled inner products,
+# so we do not need to impute before this analysis.
+id_cols_im = ["Patient", "Timepoint", "Date"]
+
+# Colour palette: one colour per timepoint, consistent across all three plots.
+# T1 = mako[0], T2 = mako[2], T3 = mako[4]  (spread across the palette range)
+_mako5     = sns.color_palette("mako", 5)
+tp_colors  = {1: _mako5[0], 2: _mako5[2], 3: _mako5[4]}
+tp_labels  = {1: "T1 (baseline)", 2: "T2", 3: "T3"}
+
+ncomp     = 10           # PCs to extract; PC1+PC2 used for the score plot
+cum_color = sns.color_palette("crest", 1)[0]
 
 
-#%%############ MFA for timepoints 1, 2 and 3 combined 
+def _filter_tp(tp, patients):
+    """Return rows for *tp* restricted to *patients*, sorted by Patient ID."""
+    return (
+        df_im_reduced[
+            (df_im_reduced["Timepoint"] == tp)
+            & (df_im_reduced["Patient"].isin(patients))
+        ]
+        .sort_values("Patient")
+        .reset_index(drop=True)
+    )
+
+
+# Each tuple: (timepoint A, timepoint B, arrow colour)
+# The arrow colour is the destination timepoint's colour (shows where you land).
+pairs = [
+    (1, 2, tp_colors[2], "T1 → T2"),
+    (2, 3, tp_colors[3], "T2 → T3"),
+    (1, 3, tp_colors[3], "T1 → T3"),
+]
+
+for tp_a, tp_b, arrow_color, label in pairs:
+
+    # ── 1. Patients present at BOTH timepoints in this pair ───────────────────
+    patients_pair = (
+        set(df_im_reduced[df_im_reduced["Timepoint"] == tp_a]["Patient"])
+        & set(df_im_reduced[df_im_reduced["Timepoint"] == tp_b]["Patient"])
+    )
+    n_pair = len(patients_pair)
+    print(f"  {label}: {n_pair} patients")
+
+    # ── 2. Filter + sort (sorting guarantees row i = same patient in A and B) ─
+    df_a = _filter_tp(tp_a, patients_pair)
+    df_b = _filter_tp(tp_b, patients_pair)
+
+    # ── 3. Feature matrices ────────────────────────────────────────────────────
+    Xa = df_a.drop(columns=id_cols_im).values.astype(float)
+    Xb = df_b.drop(columns=id_cols_im).values.astype(float)
+
+    # Stack A on top of B → one matrix for a shared PC space.
+    # Each patient appears twice: once as timepoint A, once as timepoint B.
+    X_pair = np.vstack([Xa, Xb])   # shape: (2 * n_pair, n_features)
+
+    # ── 4. NIPALS PCA ─────────────────────────────────────────────────────────
+    res         = mm_pca(X_pair, ncomp=ncomp)
+    scores      = res["scores"]    # (2*n_pair, ncomp)
+    explained   = res["explained"] # (ncomp,)  — raw sum-of-squares, NOT %
+
+    # ── 5. Split scores back into the two timepoint blocks ────────────────────
+    sc_a = scores[:n_pair, :]
+    sc_b = scores[n_pair:, :]
+
+    # ── 6. Explained variance % ───────────────────────────────────────────────
+    exp_pct = explained / explained.sum() * 100
+
+    # ── 7. Scree plot ─────────────────────────────────────────────────────────
+    bar_colors = sns.color_palette("mako", ncomp)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(range(1, ncomp + 1), exp_pct, color=bar_colors, label="Per-PC %")
+    ax.plot(
+        range(1, ncomp + 1), np.cumsum(exp_pct),
+        marker="o", color=cum_color, linewidth=1.5, label="Cumulative %"
+    )
+    ax.set_xlabel("Principal Component")
+    ax.set_ylabel("Explained Variance (%)")
+    ax.set_title(f"Scree Plot — Immunological Dataset (NIPALS, {label})")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # ── 8. Trajectory score plot ──────────────────────────────────────────────
+    # Dots: one per patient per timepoint.
+    # Arrows: tail at timepoint A, arrowhead at timepoint B.
+    # A consistent arrow colour (destination timepoint colour) makes the
+    # direction of change immediately readable across all three plots.
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    ax.scatter(
+        sc_a[:, 0], sc_a[:, 1],
+        c=[tp_colors[tp_a]], label=tp_labels[tp_a],
+        s=45, zorder=3, edgecolors="white", linewidth=0.4
+    )
+    ax.scatter(
+        sc_b[:, 0], sc_b[:, 1],
+        c=[tp_colors[tp_b]], label=tp_labels[tp_b],
+        s=45, zorder=3, edgecolors="white", linewidth=0.4
+    )
+
+    # One arrow per patient from A → B
+    for i in range(n_pair):
+        ax.annotate(
+            "",
+            xy    =(sc_b[i, 0], sc_b[i, 1]),   # arrowhead at destination (B)
+            xytext=(sc_a[i, 0], sc_a[i, 1]),   # tail at origin (A)
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color=arrow_color,
+                lw=0.9,
+                alpha=0.4,
+                mutation_scale=8,
+            ),
+        )
+
+    ax.axhline(0, color="grey", lw=0.5, linestyle="--")
+    ax.axvline(0, color="grey", lw=0.5, linestyle="--")
+    ax.set_xlabel(f"PC1 ({exp_pct[0]:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({exp_pct[1]:.1f}% variance)")
+    ax.set_title(
+        f"Trajectory PCA — Immunological Dataset\n"
+        f"{label}  (arrows per patient, NIPALS handles missing values)"
+    )
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+
+#%%############ MFA for timepoints 1, 2 and 3 combined
 
 print("MFA for timepoints 1, 2 and 3 combined:")
 
@@ -1840,6 +1974,20 @@ df_cl_vis = df_cl_clean.copy()
 #   - Correlation matrix (phik.phik_matrix — handles mixed types and NaN)
 #   - NA heatmap
 ################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 #%% 10 — Modeling copy (df_cl_mod)

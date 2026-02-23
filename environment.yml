@@ -11,7 +11,7 @@ dependencies:
   - pandas
   - scipy
   - skrub
-  - scikit-learn
+  - scikit-learn        # includes ElasticNet, HistGradientBoostingRegressor, RepeatedKFold, etc.
   - prince
   - miceforest
   - hoggorm
@@ -19,14 +19,18 @@ dependencies:
   - seaborn
   - jupyterlab
   - ipykernel
-  - catboost
+  - catboost            # CatBoostRegressor
+  - lightgbm
+  - shap
   - phik
   - pyod
+  - optuna              # hyperparameter tuning (nested CV, phase 4)
   - pip
   - pip:
       - scikit-na
       - hoggormplot
       - adjustText
       - six
-  
-  # last updated 02.02.2026
+      - git+https://github.com/khliland/missing-methods.git  # NIPALS PCA/PLS/RV2 with NaN support
+
+  # last updated 23.02.2026
