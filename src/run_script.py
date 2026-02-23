@@ -16,6 +16,38 @@ import prince as ps
 import pyod as pyod
 from skrub import Cleaner
 from missing_methods import pca as mm_pca
+from missing_methods.sk import StandardScaler as MM_StandardScaler
+
+
+#%%############# Shared utility functions ###########################
+
+def replace_missing_markers(df, skip_cols=None, verbose=False):
+    """Replace German missing-value strings with NaN in all object columns.
+
+    Handles all capitalisation and punctuation variants of:
+      - 'k.A.' (keine Angabe — no data entered)
+      - 'n.D.' (nicht durchgeführt / nicht definiert — not performed)
+
+    Parameters
+    ----------
+    df : pd.DataFrame  (modified in-place)
+    skip_cols : iterable of str, optional — columns to leave untouched (e.g. Patient, Timepoint)
+    verbose : bool — if True, print per-column replacement counts
+    """
+    pattern   = r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$'
+    skip_cols = set(skip_cols or [])
+
+    for col in df.columns:
+        if col in skip_cols:
+            continue
+        if df[col].dtype != object:
+            continue
+        str_col = df[col].astype(str).str.strip()
+        mask = str_col.str.match(pattern, na=False) | (str_col == "")
+        if mask.sum() > 0:
+            if verbose:
+                print(f"  {col}: replaced {mask.sum()} null markers")
+            df.loc[mask, col] = np.nan
 
 
 #%%############# Loading raw datasets ###########################
@@ -154,8 +186,12 @@ df_im = df_im.drop(columns=dropped_columns)
 df_im = df_im.rename(columns={'Messdatum': 'Date'})
 
 # Removing empty rows in the bottom of excel file (row 829 to 834 in excel file and row 84
-df_im = df_im.drop(index=range(823, 829)) 
+df_im = df_im.drop(index=range(823, 829))
 df_im = df_im.drop(index=78)
+
+# Replace all German missing-value markers (k.A. / n.D. variants) with NaN.
+# Done before df_im_reduced is copied so the baseline dataset is also clean.
+replace_missing_markers(df_im, skip_cols=["Patient", "Timepoint"])
 
 # copy of reduced raw dataset for baseline modeling
 df_im_reduced = df_im.copy()
@@ -176,6 +212,12 @@ for col in feature_cols:
     df_im[col] = pd.to_numeric(df_im[col], errors="coerce")
 
 TableReport(df_im, max_plot_columns=180)
+
+
+
+
+
+
 
 
 # Removing columns with more than 25% missing values:
@@ -618,7 +660,7 @@ for (df_a, df_b, label) in [(t12, t22, "T1 and T2"), (t13, t23, "T1 and T3"), (t
 
 #%% ########## Trajectory PCA: T1↔T2, T2↔T3, T1↔T3 (NIPALS, missing-methods) ###
 
-print("Trajectory PCA — immunological dataset (three separate pairwise plots)")
+print("Trajectory PCA — immunological dataset")
 
 # We use df_im_reduced (cleaned but NOT imputed).
 # missing-methods NIPALS handles NaN natively via scaled inner products,
@@ -629,7 +671,7 @@ id_cols_im = ["Patient", "Timepoint", "Date"]
 # T1 = mako[0], T2 = mako[2], T3 = mako[4]  (spread across the palette range)
 _mako5     = sns.color_palette("mako", 5)
 tp_colors  = {1: _mako5[0], 2: _mako5[2], 3: _mako5[4]}
-tp_labels  = {1: "T1 (baseline)", 2: "T2", 3: "T3"}
+tp_labels  = {1: "T1", 2: "T2", 3: "T3"}
 
 ncomp     = 10           # PCs to extract; PC1+PC2 used for the score plot
 cum_color = sns.color_palette("crest", 1)[0]
@@ -677,16 +719,23 @@ for tp_a, tp_b, arrow_color, label in pairs:
     # Each patient appears twice: once as timepoint A, once as timepoint B.
     X_pair = np.vstack([Xa, Xb])   # shape: (2 * n_pair, n_features)
 
-    # ── 4. NIPALS PCA ─────────────────────────────────────────────────────────
+    # ── 4. Standardize before PCA ─────────────────────────────────────────────
+    # Without scaling, features with large absolute variance (e.g. raw cell counts)
+    # dominate PC1 entirely. StandardScaler here handles NaN natively — it computes
+    # mean and std from observed values only, leaving NaN positions as NaN.
+    scaler = MM_StandardScaler()
+    X_pair = scaler.fit_transform(X_pair)
+
+    # ── 5. NIPALS PCA ─────────────────────────────────────────────────────────
     res         = mm_pca(X_pair, ncomp=ncomp)
     scores      = res["scores"]    # (2*n_pair, ncomp)
     explained   = res["explained"] # (ncomp,)  — raw sum-of-squares, NOT %
 
-    # ── 5. Split scores back into the two timepoint blocks ────────────────────
+    # ── 6. Split scores back into the two timepoint blocks ────────────────────
     sc_a = scores[:n_pair, :]
     sc_b = scores[n_pair:, :]
 
-    # ── 6. Explained variance % ───────────────────────────────────────────────
+    # ── 7. Explained variance % ───────────────────────────────────────────────
     exp_pct = explained / explained.sum() * 100
 
     # ── 7. Scree plot ─────────────────────────────────────────────────────────
@@ -700,7 +749,7 @@ for tp_a, tp_b, arrow_color, label in pairs:
     )
     ax.set_xlabel("Principal Component")
     ax.set_ylabel("Explained Variance (%)")
-    ax.set_title(f"Scree Plot — Immunological Dataset (NIPALS, {label})")
+    ax.set_title(f"Scree Plot — Immunological Dataset)")
     ax.legend()
     plt.tight_layout()
     plt.show()
@@ -745,7 +794,7 @@ for tp_a, tp_b, arrow_color, label in pairs:
     ax.set_ylabel(f"PC2 ({exp_pct[1]:.1f}% variance)")
     ax.set_title(
         f"Trajectory PCA — Immunological Dataset\n"
-        f"{label}  (arrows per patient, NIPALS handles missing values)"
+        f"{label}  (arrows per patient)"
     )
     ax.legend(loc="best")
     plt.tight_layout()
@@ -1891,17 +1940,8 @@ print(f"  pain_scale ({len(uniq_after)} unique): {uniq_after}")
 #%% 7 — Replace missing markers
 ########################################################
 
-null_pattern = r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$'
-null_skip = {'Patient', 'Timepoint'}
 print("\n=== Replacing null markers ('kA' and 'nD' variants) ===")
-for col in df_cl_clean.columns:
-    if col in null_skip:
-        continue
-    str_col = df_cl_clean[col].astype(str).str.strip()
-    mask = str_col.str.match(null_pattern, na=False)
-    if mask.sum() > 0:
-        print(f"  {col}: replaced {mask.sum()} null markers")
-        df_cl_clean.loc[mask, col] = pd.NA
+replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=True)
 
 # Safety check: Patient and Timepoint must not have NaN
 for id_col in ['Patient', 'Timepoint']:
