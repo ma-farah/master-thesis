@@ -193,12 +193,6 @@ df_im = df_im.drop(index=78)
 # Done before df_im_reduced is copied so the baseline dataset is also clean.
 replace_missing_markers(df_im, skip_cols=["Patient", "Timepoint"])
 
-# copy of reduced raw dataset for baseline modeling
-df_im_reduced = df_im.copy()
-
-TableReport(df_im_reduced, max_plot_columns=100)
-
-
 # change datatypes to correct type
 df_im["Date"] = pd.to_datetime(df_im["Date"], errors="coerce")
 df_im["Patient"] = pd.to_numeric(df_im["Patient"], errors="coerce").astype("Int64")
@@ -213,11 +207,34 @@ for col in feature_cols:
 
 TableReport(df_im, max_plot_columns=180)
 
+# Copy for catboost baseline-modeling:
+df_im_bcat = df_im.copy()
+
+# Removing columns with more than 25% missing values:
+na_frac = df_im.isna().mean()
+cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
+df_im = df_im.drop(columns=cols_to_drop).copy()
+
+print('Dropped columns:', cols_to_drop)
+
+""" 
+Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 
+'NK_HLADRhi', 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 
+'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
+"""
+
+# copy for eda 
+df_im_reduced = df_im.copy() 
+
+# copy for modeling
+df_im_mod = df_im.copy() # copy for modeling!
+
+
 
 
 #%%############# RV / RV2 analysis across timepoints ##########################
 
-#NB! Patient ID 83 has two timepoint 4 measurements (take average)
+#NB! Patient ID 83 has two timepoint 4 measurements 
 # Needs to be the same shape in order to to RV2 analysis.
 # patient ID 137 have two t4 and two t3 measurements.
 
@@ -557,8 +574,10 @@ for tp_a, tp_b, arrow_color, label in pairs:
     X_pair = scaler.fit_transform(X_pair)
 
     # ── 5. NIPALS PCA using missing-methods ────────────────────────────────────
+    feat_names_pair = df_a.drop(columns=id_cols_im).columns.tolist()
     res         = mm_pca(X_pair, ncomp=ncomp)
     scores      = res["scores"]    # (2*n_pair, ncomp)
+    loadings    = res["loadings"]  # (n_features, ncomp)
     explained   = res["explained"] # (ncomp,)  — raw sum-of-squares, NOT %
 
     # ── 6. Split scores + recover patient IDs ────────────────────────────────
@@ -607,6 +626,15 @@ for tp_a, tp_b, arrow_color, label in pairs:
               f"  {sc_a[i,0]:>9.3f}  {sc_a[i,1]:>9.3f}"
               f"  {sc_b[i,0]:>9.3f}  {sc_b[i,1]:>9.3f}"
               f"  {traj_len[i]:>13.3f}")
+
+    # Top 10 loadings for PC1 and PC2
+    for _pc_i, _pc_name in enumerate(["PC1", "PC2"]):
+        _abs_l   = np.abs(loadings[:, _pc_i])
+        _top10_l = np.argsort(_abs_l)[::-1][:10]
+        print(f"\n  Top 10 loadings — {_pc_name} ({label}):")
+        print(f"  {'Feature':>40}  {'Loading':>10}")
+        for _k in _top10_l:
+            print(f"  {feat_names_pair[_k]:>40}  {loadings[_k, _pc_i]:>10.4f}")
 
     # ── 10. Trajectory score plot ─────────────────────────────────────────────
     from adjustText import adjust_text
@@ -733,29 +761,263 @@ mfa.plot(
 mfa.partial_row_coordinates(dataset)
 
 
+#%% ########## RV2 matrix — immunological dataset (missing-methods, NaN-native) ##########
+# Re-implements the hoggorm RV2 analysis without requiring imputed data.
+# mm_rv2() scales inner products by the proportion of observed entries,
+# so patients with some missing markers are still included.
+
+print("RV2 matrix — immunological dataset (missing-methods, NaN-native)")
+
+_id_cols    = ["Patient", "Timepoint", "Date"]
+_timepoints = [1, 2, 3, 4, 5]
+
+# Per-timepoint slices from df_im_reduced (NOT imputed)
+_dfs_r = {t: df_im_reduced[df_im_reduced["Timepoint"] == t] for t in _timepoints}
+
+_n_tp      = len(_timepoints)
+_rv2_mm    = np.zeros((_n_tp, _n_tp))
+_n_comm_mm = np.zeros((_n_tp, _n_tp), dtype=int)
+
+# Pre-extract patient sets once per timepoint (avoids repeated set() calls)
+_pt_sets = {t: set(_dfs_r[t]["Patient"]) for t in _timepoints}
+
+# Diagonal: RV2(A, A) = 1 by definition
+for _i, _ti in enumerate(_timepoints):
+    _rv2_mm[_i, _i]    = 1.0
+    _n_comm_mm[_i, _i] = len(_dfs_r[_ti])
+
+# Upper triangle only — RV2 is symmetric so mirror to lower triangle
+# Reduces mm_rv2 calls from 20 → 10 for a 5-timepoint matrix
+from itertools import combinations as _combns
+for (_i, _ti), (_j, _tj) in _combns(enumerate(_timepoints), 2):
+    _common = _pt_sets[_ti] & _pt_sets[_tj]
+    _n = len(_common)
+    _n_comm_mm[_i, _j] = _n_comm_mm[_j, _i] = _n
+    _A_raw = (_dfs_r[_ti][_dfs_r[_ti]["Patient"].isin(_common)]
+              .sort_values("Patient").drop(columns=_id_cols).values.astype(float))
+    _B_raw = (_dfs_r[_tj][_dfs_r[_tj]["Patient"].isin(_common)]
+              .sort_values("Patient").drop(columns=_id_cols).values.astype(float))
+    # Standardise A and B SEPARATELY — matches ho.standardise(A, mode=0) in the
+    # hoggorm approach. Each matrix gets its own column means/stdevs, removing
+    # between-timepoint mean differences so RV2 compares correlation structure only.
+    # Joint standardisation (stacking A+B) would leave mean-shifts intact and
+    # suppress RV2 toward zero — which is what caused the near-zero values.
+    _A = MM_StandardScaler().fit_transform(_A_raw)
+    _B = MM_StandardScaler().fit_transform(_B_raw)
+    _rv2_mm[_i, _j] = _rv2_mm[_j, _i] = mm_rv2(_A, _B)
+
+_rv2_mm_df = pd.DataFrame(
+    _rv2_mm,
+    index=[f"T{t}" for t in _timepoints],
+    columns=[f"T{t}" for t in _timepoints]
+)
+
+# Annotation: RV2 value + number of common patients per cell
+_annot_mm = pd.DataFrame(
+    [[f"{_rv2_mm[_i,_j]:.2f}\n(n={_n_comm_mm[_i,_j]})" for _j in range(_n_tp)]
+     for _i in range(_n_tp)],
+    index=_rv2_mm_df.index,
+    columns=_rv2_mm_df.columns
+)
+
+fig, ax = plt.subplots(figsize=(7, 6))
+sns.heatmap(_rv2_mm_df, annot=_annot_mm, fmt="", cmap="crest",
+            vmin=0, vmax=1, square=True, ax=ax)
+ax.set_title("RV2 Similarity — Immunological Dataset\n(missing-methods, NaN-native)")
+plt.tight_layout()
+plt.show()
+
+print(_rv2_mm_df.round(3))
+
+
+#%% ########## PCA per timepoint T1-T5 — immunological dataset (missing-methods, NaN-native) ##########
+# Each timepoint is analysed in its own PCA space.
+# Data: df_im_reduced (NOT imputed) — NaN handled natively by NIPALS.
+# Standardised before PCA so all features contribute equally.
+
+print("Per-timepoint PCA — immunological dataset (missing-methods approach)")
+
+from adjustText import adjust_text as _adj
+
+_ncomp_tp   = 10
+_cum_col_tp = sns.color_palette("crest", 1)[0]
+_mako5_tp   = sns.color_palette("mako", 5)
+
+for _t in _timepoints:
+    _df_t          = _dfs_r[_t]
+    _n_t           = len(_df_t)
+    _patient_ids_t = _df_t["Patient"].values
+    print(f"\n  T{_t}: {_n_t} patients")
+
+    _feat_names_t = _df_t.drop(columns=_id_cols).columns.tolist()
+    _Xs_t         = MM_StandardScaler().fit_transform(
+                        _df_t.drop(columns=_id_cols).values.astype(float))
+    _res_t        = mm_pca(_Xs_t, ncomp=_ncomp_tp)
+    _scores_t     = _res_t["scores"]
+    _loadings_t   = _res_t["loadings"]  # (n_features, ncomp)
+    _exp_t        = _res_t["explained"] / _res_t["explained"].sum() * 100
+
+    # Scree plot
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(range(1, _ncomp_tp + 1), _exp_t,
+           color=sns.color_palette("mako", _ncomp_tp), label="Per-PC %")
+    ax.plot(range(1, _ncomp_tp + 1), np.cumsum(_exp_t),
+            marker="o", color=_cum_col_tp, linewidth=1.5, label="Cumulative %")
+    ax.set_xticks(range(1, _ncomp_tp + 1))
+    ax.set_xlabel("Principal Components.")
+    ax.set_ylabel("Explained Variance (%)")
+    ax.set_title(f"Scree Plot — Immunological Dataset T{_t} ")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Score plot — label top 20 furthest from origin
+    _dist_t  = np.sqrt(_scores_t[:, 0]**2 + _scores_t[:, 1]**2)
+    _top20_t = np.argsort(_dist_t)[::-1][:20]
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.scatter(_scores_t[:, 0], _scores_t[:, 1],
+               c=[_mako5_tp[_t - 1]], s=40, zorder=3,
+               edgecolors="white", linewidth=0.4, alpha=0.85,
+               label=f"T{_t} (n={_n_t})")
+    _texts_t = [ax.text(_scores_t[_i, 0], _scores_t[_i, 1],
+                        str(_patient_ids_t[_i]),
+                        fontsize=7, fontweight="bold", color="black", zorder=5)
+                for _i in _top20_t]
+    _adj(_texts_t, ax=ax, expand=(1.5, 1.5),
+         arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
+    ax.axhline(0, color="grey", lw=0.5, linestyle="--")
+    ax.axvline(0, color="grey", lw=0.5, linestyle="--")
+    ax.set_xlabel(f"PC1 ({_exp_t[0]:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({_exp_t[1]:.1f}% variance)")
+    ax.set_title(f"PCA Score Plot — Immunological Dataset T{_t}\n"
+                 f"(top 20 patients furthest from pca-origin labelled)")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+    # Printed table: top 20 furthest from origin
+    print(f"  Top 20 patients furthest from pca-origin at T{_t}:")
+    print(f"  {'Patient':>10}  {'PC1':>8}  {'PC2':>8}  {'Distance':>10}")
+    for _i in _top20_t:
+        print(f"  {_patient_ids_t[_i]:>10}  "
+              f"{_scores_t[_i,0]:>8.3f}  {_scores_t[_i,1]:>8.3f}  "
+              f"{_dist_t[_i]:>10.3f}")
+
+    # Top 10 loadings for PC1 and PC2
+    for _pc_i, _pc_name in enumerate(["PC1", "PC2"]):
+        _abs_l   = np.abs(_loadings_t[:, _pc_i])
+        _top10_l = np.argsort(_abs_l)[::-1][:10]
+        print(f"\n  Top 10 loadings — {_pc_name} (T{_t}):")
+        print(f"  {'Feature':>40}  {'Loading':>10}")
+        for _k in _top10_l:
+            print(f"  {_feat_names_t[_k]:>40}  {_loadings_t[_k, _pc_i]:>10.4f}")
+
+
+#%% ########## MFA T1-T3 — immunological dataset (missing-methods, NaN-native) ##########
+# Multiple Factor Analysis: each timepoint is a separate block.
+# Approach: standardise each block, normalise by its first eigenvalue (NIPALS),
+# then run NIPALS PCA on the horizontally stacked matrix — equivalent to the
+# FactoMineR/prince MFA definition but NaN-native throughout.
+
+print("MFA T1-T3 — immunological dataset (missing-methods, NaN-native)")
+
+_patients_mfa = (
+    set(_dfs_r[1]["Patient"])
+    & set(_dfs_r[2]["Patient"])
+    & set(_dfs_r[3]["Patient"])
+)
+_n_mfa = len(_patients_mfa)
+print(f"  Patients with T1+T2+T3: {_n_mfa}")
+
+def _get_mfa_block(tp, patients):
+    return (_dfs_r[tp][_dfs_r[tp]["Patient"].isin(patients)]
+            .sort_values("Patient").reset_index(drop=True))
+
+_df_mfa1         = _get_mfa_block(1, _patients_mfa)
+_df_mfa2         = _get_mfa_block(2, _patients_mfa)
+_df_mfa3         = _get_mfa_block(3, _patients_mfa)
+_patient_ids_mfa = _df_mfa1["Patient"].values
+
+# Feature names for the stacked MFA matrix: prefix each column with its block (T1/T2/T3)
+_feat_cols_mfa  = _df_mfa1.drop(columns=_id_cols).columns.tolist()
+_feat_names_mfa = ([f"T1_{c}" for c in _feat_cols_mfa] +
+                   [f"T2_{c}" for c in _feat_cols_mfa] +
+                   [f"T3_{c}" for c in _feat_cols_mfa])
+
+def _mfa_normalise(X):
+    """Standardise then divide by sqrt(first eigenvalue) — NaN-native NIPALS."""
+    Xs   = MM_StandardScaler().fit_transform(X)
+    lam1 = mm_pca(Xs, ncomp=1)["explained"][0]
+    return Xs / np.sqrt(lam1)
+
+# Stack three normalised blocks horizontally → shape: (n_patients, 3 * n_features)
+_X_mfa_all = np.hstack([
+    _mfa_normalise(_df_mfa1.drop(columns=_id_cols).values.astype(float)),
+    _mfa_normalise(_df_mfa2.drop(columns=_id_cols).values.astype(float)),
+    _mfa_normalise(_df_mfa3.drop(columns=_id_cols).values.astype(float)),
+])
+
+_ncomp_mfa    = 5
+_res_mfa      = mm_pca(_X_mfa_all, ncomp=_ncomp_mfa)
+_scores_mfa   = _res_mfa["scores"]
+_loadings_mfa = _res_mfa["loadings"]  # (3 * n_features, ncomp)
+_exp_mfa      = _res_mfa["explained"] / _res_mfa["explained"].sum() * 100
+
+# Scree plot
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.bar(range(1, _ncomp_mfa + 1), _exp_mfa,
+       color=sns.color_palette("mako", _ncomp_mfa), label="Per-PC %")
+ax.plot(range(1, _ncomp_mfa + 1), np.cumsum(_exp_mfa),
+        marker="o", color=sns.color_palette("crest", 1)[0],
+        linewidth=1.5, label="Cumulative %")
+ax.set_xticks(range(1, _ncomp_mfa + 1))
+ax.set_xlabel("Principal Components.")
+ax.set_ylabel("Explained Variance (%)")
+ax.set_title("Scree Plot — MFA Immunological Dataset T1+T2+T3\n(missing-methods)")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# Global score plot — label top 20 furthest from origin
+_dist_mfa  = np.sqrt(_scores_mfa[:, 0]**2 + _scores_mfa[:, 1]**2)
+_top20_mfa = np.argsort(_dist_mfa)[::-1][:20]
+
+fig, ax = plt.subplots(figsize=(9, 7))
+ax.scatter(_scores_mfa[:, 0], _scores_mfa[:, 1],
+           c=[sns.color_palette("mako", 1)[0]],
+           s=40, zorder=3, edgecolors="white", linewidth=0.4, alpha=0.85,
+           label=f"Patients (n={_n_mfa})")
+_texts_mfa = [ax.text(_scores_mfa[_i, 0], _scores_mfa[_i, 1],
+                      str(_patient_ids_mfa[_i]),
+                      fontsize=7, fontweight="bold", color="black", zorder=5)
+              for _i in _top20_mfa]
+_adj(_texts_mfa, ax=ax, expand=(1.5, 1.5),
+     arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
+ax.axhline(0, color="grey", lw=0.5, linestyle="--")
+ax.axvline(0, color="grey", lw=0.5, linestyle="--")
+ax.set_xlabel(f"PC1 ({_exp_mfa[0]:.1f}% variance)")
+ax.set_ylabel(f"PC2 ({_exp_mfa[1]:.1f}% variance)")
+ax.set_title("MFA Score Plot — Immunological Dataset T1+T2+T3\n"
+             "(missing-methods, top 20 furthest labelled)")
+ax.legend(loc="best")
+plt.tight_layout()
+plt.show()
+
+# Top 10 loadings for Dim1 and Dim2 (MFA)
+# Each feature name is prefixed with its block (T1/T2/T3) so you can see
+# which timepoint drives each dimension most.
+for _pc_i, _pc_name in enumerate(["Dim1", "Dim2"]):
+    _abs_l   = np.abs(_loadings_mfa[:, _pc_i])
+    _top10_l = np.argsort(_abs_l)[::-1][:10]
+    print(f"\n  Top 10 loadings — {_pc_name} (MFA T1+T2+T3):")
+    print(f"  {'Feature':>45}  {'Loading':>10}")
+    for _k in _top10_l:
+        print(f"  {_feat_names_mfa[_k]:>45}  {_loadings_mfa[_k, _pc_i]:>10.4f}")
+
 
 #%%########### Imputing missing values using miceforest and median
 # in order to be able to run pyod outlier detection
-
-
-# Removing columns with more than 25% missing values:
-na_frac = df_im.isna().mean()
-cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
-df_im = df_im.drop(columns=cols_to_drop).copy()
-
-df_im_mod = df_im.copy() # copy for modeling!
-
-print('Dropped columns:', cols_to_drop)
-
-""" 
-Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLADRhi', 
-'NK_HLADRhi', 'Eos_CD69+', 'Bas_CD69+', 'Mo_CD69+', 'B_CD69+', 'DC_CD69+', 
-'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
-"""
-
-# New Tablereport
-TableReport(df_im, max_plot_columns=138)
-
 
 
 # handling name issues - mice forest does not take symbols
@@ -1562,20 +1824,30 @@ def standardize_response(df, response_col='response'):
     df = df.copy()
     raw = df[response_col].astype(str).str.strip()
 
-    # Phrase → canonical token mapping (applied before category detection)
+    # Phrase → canonical token mapping (applied before category detection).
+    # IMPORTANT: longer/more-specific phrases must come before shorter ones so
+    # that e.g. 'no improvement' is replaced with 'ni' before 'improvement'
+    # is replaced with 'pr' (otherwise 'no improvement' → 'no pr' → wrong).
     phrase_map = {
-        'no imrovement':                   'no improvement',    # typo fix
+        'no improvement':                  'ni',   # must precede 'improvement'
+        'no imrovement':                   'ni',   # typo variant
+        'no imrpvovemnet':                 'ni',   # typo variant
         'recovery only on the right side': 'pr',
-        'improvement':                     'pr',
-        'initial improvement':             'pr',
+        'initial improvement':             'pr',   # must precede 'improvement'
         'subtotal remission':              'pr',
+        'improvement':                     'pr',
     }
 
     categories = pd.Series(pd.NA, index=df.index, dtype=object)
-    percents   = pd.Series(pd.NA, index=df.index, dtype='float64')
+    percents   = pd.Series(np.nan, index=df.index, dtype='float64')
+
+    _null_marker_pat = re.compile(r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$')
 
     for idx, val in raw.items():
         if val in ('nan', '', 'None', 'NaN'):
+            continue
+        # Skip German null markers (n.D / n.D. / k.A. variants) — leave as pd.NA
+        if _null_marker_pat.match(val.strip()):
             continue
 
         s = val.lower().strip()
@@ -1593,14 +1865,15 @@ def standardize_response(df, response_col='response'):
         elif single_m:
             percents[idx] = float(single_m.group(1))
 
-        # Detect which response categories are present in the entry
+        # Detect which response categories are present in the entry.
+        # NI must be checked before PR/CR so 'ni' token (mapped above) is caught.
         found = []
+        if re.search(r'\bni\b', s):
+            found.append('NI')
         if re.search(r'\bcr\b', s):
             found.append('CR')
         if re.search(r'\bpr\b', s):
             found.append('PR')
-        if re.search(r'no\s*imp', s):
-            found.append('NI')
 
         if found:
             categories[idx] = ', '.join(found)
@@ -1760,6 +2033,7 @@ print(f"\nAfter step 4: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_
 # CatBoost handles raw strings natively — this is the baseline modeling input.
 # Regression targets will be joined later from pain_targets (step 12).
 df_cl_reduced = df_cl_clean.copy()
+
 TableReport(df_cl_reduced, max_plot_columns=100)
 
 
@@ -1924,9 +2198,13 @@ categorical_cols = [
 df_cl_clean['Patient']   = pd.to_numeric(df_cl_clean['Patient'],   errors='coerce')
 df_cl_clean['Timepoint'] = pd.to_numeric(df_cl_clean['Timepoint'], errors='coerce')
 
-n_before = len(df_cl_clean)
+n_before    = len(df_cl_clean)
+_bad_rows   = df_cl_clean[df_cl_clean[['Patient', 'Timepoint']].isna().any(axis=1)]
+if len(_bad_rows) > 0:
+    print(f"Rows with unparseable Patient or Timepoint (about to be dropped):")
+    print(_bad_rows[['Patient', 'Timepoint']].to_string())
 df_cl_clean = df_cl_clean.dropna(subset=['Patient', 'Timepoint'])
-n_dropped = n_before - len(df_cl_clean)
+n_dropped   = n_before - len(df_cl_clean)
 if n_dropped > 0:
     print(f"Dropped {n_dropped} rows with unparseable Patient or Timepoint values")
 
@@ -1953,6 +2231,7 @@ df_cl_clean[cols_to_float] = (
 print("\n=== Dtype summary (clinical) ===")
 print(df_cl_clean.dtypes.value_counts())
 print(f"Shape: {df_cl_clean.shape}, Patients: {df_cl_clean['Patient'].nunique()}")
+
 TableReport(df_cl_clean, max_plot_columns=100)
 
 # Visualization copy: all timepoints, all patients, after dtype — not filtered to model patients
@@ -1975,6 +2254,114 @@ df_cl_vis = df_cl_clean.copy()
 ################################################################################
 
 
+#%% ########## MFA Score Plots coloured by clinical variables ##########
+# Re-uses immunological MFA scores (_scores_mfa, _patient_ids_mfa, _exp_mfa).
+# Clinical metadata is aggregated across T1+T2+T3 per patient and matched by
+# Patient ID. Patients with no clinical record are excluded from that plot.
+
+# ── Aggregate clinical metadata across T1+T2+T3 per patient ─────────────────
+# Stable categorical variables (gender, diagnosis, response_category):
+#   sort by Timepoint so groupby.first() picks T1 when available, else T2/T3.
+# pain_at_rest (ordinal, changes over time): mean across available timepoints,
+#   then rounded to nearest integer so legend labels show as "1", "2", etc.
+_cl_t123 = df_cl_vis[df_cl_vis["Timepoint"].isin([1, 2, 3])].copy()
+
+_cat_meta = (
+    _cl_t123.sort_values("Timepoint")
+    .groupby("Patient")[["gender", "diagnosis", "response_category"]]
+    .first()
+)
+_ord_meta = (
+    _cl_t123.sort_values("Timepoint")
+    .groupby("Patient")[["pain_at_rest", "pain_scale"]]
+    .first()  # T1 baseline value; falls back to T2/T3 only if T1 is missing
+)
+_cl_meta = _cat_meta.join(_ord_meta, how="outer")
+
+# Specs: (column, title, kind, palette, vmin, vmax)
+#   kind="cat"  → discrete colors + legend
+#   kind="cont" → continuous colormap + colorbar
+_mfa_color_specs = [
+    ("gender",            "Gender",            "cat",  "mako",  None, None),
+    ("diagnosis",         "Diagnosis",         "cat",  "tab20", None, None),
+    ("response_category", "Response Category", "cat",  "mako", None, None),
+    ("pain_at_rest",      "Pain at Rest",      "cont", "mako_r",  1,    5   ),
+    ("pain_scale",        "Pain Scale (T1–T3 mean)", "cont", "mako_r", 0, 10),
+]
+
+print("MFA score plots coloured by clinical variables:")
+for _col, _title, _kind, _pal, _vmin, _vmax in _mfa_color_specs:
+
+    # Map each MFA patient to its aggregated clinical value (np.nan if not found)
+    _vals = np.array(
+        [_cl_meta.loc[p, _col] if p in _cl_meta.index else np.nan
+         for p in _patient_ids_mfa],
+        dtype=object
+    )
+    _mask_nan = pd.isna(_vals)
+
+    # Exclude patients with no value for this variable
+    _keep     = ~_mask_nan
+    _sc_plt   = _scores_mfa[_keep, :]
+    _v_plt    = _vals[_keep]
+    _pids_plt = np.array(_patient_ids_mfa)[_keep]
+    print(f"  {_title}: {_keep.sum()} patients plotted ({_mask_nan.sum()} excluded — no clinical data)")
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    if _kind == "cat":
+        # ── Discrete: one scatter series per category ─────────────────────
+        _cats       = sorted({str(v) for v in _v_plt})
+        _cat_colors = dict(zip(_cats, sns.color_palette(_pal, len(_cats))))
+        for _cat in _cats:
+            _mask_c = np.array([str(v) == _cat for v in _v_plt])
+            ax.scatter(_sc_plt[_mask_c, 0], _sc_plt[_mask_c, 1],
+                       c=[_cat_colors[_cat]], s=40, zorder=3,
+                       edgecolors="white", linewidth=0.4, alpha=0.85,
+                       label=f"{_cat} (n={_mask_c.sum()})")
+        ax.legend(title=_title, loc="best", fontsize=8)
+        # Label top 20 patients furthest from origin
+        _dist_cl  = np.sqrt(_sc_plt[:, 0]**2 + _sc_plt[:, 1]**2)
+        _top20_cl = np.argsort(_dist_cl)[::-1][:20]
+        _texts_cl = [ax.text(_sc_plt[_i, 0], _sc_plt[_i, 1],
+                             str(_pids_plt[_i]),
+                             fontsize=7, fontweight="bold", color="black", zorder=5)
+                     for _i in _top20_cl]
+        _adj(_texts_cl, ax=ax, expand=(1.5, 1.5),
+             arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
+
+    else:
+        # ── Continuous: colormap + colorbar ───────────────────────────────
+        _num_v = pd.to_numeric(pd.Series(_v_plt), errors="coerce").values
+        _valid = ~np.isnan(_num_v)
+        sc = ax.scatter(_sc_plt[_valid, 0], _sc_plt[_valid, 1],
+                        c=_num_v[_valid], cmap=_pal,
+                        vmin=_vmin, vmax=_vmax,
+                        s=40, zorder=3,
+                        edgecolors="white", linewidth=0.4, alpha=0.85)
+        plt.colorbar(sc, ax=ax, label=_title)
+        # Label top 20 patients furthest from origin
+        _pids_cont = _pids_plt[_valid]
+        _sc_cont   = _sc_plt[_valid]
+        _dist_cl   = np.sqrt(_sc_cont[:, 0]**2 + _sc_cont[:, 1]**2)
+        _top20_cl  = np.argsort(_dist_cl)[::-1][:20]
+        _texts_cl  = [ax.text(_sc_cont[_i, 0], _sc_cont[_i, 1],
+                              str(_pids_cont[_i]),
+                              fontsize=7, fontweight="bold", color="black", zorder=5)
+                      for _i in _top20_cl]
+        _adj(_texts_cl, ax=ax, expand=(1.5, 1.5),
+             arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
+
+    ax.axhline(0, color="grey", lw=0.5, linestyle="--")
+    ax.axvline(0, color="grey", lw=0.5, linestyle="--")
+    ax.set_xlabel(f"Dim1 ({_exp_mfa[0]:.1f}% variance)")
+    ax.set_ylabel(f"Dim2 ({_exp_mfa[1]:.1f}% variance)")
+    ax.set_title(
+        f"MFA Score Plot — Immunological T1+T2+T3\n"
+        f"Coloured by {_title}"
+    )
+    plt.tight_layout()
+    plt.show()
 
 
 
