@@ -1976,10 +1976,8 @@ else:
     print("Warning: Patient 182 not found — filter correction skipped")
 
 
-# Copy for baseline catboost model
-df_cl_bcat = df_cl_clean.copy()
 
-TableReport(df_cl_bcat, max_plot_columns=100)
+TableReport(df_cl_clean, max_plot_columns=100)
 
 
 
@@ -2171,8 +2169,15 @@ print(df_cl_clean.dtypes.value_counts())
 print(f"Shape: {df_cl_clean.shape}, Patients: {df_cl_clean['Patient'].nunique()}")
 
 
-# catboost model copy two?
-df_cl_bcat2 = df_cl_clean.copy()
+# catboost model copy (with all columns)
+df_cl_bcat = df_cl_clean.copy()
+
+
+# tablereport of basline catboost dataset:
+TableReport(df_cl_bcat, max_plot_columns=100)
+
+
+#%%
 
 print('\nStep 4: Drop columns with more than 25% nan:')
 # Drop columns with >25% missing values — calculated across all timepoints (T1–T5)
@@ -2187,7 +2192,8 @@ print(f"Dropping {len(cl_cols_to_drop)} clinical columns with >25% missing: {cl_
 df_cl_clean = df_cl_clean.drop(columns=cl_cols_to_drop)
 print(f"Shape after NaN drop: {df_cl_clean.shape}")
 
-print('\nTablereport of cleaned clinical dataset:')
+
+print('\nTablereport of clinical dataset AFTER dropping nan>25%:')
 TableReport(df_cl_clean)
 
 
@@ -2266,9 +2272,9 @@ plt.tight_layout()
 plt.show()
 
 
-#_____________________________________
+#%%_____________________________________
 
-print('\nStep 5a (phik): Phik Correlation — clinical dataset (all feature types):')
+print('\nStep 5a (phik): Phik Correlation — clinical dataset (all feature types, to compare):')
 # Phik works for continuous, ordinal and categorical columns in one matrix.
 # Drop only strict ID/date columns; keep everything else including categoricals.
 import phik
@@ -2691,8 +2697,78 @@ for _t in _timepoints:
             print(f"  {_fname_im[_k]:>45}  {_load_im[_k, _pc_i]:>10.4f}")
 
 
-#%% Impute clinical dataset df_cl_vis in order to perform MFA and 
-# Pyod outlier detection Zryan approach
+#%% Impute clinical dataset df_cl_vis in order to perform MFA and
+# PyOD outlier detection Zryan approach
+
+print('\nStep 5f: Imputing clinical dataset (df_cl_vis) with miceforest (all features):')
+
+_cl_id_cols_imp  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+_cl_feat_cols_imp = [c for c in df_cl_vis.columns if c not in _cl_id_cols_imp]
+
+# Sanitise column names for miceforest/LightGBM
+_cl_rename_map  = {c: re.sub(r'_+', '_', re.sub(r'[^\w]', '_', c.strip()))
+                   for c in _cl_feat_cols_imp}
+_cl_reverse_map = {v: k for k, v in _cl_rename_map.items()}
+
+X_cl = (df_cl_vis[_cl_feat_cols_imp]
+        .reset_index(drop=True)
+        .rename(columns=_cl_rename_map))
+
+# miceforest uses LightGBM which handles pandas Categorical natively —
+# ensure category columns kept as Categorical after rename
+for _c in X_cl.select_dtypes('category').columns:
+    X_cl[_c] = X_cl[_c].cat.remove_unused_categories()
+
+kernel_cl = mf.ImputationKernel(
+    X_cl,
+    num_datasets=5,
+    mean_match_candidates=0,  # KD-tree mean matching fails with mixed NaN/categorical data
+    random_state=42
+)
+kernel_cl.mice(10)
+
+# For categorical columns: take the mode across the 5 datasets (can't average categories)
+# For numeric columns: average across the 5 datasets
+_cl_cat_renamed = [_cl_rename_map[c] for c in _cl_feat_cols_imp
+                   if df_cl_vis[c].dtype.name == 'category']
+_cl_num_renamed = [_cl_rename_map[c] for c in _cl_feat_cols_imp
+                   if df_cl_vis[c].dtype.name != 'category']
+
+_cl_imputed_sets = [kernel_cl.complete_data(i) for i in range(5)]
+
+X_cl_imputed = _cl_imputed_sets[0].copy()
+# Numeric: mean across datasets
+X_cl_imputed[_cl_num_renamed] = sum(d[_cl_num_renamed] for d in _cl_imputed_sets) / 5
+# Categorical: mode across datasets (most frequent value per cell)
+if _cl_cat_renamed:
+    _cat_stack = pd.concat(_cl_imputed_sets, axis=0, keys=range(5))
+    for _c in _cl_cat_renamed:
+        X_cl_imputed[_c] = (
+            _cat_stack[_c]
+            .groupby(level=1)
+            .agg(lambda x: x.mode()[0])
+        )
+
+X_cl_imputed = X_cl_imputed.rename(columns=_cl_reverse_map)
+
+# Rebuild: ID cols + all imputed feature cols, in original order
+df_cl_imputed = pd.concat([
+    df_cl_vis[_cl_id_cols_imp].reset_index(drop=True),
+    X_cl_imputed.reset_index(drop=True),
+], axis=1)[df_cl_vis.columns]
+
+print(f"df_cl_imputed shape: {df_cl_imputed.shape}")
+print(f"Remaining NaN (all columns): {df_cl_imputed.isna().sum().sum()}")
+
+print('\nTablereport of miceforest-imputed clinical dataset:')
+TableReport(df_cl_imputed, max_plot_columns=100)
+
+
+#%% Imputed clinical dataset: PyOD outlier detection - zyrans approach
+# use contamination = 0.1 standard value
+
+
+
 
 
 
@@ -2701,21 +2777,35 @@ for _t in _timepoints:
 
 #%% 10 — Modeling copy placeholder (df_cl_mod)
 ########################################################
-# df_cl_mod will be created after clinical PyOD outlier detection:
+# df_cl_mod will be created after clinical PyOD outlier detection, when removing highly correlated features, and outlier patients:
 #   df_cl_mod = df_cl_vis with manually confirmed outlier patients removed
 # Target variables (pain_reduction_pct, pain_scale_t2) are then merged into df_cl_mod.
 
-print('\nStep 7: Removing outliers found in clinical dataset:')
+
+print('\nStep 7: Removing Leaky and highly correlated/ redundant features')
+# Drop leaky/metadata columns — these encode the outcome and must never be model features
+_leaky_patterns = ['response', 'improvement_percent', 'pain_reduction_pct', 'response_pct', 'response_category']
+_leaky_cols = [c for c in df_cl_vis.columns
+               if any(pat in c for pat in _leaky_patterns)]
+print(f"  Dropping leaky/metadata columns ({len(_leaky_cols)}): {_leaky_cols}")
+df_cl_mod = df_cl_vis.drop(columns=_leaky_cols).copy()
 
 
+print('\nStep 8: Remove rows where patients has with nan in pain_scale:')
+_n_before = len(df_cl_mod)
+_patients_before = df_cl_mod['Patient'].nunique()
+df_cl_mod = df_cl_mod[df_cl_mod['pain_scale'].notna()].reset_index(drop=True)
+print(f"  Dropped {_n_before - len(df_cl_mod)} rows with NaN pain_scale "
+      f"({_patients_before - df_cl_mod['Patient'].nunique()} patients lost)")
+print(f"  df_cl_mod shape: {df_cl_mod.shape}, Patients: {df_cl_mod['Patient'].nunique()}")
+
+# evuntually other found patients to remove:...
 
 
 
 #%% 11 — Target variables + distributions
 ########################################################
-# Note: pain_targets is derived from df_cl_vis here as a temporary stand-in.
-# Once clinical PyOD is complete and df_cl_mod (outlier-removed) is created,
-# this block should be moved after df_cl_mod creation and use df_cl_mod instead.
+# derive pain_targets from df_cl_mod:
 
 print('\nStep 8: Creating target-variables:')
 
@@ -2734,7 +2824,7 @@ pain_t2 = (
 # Inner join: only patients with BOTH T1 and T2 pain_scale values
 pain_targets = pain_t1.merge(pain_t2, on='Patient', how='inner')
 
-# Raw point reduction (reference only — not modeling target)
+# Raw point reduction (used for reference only, not modeling target)
 pain_targets['pain_scale_reduction'] = pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2']
 
 # Percent reduction relative to T1 — primary modeling target
@@ -2756,6 +2846,7 @@ print(f"pain_scale_reduction:     {pain_targets['pain_scale_reduction'].min():.1
 print(f"pain_reduction_pct range: {pain_targets['pain_reduction_pct'].min():.1f} – {pain_targets['pain_reduction_pct'].max():.1f} %")
 print(f"  (positive = improvement, negative = worsening)")
 print(f"pain_reduction_pct stats:\n{pain_targets['pain_reduction_pct'].describe()}")
+
 
 # Note: merging targets into df_cl_mod will happen after clinical PyOD + outlier removal.
 
@@ -2781,9 +2872,11 @@ axes[2].set_xlabel('Pain Reduction (%)')
 axes[2].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
 axes[2].legend()
 
-plt.suptitle('Distribution of Regression Targets', fontweight='bold')
+plt.suptitle('Distribution of Potenital Regression Targets', fontweight='bold')
 plt.tight_layout()
 plt.show()
+
+
 
 # Distribution of pain_scale by timepoint (T1–T5, 2-row layout)
 timepoints = [1, 2, 3, 4, 5]
@@ -2944,6 +3037,7 @@ def print_regression_summary(results_dict, target_col):
     print(summary.to_string(index=False))
     return summary
 
+#%% Set up data for modeling
 
 # Patients eligible for baseline modeling (have both T1 and T2 pain_scale)
 model_patients = set(pain_targets['Patient'].values)
@@ -3018,6 +3112,7 @@ shap_im_red   = plot_shap_regressor(model_im_red,   X_im_red,   "Immunological �
 shap_cl_red   = plot_shap_regressor(model_cl_red,   X_cl_red,   "Clinical — pain_reduction_pct")
 shap_comb_red = plot_shap_regressor(model_comb_red, X_comb_red, "Combined — pain_reduction_pct")
 
+#%% Run on second target variable
 
 print("\n" + "="*70)
 print("  CATBOOST BASELINE REGRESSOR — Target: pain_scale_t2")
@@ -3047,7 +3142,6 @@ shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_
 
 
 
-
 #%%##### ADVANCED CATBOOST (placeholder) #######################################
 
 print('\nStep 9: Advanced CatBoost Model with Tuning:')
@@ -3074,7 +3168,6 @@ print('\nStep 9: Advanced CatBoost Model with Tuning:')
 #   Objective: minimize RMSE
 #   Report: avg MAE, MSE, RMSE, R² across outer folds
 #   SHAP: fit final model on full training data, explain test predictions
-
 
 
 
