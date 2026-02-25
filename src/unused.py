@@ -417,3 +417,136 @@ plt.tight_layout()
 plt.show()
 
 print(f"\nCorrelation (imputed values only): {corr_imputed:.4f}")
+#%%########## Correlation analysis between features for immunological dataset
+
+# prøv med pearsons coeffiseint!
+
+import phik
+
+# phik correlation matrix for immunological dataset
+df_features = df_im_imputed.drop(columns=id_cols)
+phik_matrix = df_features.phik_matrix(interval_cols=None)
+
+# Extract top correlated pairs
+# Get upper triangle of correlation matrix (avoid duplicates and diagonal)
+upper_triangle = np.triu(phik_matrix, k=1)
+upper_triangle_df = pd.DataFrame(
+    upper_triangle,
+    index=phik_matrix.index,
+    columns=phik_matrix.columns
+)
+
+# Convert to long format and sort by correlation
+correlations = []
+for i in range(len(upper_triangle_df)):
+    for j in range(i+1, len(upper_triangle_df.columns)):
+        correlations.append({
+            'Feature_1': upper_triangle_df.index[i],
+            'Feature_2': upper_triangle_df.columns[j],
+            'Phik_Correlation': upper_triangle_df.iloc[i, j]
+        })
+
+correlations_df = pd.DataFrame(correlations)
+correlations_df = correlations_df.sort_values('Phik_Correlation', ascending=False)
+
+# Display top 20 correlated pairs
+print("\nTop 40 Most Correlated Feature Pairs:")
+print("="*80)
+print(correlations_df.head(40).to_string(index=False))
+print("\n")
+
+# Parent categories such as T-cells, Monocytes, Eosinophils, Basophils, B-cells, NK-cells.. have high correlation with their subcategories, which is expected. 
+# Does T-cell represent the total amount, and their subtypes are percentages of these? if so - might be redundant?
+
+# Focused heatmap: only features that appear in top 20 correlations
+top_features = set()
+for _, row in correlations_df.head(30).iterrows():
+    top_features.add(row['Feature_1'])
+    top_features.add(row['Feature_2'])
+top_features = sorted(list(top_features))
+
+print(f"\nNumber of features involved in top 30 correlations: {len(top_features)}")
+print("Features:", top_features)
+
+# Create focused heatmap
+focused_phik = phik_matrix.loc[top_features, top_features]
+
+plt.figure(figsize=(14, 12))
+sns.heatmap(
+    focused_phik,
+    annot=True,
+    fmt='.2f',
+    cmap="viridis",
+    vmin=0,
+    vmax=1,
+    square=True,
+    cbar_kws={"label": "Phik Correlation Coefficient"},
+    xticklabels=top_features,
+    yticklabels=top_features
+)
+plt.title(f'Phik Correlation Matrix - Top {len(top_features)} Most Correlated Features',
+          fontsize=14, fontweight='bold')
+plt.xticks(rotation=90, fontsize=9)
+plt.yticks(rotation=0, fontsize=9)
+plt.tight_layout()
+plt.show()
+
+#%%############ MFA for timepoints 1, 2 and 3 combined
+
+print("MFA for timepoints 1, 2 and 3 combined:")
+
+# finding common patients with measuements at t1, t2 and t3 all together
+patients_t123 = (
+    set(df_t1["Patient"])
+    & set(df_t2["Patient"])
+    & set(df_t3["Patient"])
+)
+
+# number patients with measuements at time 1, 2 and 3 = 121 patients out of 250
+# sorting dataframes by patient ids
+df1 = sortdfs(df_t1, patients_t123)
+df2 = sortdfs(df_t2, patients_t123)
+df3 = sortdfs(df_t3, patients_t123)
+
+# Dropping timepoint and date columns from analysis (Patient is already index)
+X1 = df1.drop(columns=['Timepoint', 'Date'])
+X2 = df2.drop(columns=['Timepoint', 'Date'])
+X3 = df3.drop(columns=['Timepoint', 'Date'])
+
+# need to define group name to get multi-index formated dataset
+def group_name(df, group_name):
+    df = df.copy()
+    df.columns = pd.MultiIndex.from_product(
+        [[group_name], df.columns]
+    )
+    return df
+
+# creating multi-index columns for mfa
+X1_m = group_name(X1, "T1")
+X2_m = group_name(X2, "T2")
+X3_m = group_name(X3, "T3")
+
+dataset = pd.concat([X1_m, X2_m, X3_m], axis=1)
+groups = dataset.columns.levels[0].tolist()
+
+# MFA analysis
+mfa = ps.MFA(
+    n_components=3,
+    n_iter=3,
+    copy=True,
+    engine='sklearn',
+    check_input=True,
+    random_state=42
+)
+
+mfa = mfa.fit(dataset, groups=groups, supplementary_groups=None)
+
+# plotting results of MFA 
+mfa.plot(
+    dataset,
+    show_partial_rows=True
+)
+
+# Scores for each patient at different timepoints-groups
+# sort ater patient id that has longest distance away from the center in the MFA plot, to see if they are outliers in the raw data as well.
+mfa.partial_row_coordinates(dataset)
