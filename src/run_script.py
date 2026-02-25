@@ -52,7 +52,7 @@ def replace_missing_markers(df, skip_cols=None, verbose=False):
 
 #%%############# Loading raw datasets ###########################
 
-
+print('Step 1: Loading raw data')
 # reading excel file with raw  (UPDATED)
 data_dir = Path(__file__).resolve().parents[1] / "data"
 data = data_dir / "LDRT_raw.xlsx"
@@ -87,7 +87,7 @@ TableReport(df_im, max_plot_columns=138)
 # Not all patients have been measured at all timepoints 1-5. Which ones are that?
 
 # na analysis of immunological dataset
-print("Na analysis of immunological dataset:")
+print("Na analysis of raw immunological dataset:")
 na.altair.plot_heatmap(df_im)
 
 
@@ -132,6 +132,7 @@ plt.show()
 
 #%%############# Cleaning immunulogical dataset ####################################
 
+print('Step 2: Cleaning immunological dataset')
 
 # Removing columns that can be exlcuded (marked yellow in dataset): 43 columns + Id Subset
 
@@ -182,18 +183,25 @@ dropped_columns = [
     "pDC_CD86+",
 ]
 
+print('Excluding pre-determined columns:')
 df_im = df_im.drop(columns=dropped_columns)
 df_im = df_im.rename(columns={'Messdatum': 'Date'})
+print('Removed {len(dropped_colums} columns: ', dropped_columns)
 
+print('\nRemoving empty rows:')
 # Removing empty rows in the bottom of excel file (row 829 to 834 in excel file and row 84
 df_im = df_im.drop(index=range(823, 829))
 df_im = df_im.drop(index=78)
+print('Removed row 84,829, 830, 831, 832, 833, 834')
 
 # Replace all German missing-value markers (k.A. / n.D. variants) with NaN.
 # Done before df_im_vis is copied so the baseline dataset is also clean.
+print('\nReplacing missing-value markers such as "k.A", "n.D", "keine" with NaN:')
 replace_missing_markers(df_im, skip_cols=["Patient", "Timepoint"])
 
+
 # change datatypes to correct type
+print('\n Changing datatypes to correct dtype:')
 df_im["Date"] = pd.to_datetime(df_im["Date"], errors="coerce")
 df_im["Patient"] = pd.to_numeric(df_im["Patient"], errors="coerce").astype("Int64")
 df_im["Timepoint"] = pd.to_numeric(df_im["Timepoint"], errors="coerce").astype("Int64")
@@ -204,6 +212,9 @@ exclude_cols = ["Date", "Patient", "Timepoint"]
 feature_cols = df_im.columns.difference(exclude_cols)
 for col in feature_cols:
     df_im[col] = pd.to_numeric(df_im[col], errors="coerce")
+print('Succsessfully changed all column dtypes.')
+
+
 
 TableReport(df_im, max_plot_columns=180)
 
@@ -217,6 +228,7 @@ df_im_bcat = df_im.copy()
 # If a column appears in the overall list but NOT in T1 → it is sparse only at
 # later timepoints (T4/T5 dropout), meaning T1 baseline data is actually fine.
 # That discrepancy would be worth flagging to the expert before proceeding.
+print('\nChecking columns with more than 25% NaN for T1-T3 individually:')
 _id_drop_cols = ['Patient', 'Timepoint', 'Date']
 for _tp in [1, 2, 3]:
     _df_tp = df_im[df_im['Timepoint'] == _tp]
@@ -229,6 +241,7 @@ na_frac = df_im.isna().mean()
 cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
 print(f"\nOverall columns >25% NaN ({len(cols_to_drop)}): {sorted(cols_to_drop)}")
 
+print('\n Dropping columns with more than 25% NaN:')
 df_im = df_im.drop(columns=cols_to_drop).copy()
 print('Dropped columns:', cols_to_drop)
 
@@ -240,14 +253,16 @@ Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLAD
 
 # Copy for EDA / visualization (after >25% NaN drop)
 df_im_vis = df_im.copy()
-# Note: df_im_mod (outlier-removed modeling copy) is created after PyOD outlier detection
 
+
+# Note: df_im_mod (outlier-removed modeling copy) is created after PyOD outlier detection
 
 
 #%%########## Pearson correlation — immunological dataset (with missing values)
 # pandas .corr() computes pairwise Pearson r, dropping NaN per pair independently.
 # Uses df_im_vis (not imputed)
 
+print('\nStep 2a: EDA - Pearson Correlation between features (im. dataset)')
 df_pearson_feat = df_im_vis.drop(columns=[c for c in exclude_cols if c in df_im_vis.columns])
 pearson_matrix = df_pearson_feat.corr(method='pearson')
 
@@ -339,7 +354,7 @@ plt.show()
 # mm_rv2() scales inner products by the proportion of observed entries,
 # so patients with some missing markers are still included.
 
-print("RV2 matrix — immunological dataset (missing-methods, NaN-native)")
+print("\nStep 2b: RV2 matrix — immunological dataset")
 
 _id_cols    = ["Patient", "Timepoint", "Date"]
 _timepoints = [1, 2, 3, 4, 5]
@@ -409,7 +424,7 @@ print(_rv2_mm_df.round(3))
 # Data: df_im_vis (NOT imputed) — NaN handled natively by NIPALS.
 # Standardised before PCA so all features contribute equally.
 
-print("Per-timepoint PCA — immunological dataset (missing-methods approach)")
+print('\nStep 2c: Per-timepoint PCA — immunological dataset')
 
 from adjustText import adjust_text as _adj
 
@@ -492,7 +507,7 @@ for _t in _timepoints:
 
 #%% ########## Trajectory PCA: T1↔T2, T2↔T3, T1↔T3 (missing-methods) ###
 
-print("Trajectory PCA — immunological dataset")
+print("\nStep 2d: Trajectory PCA — immunological dataset")
 
 # We use df_im_vis (cleaned but NOT imputed).
 # missing-methods NIPALS handles NaN natively via scaled inner products,
@@ -692,7 +707,7 @@ for tp_a, tp_b, arrow_color, label in pairs:
 # then run NIPALS PCA on the horizontally stacked matrix — equivalent to the
 # FactoMineR/prince MFA definition but NaN-native throughout.
 
-print("MFA T1-T3 — immunological dataset (missing-methods, NaN-native)")
+print("\nStep 2e: MFA T1-T3 — immunological dataset")
 
 _patients_mfa = (
     set(_dfs_r[1]["Patient"])
@@ -794,7 +809,7 @@ for _pc_i, _pc_name in enumerate(["Dim1", "Dim2"]):
 #%%########### Imputing missing values using miceforest and median
 # in order to be able to run pyod outlier detection
 
-
+print('\nStep 3: Imputing with miceforest and median:')
 # handling name issues - mice forest does not take symbols
 feature_cols = df_im.columns.difference(exclude_cols)
 
@@ -848,6 +863,8 @@ df_im_imputed = pd.concat(
 # ensure final dataframe has columns in same order as original
 df_im_imputed = df_im_imputed[df_im.columns]
 
+
+print('Tablereport of miceforest-imputed immunulogical dataset:')
 # New tablereport of imputed data
 TableReport(df_im_imputed, max_plot_columns=138)
 
@@ -859,6 +876,11 @@ for col in feature_cols:
     df_im_median[col] = df_im_median[col].fillna(median_value)  
 
 
+print('Tablereport of mediant-imputed immunulogical dataset:')
+TableReport(df_im_median, max_plot_columns=138)
+
+
+print('\nCorrelation between miceforest and median-imputed datasets:')
 # Caluculate correlation between datasets:
 
 
@@ -910,6 +932,8 @@ from pyod.models.lscp import LSCP
 if not hasattr(np, 'bool'):
     np.bool = bool
 
+
+print('\nStep 5: PyOD outlier detection on immunological dataset - Zryan Approach ')
 # --- Data: imputed immunological dataset (with miceforest) ---
 # Drop ID columns, scale data
 X_ens = df_im_imputed[feature_cols].copy()
@@ -986,20 +1010,29 @@ print(outlier_candidates.to_string())
 
 
 
+#%% Removing found outliers
+
+print('\nStep 6: Remove found outliers from immunological dataset:')
 
 
+
+
+print('Removed patients:')
 
 
 
 
 # %%################ RAW CLINICAL DATASET #############################
 
+print('################  Clinical Dataset #######################')
+print('\n Step 1: Data inspection of raw clinical dataset')
+
 # Table report of clinical dataset
 print("TableReport of raw clinical dataset:")
 TableReport(df_cl, max_plot_columns=138)
 
 # na analysis of clinical dataset
-print("Na analysis of clinical dataset:")
+print("\nNa analysis of raw clinical dataset:")
 na.altair.plot_heatmap(df_cl)
 
 
@@ -1688,8 +1721,8 @@ def standardize_response(df, response_col='response'):
 
 #%% 1 — Forward fill + timepoint + clean copy
 ########################################################
-# TableReport(df_cl) + NA heatmap + raw statistics: already run above (lines ~800-870)
 
+print('\nStep 2: Create Timepoint column and forward-fill variables for patients:')
 # Patient-level columns: constant across timepoints, only filled in first row per patient
 patient_level_cols = [
     'Patient', 'Unnamed: 2', 'Age at start', 'Gender', 'Weight [kg]', 'Height [cm]',
@@ -1720,6 +1753,8 @@ print(f"\ndf_cl_clean initialised: {df_cl_clean.shape[0]} rows × {df_cl_clean.s
 #%% 2 — Exclusions + EORTC column drop
 ########################################################
 
+print('\nStep 3a: Exclude pre-determined patients:')
+
 # Exclude patients marked with "Ausschluss" keyword (uses Unnamed: 0, before it's dropped)
 exclude_mask = df_cl_clean['Unnamed: 0'].str.contains('Ausschluss', case=False, na=False)
 excluded_patients = df_cl_clean.loc[exclude_mask, 'Patient'].dropna().unique()
@@ -1739,6 +1774,8 @@ for pid in multi_body_patients:
 df_cl_clean = df_cl_clean[~df_cl_clean['Patient'].isin(multi_body_patients)]
 print(f"Removed {len(multi_body_patients)} multi-body-part patients")
 
+print('Removing pre-determined questionarre columns:')
+
 # Drop EORTC health/function questionnaire columns
 try:
     col_list = df_cl_clean.columns.tolist()
@@ -1749,20 +1786,22 @@ try:
     ]
     end_col = next((c for c in end_col_options if c in col_list), None)
     if start_col not in col_list:
-        print(f"Warning: EORTC start column '{start_col}' not found — no columns dropped")
+        print(f"Warning: start column '{start_col}' not found — no columns dropped")
     elif end_col is None:
-        print(f"Warning: EORTC end column not found — no columns dropped")
+        print(f"Warning: end column not found — no columns dropped")
     else:
         start_idx      = col_list.index(start_col)
         end_idx        = col_list.index(end_col)
         q_cols_to_drop = col_list[start_idx : end_idx + 1]
         df_cl_clean    = df_cl_clean.drop(columns=q_cols_to_drop)
-        print(f"\nDropped {len(q_cols_to_drop)} EORTC questionnaire columns:")
+        print(f"\nDropped {len(q_cols_to_drop)} questionnaire columns:")
         print(f"  From: '{start_col}'")
         print(f"  To  : '{end_col}'")
         print(f"  Cols: {q_cols_to_drop}")
 except Exception as e:
-    print(f"Warning: Could not drop EORTC columns: {e}")
+    print(f"Warning: Could not drop columns: {e}")
+
+print(f"Dropped {len(q_cols_to_drop)} columns.")
 
 print(f"\nAfter exclusions: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
 
@@ -1770,6 +1809,7 @@ print(f"\nAfter exclusions: {df_cl_clean['Patient'].nunique()} patients, {len(df
 #%% 3 — Rename columns
 ########################################################
 
+print('Step 3b: Transelate and re-name columns:')
 clinical_names = {
     # Patient demographics
     "Patient": "Patient", "Timepoint": "Timepoint",
@@ -1800,6 +1840,7 @@ print(f"Columns renamed: {len(clinical_names)}")
 #%% 4 — Drop unused columns + empty rows
 ########################################################
 
+print('Step 3c: Remove empty rows, unused columns and rows with no measurements')
 # Drop metadata/admin columns not needed for analysis
 cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire']
 df_cl_clean = df_cl_clean.drop(columns=[c for c in cols_to_drop if c in df_cl_clean.columns])
@@ -1821,20 +1862,11 @@ df_cl_clean = df_cl_clean[~all_q_nan].copy()
 print(f"\nAfter step 4: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_clean)} rows")
 
 
-#%% 5 — Baseline copy + quick inspect
-########################################################
-
-# df_cl_bcat: English column names, raw (unparsed) values.
-# CatBoost handles raw strings natively — this is the baseline modeling input.
-# Regression targets will be joined later from pain_targets (step 12).
-df_cl_bcat = df_cl_clean.copy()
-
-TableReport(df_cl_bcat, max_plot_columns=100)
-
 
 #%% 6a — Manual corrections
 ########################################################
 
+print('Step 3d: Correcting found typos in clinical dataset:')
 # Patient 248 T2: pain_daytime was entered as "22" — confirmed typo, should be 2
 mask_248 = (df_cl_clean['Patient'] == 248) & (df_cl_clean['Timepoint'] == 2)
 if mask_248.sum() > 0:
@@ -1842,11 +1874,20 @@ if mask_248.sum() > 0:
     print("Manual correction: Patient 248 T2 pain_daytime set to '2' (was '22')")
 else:
     print("Warning: Patient 248 T2 not found — correction skipped")
+
 # Add further manual corrections here if needed
+
+
+
+# Copy for baseline catboost model
+df_cl_bcat = df_cl_clean.copy()
+
+TableReport(df_cl_bcat, max_plot_columns=100)
 
 
 #%% 6b — Parse/transform columns
 ########################################################
+print('\nStep 3e: Parse/transform columns and standardize entries:')
 
 # 1 — diagnosis
 print("\n=== diagnosis (before) ===")
@@ -1968,8 +2009,9 @@ print(f"  pain_scale ({len(uniq_after)} unique): {uniq_after}")
 #%% 7 — Replace missing markers
 ########################################################
 
-print("\n=== Replacing null markers ('kA' and 'nD' variants) ===")
+print("\nStep 3f: replacing null markers ('kA' and 'nD' variants)")
 replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=True)
+
 
 # Safety check: Patient and Timepoint must not have NaN
 for id_col in ['Patient', 'Timepoint']:
@@ -1982,6 +2024,7 @@ for id_col in ['Patient', 'Timepoint']:
 
 #%% 8 — Dtype conversion + visualization copy
 ########################################################
+print('\nStep 3g: Changing column dtypes to correct type:')
 
 categorical_cols = [
     'gender', 'overweight', 'pain_points', 'diagnosis',
@@ -2027,24 +2070,31 @@ print("\n=== Dtype summary (clinical) ===")
 print(df_cl_clean.dtypes.value_counts())
 print(f"Shape: {df_cl_clean.shape}, Patients: {df_cl_clean['Patient'].nunique()}")
 
-TableReport(df_cl_clean, max_plot_columns=100)
-
+print('\nStep 4: Drop columns with more than 25% nan:')
 # Drop columns with >25% missing values — calculated across all timepoints (T1–T5)
 # (same strategy as immunological dataset)
 na_frac_cl = df_cl_clean.isna().mean()
 cl_cols_to_drop = na_frac_cl[na_frac_cl > 0.25].index.tolist()
+
 # Never drop patient/timepoint identifiers or the primary target
 cl_cols_to_drop = [c for c in cl_cols_to_drop
                    if c not in ['Patient', 'Timepoint', 'pain_scale']]
-print(f"\nDropping {len(cl_cols_to_drop)} clinical columns with >25% missing: {cl_cols_to_drop}")
+print(f"Dropping {len(cl_cols_to_drop)} clinical columns with >25% missing: {cl_cols_to_drop}")
 df_cl_clean = df_cl_clean.drop(columns=cl_cols_to_drop)
 print(f"Shape after NaN drop: {df_cl_clean.shape}")
+
+print('\nTablereport of cleaned clinical dataset:')
+TableReport(df_cl_clean)
+
 
 # Visualization copy: all timepoints, all patients, after dtype conversion + >25% NaN drop
 df_cl_vis = df_cl_clean.copy()
 
 
+
 #%%##### VISUALIZATION (placeholder) ###########################################
+
+
 # TODO: Use df_cl_vis for EDA (all timepoints, all patients, not imputed)
 # Use df_cl_imputed (miceforest) for FAMD / MFA (requires complete data)
 #
@@ -2053,8 +2103,23 @@ df_cl_vis = df_cl_clean.copy()
 #   - PCA (prince library — handles NaN via imputation internally, or
 #           use sklearn PCA after imputing a viz copy)
 #   - Correlation matrix (phik.phik_matrix — handles mixed types and NaN)
-#   - NA heatmap
+
 ################################################################################
+
+print('\nStep 5a: Pearson Correlation between clinical dataset features:')
+
+
+
+print('\nStep 5b: RV2 matrix for clinical dataset across T1-T5:')
+
+
+
+
+print('\nStep 5c: PCA across t1-t5 (numerical values)') # color by?
+
+
+
+
 
 
 #%% ########## MFA Score Plots coloured by clinical variables ##########
@@ -2067,6 +2132,10 @@ df_cl_vis = df_cl_clean.copy()
 #   sort by Timepoint so groupby.first() picks T1 when available, else T2/T3.
 # pain_at_rest (ordinal, changes over time): mean across available timepoints,
 #   then rounded to nearest integer so legend labels show as "1", "2", etc.
+
+
+print('\nStep 6: MFA for immunulogical dataset, colored by clinical dataset categories:')
+
 _cl_t123 = df_cl_vis[df_cl_vis["Timepoint"].isin([1, 2, 3])].copy()
 
 _cat_meta = (
@@ -2173,17 +2242,16 @@ for _col, _title, _kind, _pal, _vmin, _vmax in _mfa_color_specs:
 
 
 
-
-
-
-
-
-
 #%% 10 — Modeling copy placeholder (df_cl_mod)
 ########################################################
 # df_cl_mod will be created after clinical PyOD outlier detection:
 #   df_cl_mod = df_cl_vis with manually confirmed outlier patients removed
 # Target variables (pain_reduction_pct, pain_scale_t2) are then merged into df_cl_mod.
+
+print('\nStep 7: Removing outliers found in clinical dataset:')
+
+
+
 
 
 #%% 11 — Target variables + distributions
@@ -2191,6 +2259,8 @@ for _col, _title, _kind, _pal, _vmin, _vmax in _mfa_color_specs:
 # Note: pain_targets is derived from df_cl_vis here as a temporary stand-in.
 # Once clinical PyOD is complete and df_cl_mod (outlier-removed) is created,
 # this block should be moved after df_cl_mod creation and use df_cl_mod instead.
+
+print('\nStep 8: Creating target-variables:')
 
 # Extract T1 and T2 pain_scale per patient
 pain_t1 = (
@@ -2288,8 +2358,9 @@ TableReport(df_cl_mod, max_plot_columns=100)
 
 #%%##### BASELINE CATBOOST #####################################################
 
-#%% 12 — Prepare baseline datasets + regression helpers
-########################################################
+# 12 — Prepare baseline datasets + regression helpers
+
+print('\nStep 8: CatBoost Baseline Model')
 
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import RepeatedKFold
@@ -2522,6 +2593,17 @@ shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_
 
 #%%##### ADVANCED CATBOOST (placeholder) #######################################
 
+print('\nStep 9: Advanced CatBoost Model with Tuning:')
+
+
+
+
+
+
+
+
+
+
 #%% 13 — Prepare combined clean dataset
 # df_im_t1: T1 rows from df_im_imputed (or df_im_vis?), filtered to model_patients
 # df_cl_mod_t1: T1 rows from df_cl_mod, filtered to model_patients
@@ -2542,7 +2624,10 @@ shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_
 
 #%%##### ADVANCED HGB (placeholder) ############################################
 
-#%% 14 — HistGradientBoosting advanced model
+print('\nStep 10: HistGradientBoosting Model:')
+
+
+# 14 — HistGradientBoosting advanced model
 # Same nested CV structure as section 13 above
 # Handles numeric NaN natively → simpler imputation strategy (categoricals only)
 # OrdinalEncoder for categorical features inside pipeline
