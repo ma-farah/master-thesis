@@ -210,11 +210,26 @@ TableReport(df_im, max_plot_columns=180)
 # Copy for catboost baseline-modeling:
 df_im_bcat = df_im.copy()
 
-# Removing columns with more than 25% missing values:
+# Per-timepoint NaN check (T1/T2/T3) — run BEFORE the overall drop.
+# Purpose: verify that the >25% threshold is consistent across timepoints.
+# If T1/T2/T3 lists match the overall list → the threshold is unambiguous and
+# dropping is safe regardless of which timepoint you analyse.
+# If a column appears in the overall list but NOT in T1 → it is sparse only at
+# later timepoints (T4/T5 dropout), meaning T1 baseline data is actually fine.
+# That discrepancy would be worth flagging to the expert before proceeding.
+_id_drop_cols = ['Patient', 'Timepoint', 'Date']
+for _tp in [1, 2, 3]:
+    _df_tp = df_im[df_im['Timepoint'] == _tp]
+    _na_tp = _df_tp.drop(columns=[c for c in _id_drop_cols if c in _df_tp.columns]).isna().mean()
+    _high_nan_tp = sorted(_na_tp[_na_tp > 0.25].index.tolist())
+    print(f"T{_tp} columns >25% NaN ({len(_high_nan_tp)}): {_high_nan_tp}")
+
+# Overall >25% NaN across all timepoints — these are the columns actually dropped
 na_frac = df_im.isna().mean()
 cols_to_drop = na_frac[na_frac > 0.25].index.tolist()
-df_im = df_im.drop(columns=cols_to_drop).copy()
+print(f"\nOverall columns >25% NaN ({len(cols_to_drop)}): {sorted(cols_to_drop)}")
 
+df_im = df_im.drop(columns=cols_to_drop).copy()
 print('Dropped columns:', cols_to_drop)
 
 """ 
