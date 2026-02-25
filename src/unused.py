@@ -550,3 +550,206 @@ mfa.plot(
 # Scores for each patient at different timepoints-groups
 # sort ater patient id that has longest distance away from the center in the MFA plot, to see if they are outliers in the raw data as well.
 mfa.partial_row_coordinates(dataset)
+
+
+
+
+
+#%%############# RV / RV2 analysis across timepoints ##########################
+
+#NB! Patient ID 83 has two timepoint 4 measurements 
+# Needs to be the same shape in order to to RV2 analysis.
+# patient ID 137 have two t4 and two t3 measurements.
+
+# new dataset given, lets check duplicates again:
+
+# print duplicated timepoint-measurements:
+df_im_imputed[
+    df_im_imputed.duplicated(subset=["Patient", "Timepoint"], keep=False)
+].sort_values(["Patient", "Timepoint"])
+# no duplicates
+
+
+# dataframes for each time-point t1, t2, t3, t4, t5
+df_t1 = df_im_imputed[df_im_imputed["Timepoint"] == 1]
+df_t2 = df_im_imputed[df_im_imputed["Timepoint"] == 2]
+df_t3 = df_im_imputed[df_im_imputed["Timepoint"] == 3]
+df_t4 = df_im_imputed[df_im_imputed["Timepoint"] == 4]
+df_t5 = df_im_imputed[df_im_imputed["Timepoint"] == 5]
+
+# checking size of each dataframe:
+print("T1 shape:", df_t1.shape)
+print("T2 shape:", df_t2.shape)
+print("T3 shape:", df_t3.shape)
+print("T4 shape:", df_t4.shape)
+print("T5 shape:", df_t5.shape)
+
+# storing dataframes in a dictionary for easy access
+dfs = {
+    1: df_t1,
+    2: df_t2,
+    3: df_t3,
+    4: df_t4,
+    5: df_t5
+}
+
+id_cols = ["Patient", "Timepoint", "Date"]
+timepoints = [1, 2, 3, 4, 5]
+
+
+# find the common patients between two timepoints:
+def common_patients(df_a, df_b, id_col="Patient"):
+    common = np.intersect1d(df_a[id_col], df_b[id_col])
+    # first dataframe
+    A = (
+        df_a[df_a[id_col].isin(common)]
+        .sort_values(id_col)
+        .reset_index(drop=True)
+    )
+    # second dataframe
+    B = (
+        df_b[df_b[id_col].isin(common)]
+        .sort_values(id_col)
+        .reset_index(drop=True)
+    )
+
+    return A, B
+
+
+# calculating rv2 for all combinations of timepoints t1 to t5 (10 combinations)
+n = len(timepoints)
+rv2_matrix = np.zeros((n, n))
+n_common = np.zeros((n, n), dtype=int)
+
+
+for i, ti in enumerate(timepoints):
+    for j, tj in enumerate(timepoints):
+
+        if i == j:     # if we are comparing the same dataframe with itself
+            rv2_matrix[i, j] = 1.0       # correlation = 1 
+            n_common[i, j] = dfs[ti].shape[0]  
+           
+        else:
+            A, B = common_patients(dfs[ti], dfs[tj])   # getting common patients
+            n_common[i, j] = A.shape[0]              # number of common patients
+
+            X = ho.standardise(                     # standardising data before calculating RV2
+                A.drop(columns=id_cols).values,     # dropping id columns
+                mode=0                              # column-wise standardisation
+            )
+
+            Y = ho.standardise(
+                B.drop(columns=id_cols).values,
+                mode=0
+            )
+
+            rv2 = ho.RV2coeff([X, Y])[0, 1]     # calculating RV2 coefficient
+            rv2_matrix[i, j] = rv2              # storing rv2 value
+
+
+
+# dataframe of number of common patients inbetween comparisons:
+n_common_df = pd.DataFrame(
+    n_common,
+    index=[f"T{t}" for t in timepoints],        # row labels
+    columns=[f"T{t}" for t in timepoints]      # column labels
+)
+n_common_df.style.set_caption(
+    "Number of common patients between timepoint comparisons")
+
+
+# convert results to dataframe before plotting       
+rv2_df = pd.DataFrame(
+    rv2_matrix,
+    index=[f"T{t}" for t in timepoints],
+    columns=[f"T{t}" for t in timepoints]
+)
+
+
+# plotting heatmap of rv2 values
+plt.figure(figsize=(8, 6))
+sns.heatmap(
+    rv2_df,
+    annot=True,
+    fmt=".2f",
+    cmap="viridis",
+    vmin=-1,
+    vmax=1,
+    square=True
+)
+
+plt.title("RV2 similarity across timepoints T1 to T5")
+plt.tight_layout()
+plt.show()
+
+
+"""
+201 patients have measurements in both T1 and T2
+130 patients have both T1 and T3
+123 patients have both T1 and T4
+76 patients have both T1 and T5
+"""
+
+# check rv2 for seperate datatsets: what we would like to see change vs not.
+# lekocytes stable - mDC downregulate, m1,m3 and m3?
+
+
+
+
+#%% ############## PCA analysis immu dataset ########################
+# using prince package for pca analysis:
+
+# has automatic scaling
+
+# Pca for timepoint 1 - 5 individually
+for t in timepoints:
+    df_t = dfs[t]
+    # Set Patient ID as index so it shows in the plot
+    X_t = df_t.set_index('Patient').drop(columns=['Timepoint', 'Date'])
+
+    pca = ps.PCA(
+        n_components=3,
+        n_iter=3,
+        copy=True,
+        engine='sklearn',
+        check_input=True,
+        random_state=42
+    )
+
+    pca = pca.fit(X_t)
+
+    # plotting results of PCA, scatter plot of patients at timepoint t
+    chart = pca.plot(
+        X_t,
+        x_component=0,
+        y_component=1,
+        show_row_markers=True,
+        show_column_markers=False,
+        show_row_labels=False,  # Show patient IDs
+        show_column_labels=False
+    ).properties(
+        title=f'PCA of Immunological Data at Timepoint {t}'
+    )
+    chart.display()
+
+    # Scores (coordinates) for each patient
+    # sort after patient id that has longest distance away from the center in the PCA plot, to see if they are outliers in the raw data as well.
+    row_coords = pca.transform(X_t)
+    row_coords['Distance'] = np.sqrt(row_coords[0]**2 + row_coords[1]**2)
+    row_coords = row_coords.sort_values('Distance', ascending=False)
+    print(f"Top 10 Patients with highest distance from center for Timepoint {t}:")
+    print(row_coords.head(10))
+    print("\n")
+
+    # Top contributing variables to PC1:
+    loading_scores = pca.column_correlations 
+    print(f"Top 10 contributing variables to PC1 for Timepoint {t}:")
+    print(loading_scores[0].abs().sort_values(ascending=False).head(10))
+    print("\n")
+
+    # Top contributing variables to PC2:
+    print(f"Top 10 contributing variables to PC2 for Timepoint {t}:")
+    print(loading_scores[1].abs().sort_values(ascending=False).head(10))
+    print("\n")
+    
+       
