@@ -190,7 +190,7 @@ df_im = df_im.drop(index=range(823, 829))
 df_im = df_im.drop(index=78)
 
 # Replace all German missing-value markers (k.A. / n.D. variants) with NaN.
-# Done before df_im_reduced is copied so the baseline dataset is also clean.
+# Done before df_im_vis is copied so the baseline dataset is also clean.
 replace_missing_markers(df_im, skip_cols=["Patient", "Timepoint"])
 
 # change datatypes to correct type
@@ -223,19 +223,17 @@ Dropped columns: ['TC_CD25hi', 'B_CD25hi', 'Eos_HLADR+', 'Mo2_HLADRhi', 'TC_HLAD
 'TH naive_PD1+', 'TH eff_PD1+', 'TC naive_PD1+'
 """
 
-# copy for eda 
-df_im_reduced = df_im.copy() 
-
-# copy for modeling
-df_im_mod = df_im.copy() # copy for modeling
+# Copy for EDA / visualization (after >25% NaN drop)
+df_im_vis = df_im.copy()
+# Note: df_im_mod (outlier-removed modeling copy) is created after PyOD outlier detection
 
 
 
 #%%########## Pearson correlation — immunological dataset (with missing values)
 # pandas .corr() computes pairwise Pearson r, dropping NaN per pair independently.
-# Uses df_im_reduced (not imputed) 
+# Uses df_im_vis (not imputed)
 
-df_pearson_feat = df_im_reduced.drop(columns=[c for c in exclude_cols if c in df_im_reduced.columns])
+df_pearson_feat = df_im_vis.drop(columns=[c for c in exclude_cols if c in df_im_vis.columns])
 pearson_matrix = df_pearson_feat.corr(method='pearson')
 
 # Top correlated pairs by |r| — upper triangle only (no diagonal, no duplicates)
@@ -331,8 +329,8 @@ print("RV2 matrix — immunological dataset (missing-methods, NaN-native)")
 _id_cols    = ["Patient", "Timepoint", "Date"]
 _timepoints = [1, 2, 3, 4, 5]
 
-# Per-timepoint slices from df_im_reduced (NOT imputed)
-_dfs_r = {t: df_im_reduced[df_im_reduced["Timepoint"] == t] for t in _timepoints}
+# Per-timepoint slices from df_im_vis (NOT imputed)
+_dfs_r = {t: df_im_vis[df_im_vis["Timepoint"] == t] for t in _timepoints}
 
 _n_tp      = len(_timepoints)
 _rv2_mm    = np.zeros((_n_tp, _n_tp))
@@ -393,7 +391,7 @@ print(_rv2_mm_df.round(3))
 
 #%% ########## PCA per timepoint T1-T5 — immunological dataset (missing-methods) ##########
 # Each timepoint is analysed in its own PCA space.
-# Data: df_im_reduced (NOT imputed) — NaN handled natively by NIPALS.
+# Data: df_im_vis (NOT imputed) — NaN handled natively by NIPALS.
 # Standardised before PCA so all features contribute equally.
 
 print("Per-timepoint PCA — immunological dataset (missing-methods approach)")
@@ -481,7 +479,7 @@ for _t in _timepoints:
 
 print("Trajectory PCA — immunological dataset")
 
-# We use df_im_reduced (cleaned but NOT imputed).
+# We use df_im_vis (cleaned but NOT imputed).
 # missing-methods NIPALS handles NaN natively via scaled inner products,
 # so we do not need to impute before this analysis.
 id_cols_im = ["Patient", "Timepoint", "Date"]
@@ -499,9 +497,9 @@ cum_color = sns.color_palette("crest", 1)[0]
 def _filter_tp(tp, patients):
     """Return rows for *tp* restricted to *patients*, sorted by Patient ID."""
     return (
-        df_im_reduced[
-            (df_im_reduced["Timepoint"] == tp)
-            & (df_im_reduced["Patient"].isin(patients))
+        df_im_vis[
+            (df_im_vis["Timepoint"] == tp)
+            & (df_im_vis["Patient"].isin(patients))
         ]
         .sort_values("Patient")
         .reset_index(drop=True)
@@ -520,8 +518,8 @@ for tp_a, tp_b, arrow_color, label in pairs:
 
     # ── 1. Patients present at BOTH timepoints in this pair ───────────────────
     patients_pair = (
-        set(df_im_reduced[df_im_reduced["Timepoint"] == tp_a]["Patient"])
-        & set(df_im_reduced[df_im_reduced["Timepoint"] == tp_b]["Patient"])
+        set(df_im_vis[df_im_vis["Timepoint"] == tp_a]["Patient"])
+        & set(df_im_vis[df_im_vis["Timepoint"] == tp_b]["Patient"])
     )
     n_pair = len(patients_pair)
     print(f"  {label}: {n_pair} patients")
@@ -1811,12 +1809,12 @@ print(f"\nAfter step 4: {df_cl_clean['Patient'].nunique()} patients, {len(df_cl_
 #%% 5 — Baseline copy + quick inspect
 ########################################################
 
-# df_cl_reduced: English column names, raw (unparsed) values.
+# df_cl_bcat: English column names, raw (unparsed) values.
 # CatBoost handles raw strings natively — this is the baseline modeling input.
 # Regression targets will be joined later from pain_targets (step 12).
-df_cl_reduced = df_cl_clean.copy()
+df_cl_bcat = df_cl_clean.copy()
 
-TableReport(df_cl_reduced, max_plot_columns=100)
+TableReport(df_cl_bcat, max_plot_columns=100)
 
 
 #%% 6a — Manual corrections
@@ -2016,16 +2014,24 @@ print(f"Shape: {df_cl_clean.shape}, Patients: {df_cl_clean['Patient'].nunique()}
 
 TableReport(df_cl_clean, max_plot_columns=100)
 
-# Visualization copy: all timepoints, all patients, after dtype — not filtered to model patients
+# Drop columns with >25% missing values — calculated across all timepoints (T1–T5)
+# (same strategy as immunological dataset)
+na_frac_cl = df_cl_clean.isna().mean()
+cl_cols_to_drop = na_frac_cl[na_frac_cl > 0.25].index.tolist()
+# Never drop patient/timepoint identifiers or the primary target
+cl_cols_to_drop = [c for c in cl_cols_to_drop
+                   if c not in ['Patient', 'Timepoint', 'pain_scale']]
+print(f"\nDropping {len(cl_cols_to_drop)} clinical columns with >25% missing: {cl_cols_to_drop}")
+df_cl_clean = df_cl_clean.drop(columns=cl_cols_to_drop)
+print(f"Shape after NaN drop: {df_cl_clean.shape}")
+
+# Visualization copy: all timepoints, all patients, after dtype conversion + >25% NaN drop
 df_cl_vis = df_cl_clean.copy()
 
 
 #%%##### VISUALIZATION (placeholder) ###########################################
-# TODO: Use df_cl_vis (all timepoints, all patients, not imputed)
-#
-# Option A — if columns have <25% missing: use directly for PCA/correlation
-# Option B — if high missingness: drop >25% missing cols first, then impute
-#            (median for numeric, mode for categorical) ONLY for viz purposes
+# TODO: Use df_cl_vis for EDA (all timepoints, all patients, not imputed)
+# Use df_cl_imputed (miceforest) for FAMD / MFA (requires complete data)
 #
 # Planned visualisations:
 #   - Distribution plots per feature / per timepoint
@@ -2158,33 +2164,27 @@ for _col, _title, _kind, _pal, _vmin, _vmax in _mfa_color_specs:
 
 
 
-#%% 10 — Modeling copy (df_cl_mod)
+#%% 10 — Modeling copy placeholder (df_cl_mod)
 ########################################################
-
-df_cl_mod = df_cl_clean.copy()
-
-# Drop rows where pain_scale is NaN — these cannot contribute to regression targets
-n_before = len(df_cl_mod)
-dropped = df_cl_mod[df_cl_mod['pain_scale'].isna()][['Patient', 'Timepoint']]
-if len(dropped) > 0:
-    print(f"\nRows dropped (pain_scale NaN):")
-    print(dropped.to_string())
-df_cl_mod = df_cl_mod[df_cl_mod['pain_scale'].notna()].copy()
-print(f"Dropped {n_before - len(df_cl_mod)} rows with missing pain_scale; "
-      f"{df_cl_mod['Patient'].nunique()} patients remain")
+# df_cl_mod will be created after clinical PyOD outlier detection:
+#   df_cl_mod = df_cl_vis with manually confirmed outlier patients removed
+# Target variables (pain_reduction_pct, pain_scale_t2) are then merged into df_cl_mod.
 
 
 #%% 11 — Target variables + distributions
 ########################################################
+# Note: pain_targets is derived from df_cl_vis here as a temporary stand-in.
+# Once clinical PyOD is complete and df_cl_mod (outlier-removed) is created,
+# this block should be moved after df_cl_mod creation and use df_cl_mod instead.
 
 # Extract T1 and T2 pain_scale per patient
 pain_t1 = (
-    df_cl_mod[df_cl_mod['Timepoint'] == 1][['Patient', 'pain_scale']]
+    df_cl_vis[df_cl_vis['Timepoint'] == 1][['Patient', 'pain_scale']]
     .rename(columns={'pain_scale': 'pain_scale_t1'})
     .dropna(subset=['pain_scale_t1'])
 )
 pain_t2 = (
-    df_cl_mod[df_cl_mod['Timepoint'] == 2][['Patient', 'pain_scale']]
+    df_cl_vis[df_cl_vis['Timepoint'] == 2][['Patient', 'pain_scale']]
     .rename(columns={'pain_scale': 'pain_scale_t2'})
     .dropna(subset=['pain_scale_t2'])
 )
@@ -2215,17 +2215,11 @@ print(f"pain_reduction_pct range: {pain_targets['pain_reduction_pct'].min():.1f}
 print(f"  (positive = improvement, negative = worsening)")
 print(f"pain_reduction_pct stats:\n{pain_targets['pain_reduction_pct'].describe()}")
 
-# Merge targets into df_cl_mod (patient-level; same value repeated across all timepoints per patient)
-df_cl_mod = df_cl_mod.merge(
-    pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction', 'pain_reduction_pct']],
-    on='Patient',
-    how='left'
-)
-print(f"\ndf_cl_mod: {df_cl_mod['Patient'].nunique()} patients, {len(df_cl_mod)} rows")
+# Note: merging targets into df_cl_mod will happen after clinical PyOD + outlier removal.
 
 # Distribution of regression targets (one row per patient)
 fig, axes = plt.subplots(1, 3, figsize=(18, 4))
-targets_per_patient = df_cl_mod.drop_duplicates('Patient')
+targets_per_patient = pain_targets
 colors = sns.color_palette('mako', 5)
 
 axes[0].hist(targets_per_patient['pain_scale_t2'].dropna(), bins=20, color=colors[1])
@@ -2298,8 +2292,8 @@ def regression_metrics(y_true, y_pred):
 
 
 def run_catboost_regressor(df_model, target_col, name,
-                           n_splits=5, n_repeats=4, random_state=42):
-    """5-fold × 4-repeat RepeatedKFold CatBoostRegressor. No hyperparameter tuning.
+                           n_splits=5, n_repeats=5, random_state=42):
+    """5-fold × 5-repeat RepeatedKFold CatBoostRegressor (25 fits). No hyperparameter tuning.
     Returns (results_df, last_trained_model, X_features, y_pred_series).
 
     Automatically excluded from features:
@@ -2411,11 +2405,11 @@ def print_regression_summary(results_dict, target_col):
 # Patients eligible for baseline modeling (have both T1 and T2 pain_scale)
 model_patients = set(pain_targets['Patient'].values)
 
-# Immunological T1 baseline: from df_im_reduced (pre-imputation), filtered to model_patients
+# Immunological T1 baseline: from df_im_vis (pre-imputation), filtered to model_patients
 df_im_raw_t1 = (
-    df_im_reduced[
-        (df_im_reduced['Timepoint'] == 1) &
-        (df_im_reduced['Patient'].isin(model_patients))
+    df_im_vis[
+        (df_im_vis['Timepoint'] == 1) &
+        (df_im_vis['Patient'].isin(model_patients))
     ]
     .copy()
     .reset_index(drop=True)
@@ -2425,31 +2419,31 @@ df_im_raw_t1 = df_im_raw_t1.merge(
     on='Patient', how='left'
 )
 
-# Clinical T1 baseline: from df_cl_reduced (English names, raw unparsed values)
-df_cl_reduced_t1 = (
-    df_cl_reduced[
-        (df_cl_reduced['Timepoint'] == 1) &
-        (df_cl_reduced['Patient'].isin(model_patients))
+# Clinical T1 baseline: from df_cl_bcat (English names, raw unparsed values)
+df_cl_bcat_t1 = (
+    df_cl_bcat[
+        (df_cl_bcat['Timepoint'] == 1) &
+        (df_cl_bcat['Patient'].isin(model_patients))
     ]
     .copy()
     .reset_index(drop=True)
 )
-df_cl_reduced_t1 = df_cl_reduced_t1.merge(
+df_cl_bcat_t1 = df_cl_bcat_t1.merge(
     pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
     on='Patient', how='left'
 )
 
 # Combined T1 baseline: inner join on Patient
-df_combined_reduced_t1 = df_im_raw_t1.merge(
-    df_cl_reduced_t1.drop(columns=['Timepoint'], errors='ignore'),
+df_bcat_combined_t1 = df_im_raw_t1.merge(
+    df_cl_bcat_t1.drop(columns=['Timepoint'], errors='ignore'),
     on='Patient', how='inner',
     suffixes=('_im', '_cl')
 )
 
 print(f"\nBaseline T1 datasets:")
 print(f"  Immunological : {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
-print(f"  Clinical      : {df_cl_reduced_t1.shape},  patients: {df_cl_reduced_t1['Patient'].nunique()}")
-print(f"  Combined      : {df_combined_reduced_t1.shape}, patients: {df_combined_reduced_t1['Patient'].nunique()}")
+print(f"  Clinical      : {df_cl_bcat_t1.shape},  patients: {df_cl_bcat_t1['Patient'].nunique()}")
+print(f"  Combined      : {df_bcat_combined_t1.shape}, patients: {df_bcat_combined_t1['Patient'].nunique()}")
 
 
 #%% 12b — Run baseline CatBoost
@@ -2465,10 +2459,10 @@ res_im_red, model_im_red, X_im_red, ypred_im_red = run_catboost_regressor(
     df_im_raw_t1, target, "Immunological (raw T1)")
 
 res_cl_red, model_cl_red, X_cl_red, ypred_cl_red = run_catboost_regressor(
-    df_cl_reduced_t1, target, "Clinical (reduced T1)")
+    df_cl_bcat_t1, target, "Clinical (reduced T1)")
 
 res_comb_red, model_comb_red, X_comb_red, ypred_comb_red = run_catboost_regressor(
-    df_combined_reduced_t1, target, "Combined (reduced T1)")
+    df_bcat_combined_t1, target, "Combined (reduced T1)")
 
 summary_cb_red = print_regression_summary(
     {"Immunological": res_im_red, "Clinical": res_cl_red, "Combined": res_comb_red},
@@ -2492,10 +2486,10 @@ res_im_t2, model_im_t2, X_im_t2, ypred_im_t2 = run_catboost_regressor(
     df_im_raw_t1, target, "Immunological (raw T1)")
 
 res_cl_t2, model_cl_t2, X_cl_t2, ypred_cl_t2 = run_catboost_regressor(
-    df_cl_reduced_t1, target, "Clinical (reduced T1)")
+    df_cl_bcat_t1, target, "Clinical (reduced T1)")
 
 res_comb_t2, model_comb_t2, X_comb_t2, ypred_comb_t2 = run_catboost_regressor(
-    df_combined_reduced_t1, target, "Combined (reduced T1)")
+    df_bcat_combined_t1, target, "Combined (reduced T1)")
 
 summary_cb_t2 = print_regression_summary(
     {"Immunological": res_im_t2, "Clinical": res_cl_t2, "Combined": res_comb_t2},
@@ -2514,7 +2508,7 @@ shap_comb_t2 = plot_shap_regressor(model_comb_t2, X_comb_t2, "Combined — pain_
 #%%##### ADVANCED CATBOOST (placeholder) #######################################
 
 #%% 13 — Prepare combined clean dataset
-# df_im_t1: T1 rows from df_im_imputed (or df_im_reduced?), filtered to model_patients
+# df_im_t1: T1 rows from df_im_imputed (or df_im_vis?), filtered to model_patients
 # df_cl_mod_t1: T1 rows from df_cl_mod, filtered to model_patients
 # df_combined_mod_t1: inner join on Patient → combined clean+transformed, NOT imputed
 # TableReport + print patient count
