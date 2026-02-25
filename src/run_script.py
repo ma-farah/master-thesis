@@ -52,7 +52,7 @@ def replace_missing_markers(df, skip_cols=None, verbose=False):
 
 #%%############# Loading raw datasets ###########################
 
-print('Step 1: Loading raw data')
+print('Step 1: Loading raw data:')
 # reading excel file with raw  (UPDATED)
 data_dir = Path(__file__).resolve().parents[1] / "data"
 data = data_dir / "LDRT_raw.xlsx"
@@ -77,6 +77,7 @@ df_cl = pd.read_excel(
 
 #%%################  RAW IMMUNOLOGICAL DATASET ###########################
 
+print('################# Immunological Dataset #####################')
 
 print("TableReport of raw immunological dataset:")
 TableReport(df_im, max_plot_columns=138)
@@ -186,7 +187,7 @@ dropped_columns = [
 print('Excluding pre-determined columns:')
 df_im = df_im.drop(columns=dropped_columns)
 df_im = df_im.rename(columns={'Messdatum': 'Date'})
-print('Removed {len(dropped_colums} columns: ', dropped_columns)
+print(f"Removed {len(dropped_columns)} columns:", dropped_columns)
 
 print('\nRemoving empty rows:')
 # Removing empty rows in the bottom of excel file (row 829 to 834 in excel file and row 84
@@ -228,9 +229,10 @@ df_im_bcat = df_im.copy()
 # If a column appears in the overall list but NOT in T1 → it is sparse only at
 # later timepoints (T4/T5 dropout), meaning T1 baseline data is actually fine.
 # That discrepancy would be worth flagging to the expert before proceeding.
+
 print('\nChecking columns with more than 25% NaN for T1-T3 individually:')
 _id_drop_cols = ['Patient', 'Timepoint', 'Date']
-for _tp in [1, 2, 3]:
+for _tp in [1, 2, 3, 4, 5]:
     _df_tp = df_im[df_im['Timepoint'] == _tp]
     _na_tp = _df_tp.drop(columns=[c for c in _id_drop_cols if c in _df_tp.columns]).isna().mean()
     _high_nan_tp = sorted(_na_tp[_na_tp > 0.25].index.tolist())
@@ -347,6 +349,9 @@ ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
 plt.tight_layout()
 plt.show()
 
+
+# NOTE!
+# Found a potentially duplicated column, Basophils.1 -> check content and remove:
 
 
 #%% ########## RV2 matrix — immunological dataset (missing-methods, NaN-native) ##########
