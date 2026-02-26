@@ -347,15 +347,17 @@ print('\nStep 7: Creating df_cl_mod (drop leaky columns + remove NaN pain_scale 
 _leaky_cols = [c for c in df_cl_vis.columns
                if any(pat in c for pat in preprocess.CL_LEAKY_PATTERNS)]
 print(f"  Dropping leaky/metadata columns ({len(_leaky_cols)}): {_leaky_cols}")
-df_cl_mod = df_cl_vis.drop(columns=_leaky_cols).copy()
 
-df_cl_mod = preprocess.remove_no_pain_scale_rows(df_cl_mod)
+df_cl_vis = df_cl_vis.drop(columns=_leaky_cols)
+df_cl_vis = preprocess.remove_no_pain_scale_rows(df_cl_vis)
+
+df_cl_mod = df_cl_vis.copy()
 
 
 #%%---------- Step 8 — Target variables ---------------------------------------
 
-print('\nStep 8: Computing regression targets (pain_reduction_pct, pain_scale_t2)')
-pain_targets = preprocess.create_target_variables(df_cl_vis, df_cl_mod=df_cl_mod)
+print('\nStep 8: Computing regression targets (pain_scale_reduction, pain_reduction_pct, pain_scale_t2)')
+pain_targets = preprocess.create_target_variables(df_cl_vis)  # use with nan also.
 
 print(f"\n  TableReport of df_cl_mod:")
 TableReport(df_cl_mod, max_plot_columns=100)
@@ -372,7 +374,7 @@ print('#'*60)
 
 print('\nStep 9: Preparing baseline T1 datasets')
 df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1 = model.prepare_baseline_datasets(
-    df_im_vis, df_cl_bcat, pain_targets
+    df_im_vis, df_cl_vis, pain_targets
 )
 
 TableReport(df_im_raw_t1, max_plot_columns=180)
@@ -383,16 +385,17 @@ TableReport(df_bcat_combined_t1, max_plot_columns=180)
 
 df_bcat_combined_t1 = (
     df_bcat_combined_t1
-    .drop(columns=['pain_scale_t2_im', 'pain_reduction_pct_im'], errors='ignore')
+    .drop(columns=['pain_scale_t2_im', 'pain_reduction_pct_im', 'pain_scale_reduction_im'], errors='ignore')
     .rename(columns={
         'pain_scale_t2_cl': 'pain_scale_t2',
+        'pain_scale_reduction_cl': 'pain_scale_reduction',
         'pain_reduction_pct_cl': 'pain_reduction_pct'
     })
 )
 
-# remove outlier patients from clinical dataset as well!
+df_bcat_combined_t1 = df_bcat_combined_t1.rename(columns={' pain_scale_reduction': 'pain_scale_reduction'})
 
-# total 127 patients......?
+# total 123 patients?
 
 #%%---------- Step 10 — Run baseline CatBoost (both targets) -----------------
 

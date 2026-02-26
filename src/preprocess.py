@@ -1495,7 +1495,7 @@ def remove_no_pain_scale_rows(df, verbose=True):
     return result
 
 
-def create_target_variables(df_cl_vis, df_cl_mod=None, verbose=True):
+def create_target_variables(df_cl_vis, verbose=True):
     """Compute pain reduction targets from T1 and T2 pain_scale values.
 
     Targets
@@ -1590,34 +1590,33 @@ def create_target_variables(df_cl_vis, df_cl_mod=None, verbose=True):
         plt.tight_layout()
         plt.show()
 
-        # Per-timepoint pain_scale distribution (only when df_cl_mod is provided)
-        if df_cl_mod is not None:
-            timepoints = sorted(df_cl_mod['Timepoint'].dropna().unique().astype(int))
-            colors_tp  = sns.color_palette('mako', len(timepoints))
-            n_cols     = min(3, len(timepoints))
-            n_rows     = (len(timepoints) + n_cols - 1) // n_cols
-            fig2, axes2 = plt.subplots(n_rows, n_cols,
+        # Per-timepoint pain_scale distribution 
+        timepoints = sorted(df_cl_vis['Timepoint'].dropna().unique().astype(int))
+        colors_tp  = sns.color_palette('mako', len(timepoints))
+        n_cols     = min(3, len(timepoints))
+        n_rows     = (len(timepoints) + n_cols - 1) // n_cols
+        fig2, axes2 = plt.subplots(n_rows, n_cols,
                                        figsize=(6 * n_cols, 4 * n_rows),
                                        squeeze=False)
-            axes2_flat = axes2.flatten()
+        axes2_flat = axes2.flatten()
 
-            for i, (tp, color) in enumerate(zip(timepoints, colors_tp)):
-                data = df_cl_mod.loc[df_cl_mod['Timepoint'] == tp, 'pain_scale'].dropna()
-                axes2_flat[i].hist(data, bins=15, color=color, edgecolor='white')
-                axes2_flat[i].set_title(f'T{tp}  (n={len(data)})')
-                axes2_flat[i].set_xlabel('Pain Scale (0–10)')
-                axes2_flat[i].set_ylabel('Count')
-                if len(data) > 0:
-                    axes2_flat[i].axvline(data.median(), color='white', linestyle='--',
+        for i, (tp, color) in enumerate(zip(timepoints, colors_tp)):
+            data = df_cl_vis.loc[df_cl_vis['Timepoint'] == tp, 'pain_scale'].dropna()
+            axes2_flat[i].hist(data, bins=15, color=color, edgecolor='white')
+            axes2_flat[i].set_title(f'T{tp}  (n={len(data)})')
+            axes2_flat[i].set_xlabel('Pain Scale (0–10)')
+            axes2_flat[i].set_ylabel('Count')
+            if len(data) > 0:
+                axes2_flat[i].axvline(data.median(), color='white', linestyle='--',
                                           linewidth=1.5, label=f'Median {data.median():.1f}')
-                    axes2_flat[i].legend(fontsize=9)
+                axes2_flat[i].legend(fontsize=9)
 
-            for j in range(len(timepoints), len(axes2_flat)):
-                axes2_flat[j].set_visible(False)
+        for j in range(len(timepoints), len(axes2_flat)):
+            axes2_flat[j].set_visible(False)
 
-            plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
-            plt.tight_layout()
-            plt.show()
+        plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
+        plt.tight_layout()
+        plt.show()
 
     return pain_targets
 
@@ -1692,7 +1691,7 @@ def clean_cl(df_cl, verbose=True):
     #       valid date but provided no clinical data at all (or all entries
     #       were k.A./n.D. markers now converted to NaN).
     # --- Drop rows with missing date or no clinical data ---
-    
+
     drop_mask = pd.Series(False, index=df_cl_clean.index)
 
     if 'date' in df_cl_clean.columns:

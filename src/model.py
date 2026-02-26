@@ -64,13 +64,19 @@ def run_catboost_regressor(df_model, target_col, name,
     y_pred     : pd.Series          Out-of-fold predictions aligned to X's index.
     """
     # Build the exclusion set: ID columns + target + any leaky column names
-    always_exclude = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns = ['response', 'improvement_percent', 'pain_scale', 'pain_reduction_pct']
-    exclude = set(always_exclude + [target_col])
-    for col in df_model.columns:
-        if any(pat in col.lower() for pat in leaky_patterns):
-            exclude.add(col)
+    
+    always_exclude = [
+    'Patient',
+    'Timepoint',
+    'Date',
+    'date',
+    'measurement_timepoint',
+    'pain_scale_t2',
+    'pain_scale_reduction',
+    'pain_reduction_pct']
 
+    exclude = set(always_exclude + [target_col])
+    
     # Subset to feature columns and extract target; drop rows where target is NaN
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
@@ -182,7 +188,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
     ----------
     df_im_vis    : pd.DataFrame   immunological dataset after >25% NaN drop (NOT imputed)
     df_cl_bcat   : pd.DataFrame   clinical dataset, English names, raw unparsed values
-    pain_targets : pd.DataFrame   per-patient targets: Patient, pain_scale_t2, pain_reduction_pct
+    pain_targets : pd.DataFrame   per-patient targets: Patient, pain_scale_t2,  pain_scale_reduction, pain_reduction_pct
 
     Returns
     -------
@@ -202,7 +208,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         .reset_index(drop=True)
     )
     df_im_raw_t1 = df_im_raw_t1.merge(
-        pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+        pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction', 'pain_reduction_pct']],
         on='Patient', how='left'
     )
 
@@ -216,7 +222,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         .reset_index(drop=True)
     )
     df_cl_bcat_t1 = df_cl_bcat_t1.merge(
-        pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+        pain_targets[['Patient', 'pain_scale_t2','pain_scale_reduction', 'pain_reduction_pct']],
         on='Patient', how='left'
     )
 
@@ -257,14 +263,14 @@ def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):
 
     Returns
     -------
-    results : dict with keys 'pain_reduction_pct' and 'pain_scale_t2',
+    results : dict with keys 'pain_reduction_pct, 'pain_reduction_pct' and 'pain_scale_t2',
               each containing a dict: {dataset_name: (results_df, model, X, y_pred)}
     shap_values : dict with the same structure, values are shap_values arrays
     """
     results     = {}
     shap_values = {}
 
-    for target in ['pain_reduction_pct', 'pain_scale_t2']:
+    for target in ['pain_scale_reduction', 'pain_reduction_pct', 'pain_scale_t2']:
         print(f"\n{'='*70}")
         print(f"  CATBOOST BASELINE REGRESSOR — Target: {target}")
         print(f"{'='*70}")
