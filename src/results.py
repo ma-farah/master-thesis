@@ -403,11 +403,26 @@ baseline_results, baseline_shap = model.run_baseline_catboost(
     df_bcat_combined_t1,
 )
 
+# using pain_reduction_pct as target forward
 
 #%%########## ADVANCED MODELS (placeholders) ###################################
 
-print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — PLACEHOLDER')
-# TODO: implement model.run_advanced_catboost(df_combined)
+print('\nStep 11: Advanced CatBoost (Nested CV + Optuna)')
+
+#%%---------- Step 11a — Prepare combined dataset for advanced modeling -------
+
+df_combined = model.prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets)
+
+#%%---------- Step 11b — Run advanced CatBoost --------------------------------
+
+adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_catboost(
+    df_combined,
+    target_col='pain_reduction_pct',
+)
+
+#%%---------- Step 11c — SHAP analysis on final model -------------------------
+
+adv_shap = model.plot_shap_regressor(adv_model, adv_X, 'Advanced CatBoost — pain_reduction_pct')
 
 
 

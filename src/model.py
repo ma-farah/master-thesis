@@ -1,4 +1,5 @@
 # Modeling functions — baseline and advanced regressors
+import time
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -321,16 +322,238 @@ def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ADVANCED CATBOOST  (Nested CV + Optuna) — placeholder
+# ADVANCED CATBOOST  (Nested CV + Optuna)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# TODO: implement nested CV + Optuna tuning
-# Outer : RepeatedKFold(n_splits=4, n_repeats=5) = 20 folds
-# Inner : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per Optuna trial
-# Optuna: 20 trials, objective = minimize RMSE
-# Dataset: df_combined (df_im_mod T1 + df_cl_mod T1, inner join)
-# No pre-imputation needed (CatBoost handles numeric NaN natively)
-# SHAP analysis on final model
+def prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets):
+    """Build the single combined T1 dataset for advanced CatBoost modeling.
+
+    Inner join of df_im_vis T1 + df_cl_mod T1 on Patient + Timepoint.
+    Merges pain_scale_reduction and pain_reduction_pct targets.
+    Duplicate target columns from both sides get _im/_cl suffixes; the _im
+    copies are dropped and _cl copies are renamed to clean names.
+
+    Parameters
+    ----------
+    df_im_vis    : pd.DataFrame  Immunological dataset (NOT imputed, outliers removed).
+    df_cl_mod    : pd.DataFrame  Clinical dataset, parsed + cleaned (df_cl_vis copy).
+    pain_targets : pd.DataFrame  Per-patient targets: Patient, pain_scale_reduction,
+                                 pain_reduction_pct.
+
+    Returns
+    -------
+    df_combined : pd.DataFrame  Combined T1 dataset ready for advanced modeling.
+    """
+    model_patients = set(pain_targets['Patient'].values)
+
+    # Immunological T1 rows + targets
+    df_im_t1 = (
+        df_im_vis[
+            (df_im_vis['Timepoint'] == 1) &
+            (df_im_vis['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_im_t1 = df_im_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    # Clinical T1 rows + targets
+    df_cl_t1 = (
+        df_cl_mod[
+            (df_cl_mod['Timepoint'] == 1) &
+            (df_cl_mod['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_cl_t1 = df_cl_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    # Inner join on Patient + Timepoint; duplicate feature cols get _im/_cl suffixes
+    df_combined = df_im_t1.merge(
+        df_cl_t1,
+        on=['Patient', 'Timepoint'], how='inner',
+        suffixes=('_im', '_cl')
+    )
+
+    # Drop _im copies of target cols; rename _cl copies to clean names
+    df_combined = (
+        df_combined
+        .drop(columns=['pain_scale_reduction_im', 'pain_reduction_pct_im'], errors='ignore')
+        .rename(columns={
+            'pain_scale_reduction_cl': 'pain_scale_reduction',
+            'pain_reduction_pct_cl':   'pain_reduction_pct',
+        })
+    )
+
+    print(f"\Tuned Modeling Combined T1 dataset: {df_combined.shape}, "
+          f"patients: {df_combined['Patient'].nunique()}")
+
+    return df_combined
+
+
+def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_state=42):
+    """Advanced CatBoostRegressor with nested CV and Optuna hyperparameter tuning.
+
+    Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
+    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per Optuna trial. later try 25.
+    Optuna   : 20 trials per outer fold, objective = minimize RMSE via
+               OptunaSearchCV with scoring='neg_root_mean_squared_error'.
+    Final model trained on full dataset with last outer fold's best params for SHAP.
+
+    Parameters
+    ----------
+    df_combined : pd.DataFrame  Combined T1 dataset (immunological + clinical).
+    target_col  : str           Regression target (default: 'pain_reduction_pct').
+    random_state: int           Random seed for CV splitters and CatBoost (default 42).
+
+    Returns
+    -------
+    results_df     : pd.DataFrame       Per-fold MAE/MSE/RMSE/R2 + Mean/Std rows.
+    best_params_df : pd.DataFrame       Best hyperparameters found per outer fold.
+    model          : CatBoostRegressor  Final model trained on full dataset.
+    X              : pd.DataFrame       Feature matrix used.
+    y_pred         : pd.Series          Full-data predictions from final model.
+    """
+    import optuna
+    try:
+        from optuna.integration import OptunaSearchCV
+    except ImportError:
+        from optuna_integration import OptunaSearchCV
+
+    # Build the exclusion set — identical logic to baseline
+    always_exclude = [
+        'Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint',
+        'pain_scale',
+        'pain_scale_t2',
+        'pain_scale_reduction',
+        'pain_reduction_pct',
+    ]
+    exclude = set(always_exclude + [target_col])
+
+    # Subset features and target; drop rows with NaN target
+    feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[feature_cols].copy()
+    y = df_combined[target_col].copy()
+
+    valid = y.notna()
+    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    # Convert category/object dtypes to str for CatBoost categorical handling
+    for col in X.select_dtypes(include=['category', 'object']).columns:
+        X[col] = X[col].astype(str)
+    cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+    # Print run header
+    print(f"\n{'='*65}")
+    print(f"  Advanced CatBoost — {target_col}")
+    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits/trial  |  Trials: 20")
+    print(f"{'='*65}")
+
+    # Outer and inner CV splitters
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+
+    # Optuna hyperparameter search space for CatBoost
+    param_distributions = {
+        'depth':               optuna.distributions.IntDistribution(3, 8),
+        'learning_rate':       optuna.distributions.FloatDistribution(1e-3, 0.3, log=True),
+        'l2_leaf_reg':         optuna.distributions.FloatDistribution(1e-2, 10.0, log=True),
+        'bagging_temperature': optuna.distributions.FloatDistribution(0.0, 1.0),
+        'random_strength':     optuna.distributions.FloatDistribution(0.0, 10.0),
+        'min_data_in_leaf':    optuna.distributions.IntDistribution(1, 30),
+    }
+
+    fold_results   = []
+    best_params_list = []
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    start = time.time()
+
+    # Outer loop — each iteration is one outer fold evaluation
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
+        print(f"\n  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
+
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        # Base CatBoost model — fixed non-tuned params; cat_features set in constructor
+        base_model = CatBoostRegressor(
+            iterations=1000,
+            loss_function='RMSE',
+            custom_metric=['MAE', 'R2'],
+            cat_features=cat_cols,
+            random_seed=random_state,
+            verbose=0,
+        )
+
+        # OptunaSearchCV handles the inner CV + Optuna tuning
+        optuna_search = OptunaSearchCV(
+            estimator=base_model,
+            param_distributions=param_distributions,
+            cv=inner_cv,
+            scoring='neg_root_mean_squared_error',
+            n_trials=20,
+            n_jobs=1,   # CatBoost is already multi-threaded internally
+            verbose=0,
+        )
+
+        optuna_search.fit(X_train, y_train)
+        best_params_list.append(optuna_search.best_params_)
+
+        # Evaluate best inner model on the outer test fold
+        preds = optuna_search.predict(X_test)
+        rmse  = np.sqrt(mean_squared_error(y_test, preds))
+        mae   = mean_absolute_error(y_test, preds)
+        r2    = r2_score(y_test, preds)
+        mse   = rmse ** 2
+
+        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
+        print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        print(f"    Best params: {optuna_search.best_params_}")
+
+    elapsed = time.time() - start
+    print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
+
+    # Build results DataFrame with per-fold rows + Mean/Std summary
+    results_df  = pd.DataFrame(fold_results)
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df = pd.concat(
+        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    # Print summary
+    print(f"\n  Summary (4×5 outer CV, 20 Optuna trials):")
+    for m in metric_cols:
+        print(f"    {m:<5}: {mean_row[m]:.3f} ± {std_row[m]:.4f}")
+
+    # Best hyperparameters table across outer folds
+    best_params_df = pd.DataFrame(best_params_list)
+    best_params_df.index = [f"Fold {i+1}" for i in range(len(best_params_list))]
+    print(f"\n  Best hyperparameters per outer fold:")
+    print(best_params_df.to_string())
+
+    # Train final model on full dataset using last fold's best params — for SHAP
+    final_model = CatBoostRegressor(
+        iterations=1000,
+        loss_function='RMSE',
+        custom_metric=['MAE', 'R2'],
+        cat_features=cat_cols,
+        random_seed=random_state,
+        verbose=0,
+        **optuna_search.best_params_,
+    )
+    final_model.fit(X, y)
+    y_pred = pd.Series(final_model.predict(X), index=range(len(X)), dtype='float64')
+
+    return results_df, best_params_df, final_model, X, y_pred
 
 
 # ══════════════════════════════════════════════════════════════════════════════
