@@ -131,7 +131,6 @@ def print_regression_summary(results_dict, target_col):
     print(summary.to_string(index=False))
     return summary
 
-
 def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
     """Build the three T1 modeling datasets for baseline CatBoost.
 
@@ -143,12 +142,13 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
 
     Returns
     -------
-    df_im_raw_t1       : immunological T1 + targets
-    df_cl_bcat_t1      : clinical T1 (raw) + targets
-    df_bcat_combined_t1: inner join of the two above
+    df_im_raw_t1       : immunological T1 (features only, no targets)
+    df_cl_bcat_t1      : clinical T1 + targets
+    df_bcat_combined_t1: combined T1 + targets (target from clinical side only)
     """
     model_patients = set(pain_targets['Patient'].values)
 
+    # Immunological T1 — features only, NO targets
     df_im_raw_t1 = (
         df_im_vis[
             (df_im_vis['Timepoint'] == 1) &
@@ -157,11 +157,8 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         .copy()
         .reset_index(drop=True)
     )
-    df_im_raw_t1 = df_im_raw_t1.merge(
-        pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
-        on='Patient', how='left'
-    )
 
+    # Clinical T1 — with targets
     df_cl_bcat_t1 = (
         df_cl_bcat[
             (df_cl_bcat['Timepoint'] == 1) &
@@ -174,12 +171,25 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
         on='Patient', how='left'
     )
+    df_cl_bcat_t1 = df_cl_bcat_t1.dropna(subset=['pain_reduction_pct']).reset_index(drop=True)
 
+    # Combined: immunological features + clinical features + clinical targets
+    # Drop leaky clinical columns before merging
+    leaky_cols = ['pain_scale_t2', 'pain_reduction_pct', 
+                  'improvement_percent', 'response', 'response_category', 'response_percent']
+    df_cl_features_only = df_cl_bcat_t1.drop(columns=leaky_cols, errors='ignore')
+    
     df_bcat_combined_t1 = df_im_raw_t1.merge(
-        df_cl_bcat_t1.drop(columns=['Timepoint'], errors='ignore'),
-        on='Patient', how='inner',
-        suffixes=('_im', '_cl')
+        df_cl_features_only,
+        on='Patient', how='inner' #and timepoint!
     )
+    
+    # Add targets from clinical side only
+    df_bcat_combined_t1 = df_bcat_combined_t1.merge(
+        pain_targets[['Patient', 'pain_scale_t2', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+    df_bcat_combined_t1 = df_bcat_combined_t1.dropna(subset=['pain_reduction_pct']).reset_index(drop=True)
 
     print(f"\nBaseline T1 datasets:")
     print(f"  Immunological : {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
@@ -187,6 +197,10 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
     print(f"  Combined      : {df_bcat_combined_t1.shape}, patients: {df_bcat_combined_t1['Patient'].nunique()}")
 
     return df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1
+
+
+
+
 
 
 def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):

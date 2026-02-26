@@ -361,6 +361,16 @@ df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1 = model.prepare_baseline_datase
     df_im_vis, df_cl_bcat, pain_targets
 )
 
+TableReport(df_im_raw_t1, max_plot_columns=180)
+
+TableReport(df_cl_bcat_t1, max_plot_columns=180)
+
+TableReport(df_bcat_combined_t1, max_plot_columns=180)
+
+
+# remove outlier patients from clinical dataset as well!
+
+# total 147 patients
 
 #%%---------- Step 10 — Run baseline CatBoost (both targets) -----------------
 
