@@ -483,11 +483,12 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        # Base CatBoost model — fixed non-tuned params; cat_features set in constructor
+        # Base CatBoost model — fixed non-tuned params; cat_features set in constructor.
+        # custom_metric is intentionally omitted: sklearn's clone() cannot round-trip
+        # CatBoost's internal representation of custom_metric via get_params/set_params.
+        # Metrics are evaluated externally via sklearn's scoring='neg_root_mean_squared_error'.
         base_model = CatBoostRegressor(
             iterations=1000,
-            loss_function='RMSE',
-            custom_metric=['MAE', 'R2'],
             cat_features=cat_cols,
             random_seed=random_state,
             verbose=0,
