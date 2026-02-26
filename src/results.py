@@ -30,6 +30,7 @@ print('#'*60)
 explore.dataset_overview(df_im, name='Immunological')
 explore.patient_timepoint_summary(df_im, name='Immunological')
 
+# na heatmap and tablereport not working
 
 
 #%%---------- Step 2 — Clean immunological dataset ----------------------------
@@ -84,7 +85,7 @@ im_pca_store = explore.pca_per_timepoint(
 
 #%%---------- Step 2d — Trajectory PCA T1↔T2, T2↔T3, T1↔T3 ------------------
 
-print('\nStep 2d: Trajectory PCA (immunological)')
+print('\nStep 2d: Trajectory PCA T1-T2, T2-T3, T1-T3 (immunological)')
 _mako5 = sns.color_palette('mako', 5)
 _im_pairs = [
     (1, 2, _mako5[2], 'T1 → T2'),
@@ -129,6 +130,8 @@ df_im_median = preprocess.impute_median(
     name='Immunological',
 )
 
+
+#%%
 # Compare imputed datasets:
 # feature_cols = df_im[∼id_cols] 
 # Compare column statistics between the two imputed datasets
@@ -196,9 +199,9 @@ print('  CLINICAL DATASET')
 print('#'*60)
 
 explore.dataset_overview(df_cl, name='Clinical', patient_col='Patient',
-                         timepoint_col='Timepoint')
+                         timepoint_col=None)
 
-explore.patient_timepoint_summary(df_cl, name='Clinical')
+# tablereport and na not showing up.
 
 
 #%%---------- Step 6 — Clean clinical dataset ---------------------------------
