@@ -194,8 +194,8 @@ no_od_df_im_med, outlier_candidates_im_med = explore.run_pyod_zryan(
 print('\nStep 5: Removing confirmed outlier observations (immunological)')
 # Confirmed outliers stored in preprocess.IM_CONFIRMED_OUTLIERS
 # = [(221,2), (163,1), (150,1), (159,2), (109,5), (266,4)]
-df_im_mod = preprocess.remove_outlier_observations(df_im_vis)
-print(f"  df_im_mod : {df_im_mod.shape}")
+df_im_vis = preprocess.remove_outlier_observations(df_im_vis)
+print(f"  df_im_vis : {df_im_vis.shape}")
 
 
 #%%########## CLINICAL DATASET #################################################
@@ -359,8 +359,8 @@ df_cl_mod = df_cl_vis.copy()
 print('\nStep 8: Computing regression targets (pain_scale_reduction, pain_reduction_pct, pain_scale_t2)')
 pain_targets = preprocess.create_target_variables(df_cl_vis)  # use with nan also.
 
-print(f"\n  TableReport of df_cl_mod:")
-TableReport(df_cl_mod, max_plot_columns=100)
+print(f"\n  TableReport of df_cl_vis:")
+TableReport(df_cl_vis, max_plot_columns=100)
 
 
 #%%########## BASELINE CATBOOST ################################################
@@ -385,21 +385,18 @@ TableReport(df_bcat_combined_t1, max_plot_columns=180)
 
 df_bcat_combined_t1 = (
     df_bcat_combined_t1
-    .drop(columns=['pain_scale_t2_im', 'pain_reduction_pct_im', 'pain_scale_reduction_im'], errors='ignore')
+    .drop(columns=['pain_scale_reduction_im', 'pain_reduction_pct_im'], errors='ignore')
     .rename(columns={
-        'pain_scale_t2_cl': 'pain_scale_t2',
         'pain_scale_reduction_cl': 'pain_scale_reduction',
-        'pain_reduction_pct_cl': 'pain_reduction_pct'
+        'pain_reduction_pct_cl':   'pain_reduction_pct',
     })
 )
-
-df_bcat_combined_t1 = df_bcat_combined_t1.rename(columns={' pain_scale_reduction': 'pain_scale_reduction'})
 
 # total 123 patients?
 
 #%%---------- Step 10 — Run baseline CatBoost (both targets) -----------------
 
-print('\nStep 10: Running baseline CatBoost (pain_reduction_pct + pain_scale_t2)')
+print('\nStep 10: Running baseline CatBoost (pain_scale_reduction + pain_reduction_pct + pain_scale_t2)')
 baseline_results, baseline_shap = model.run_baseline_catboost(
     df_im_raw_t1,
     df_cl_bcat_t1,
@@ -411,6 +408,8 @@ baseline_results, baseline_shap = model.run_baseline_catboost(
 
 print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — PLACEHOLDER')
 # TODO: implement model.run_advanced_catboost(df_combined)
+
+
 
 print('\nStep 12: Advanced HGB (Nested CV + Optuna) — PLACEHOLDER')
 # TODO: implement model.run_advanced_hgb(df_combined)

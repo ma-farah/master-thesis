@@ -66,17 +66,19 @@ def run_catboost_regressor(df_model, target_col, name,
     # Build the exclusion set: ID columns + target + any leaky column names
     
     always_exclude = [
-    'Patient',
-    'Timepoint',
-    'Date',
-    'date',
-    'measurement_timepoint',
-    'pain_scale_t2',
-    'pain_scale_reduction',
-    'pain_reduction_pct']
+        'Patient',
+        'Timepoint',
+        'Date',
+        'date',
+        'measurement_timepoint',
+        'pain_scale',          # T1 baseline pain — embedded in both target formulas
+        'pain_scale_t2',       # T2 outcome — always leaky
+        'pain_scale_reduction',
+        'pain_reduction_pct',
+    ]
 
     exclude = set(always_exclude + [target_col])
-    
+
     # Subset to feature columns and extract target; drop rows where target is NaN
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
@@ -108,17 +110,29 @@ def run_catboost_regressor(df_model, target_col, name,
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        model = CatBoostRegressor(iterations=300, random_seed=random_state, verbose=0)
+        model = CatBoostRegressor(
+            iterations=1000,
+            loss_function='RMSE',
+            custom_metric=['MAE', 'R2'],
+            random_seed=random_state,
+            verbose=0,
+        )
         model.fit(
             Pool(X_train, y_train, cat_features=cat_cols),
             eval_set=Pool(X_test, y_test, cat_features=cat_cols),
-            use_best_model=False
+            use_best_model=False,
         )
 
         preds = model.predict(X_test)
         y_pred.iloc[test_idx] = preds
 
-        m = regression_metrics(y_test, preds)
+        # Pull CatBoost's own validation metrics from evals_result_ at the final iteration
+        val  = model.evals_result_['validation']
+        rmse = val['RMSE'][-1]
+        mae  = val['MAE'][-1]
+        r2   = val['R2'][-1]
+        mse  = rmse ** 2      # MSE is not a native CatBoost metric; derived from RMSE
+        m = {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
         fold_results.append({'Fold': fold + 1, **m})
         print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
               f"RMSE={m['RMSE']:.3f}  R²={m['R2']:.3f}")
@@ -187,7 +201,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
     Parameters
     ----------
     df_im_vis    : pd.DataFrame   immunological dataset after >25% NaN drop (NOT imputed)
-    df_cl_bcat   : pd.DataFrame   clinical dataset, English names, raw unparsed values
+    df_cl_vis   : pd.DataFrame    clinical dataset,  cleaned
     pain_targets : pd.DataFrame   per-patient targets: Patient, pain_scale_t2,  pain_scale_reduction, pain_reduction_pct
 
     Returns
@@ -208,7 +222,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         .reset_index(drop=True)
     )
     df_im_raw_t1 = df_im_raw_t1.merge(
-        pain_targets[['Patient', 'pain_scale_t2', 'pain_scale_reduction', 'pain_reduction_pct']],
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
         on='Patient', how='left'
     )
 
@@ -222,7 +236,7 @@ def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
         .reset_index(drop=True)
     )
     df_cl_bcat_t1 = df_cl_bcat_t1.merge(
-        pain_targets[['Patient', 'pain_scale_t2','pain_scale_reduction', 'pain_reduction_pct']],
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
         on='Patient', how='left'
     )
 
@@ -270,7 +284,7 @@ def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):
     results     = {}
     shap_values = {}
 
-    for target in ['pain_scale_reduction', 'pain_reduction_pct', 'pain_scale_t2']:
+    for target in ['pain_scale_reduction', 'pain_reduction_pct']:
         print(f"\n{'='*70}")
         print(f"  CATBOOST BASELINE REGRESSOR — Target: {target}")
         print(f"{'='*70}")
