@@ -233,6 +233,7 @@ TableReport(df_cl_vis)
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------
 
+# cl id cols????
 
 print('\nStep 5a: EDA — Pearson correlation (clinical, float64 features)')
 cl_pearson_matrix, cl_pearson_pairs = explore.pearson_correlation(
