@@ -8,6 +8,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from pathlib import Path
 from skrub import TableReport
+import scikit_na as na
 
 import preprocess
 import explore
@@ -26,7 +27,13 @@ print('\n' + '#'*60)
 print('  IMMUNOLOGICAL DATASET')
 print('#'*60)
 
-# Raw dataset overviews
+
+print("TableReport of raw immunological dataset:")
+TableReport(df_im, max_plot_columns=138)
+
+print("Na analysis of raw immunological dataset:")
+na.altair.plot_heatmap(df_im)
+
 explore.dataset_overview(df_im, name='Immunological')
 explore.patient_timepoint_summary(df_im, name='Immunological')
 
@@ -136,7 +143,8 @@ df_im_median = preprocess.impute_median(
 # feature_cols = df_im[∼id_cols] 
 # Compare column statistics between the two imputed datasets
 
-n_missing = df_im[feature_cols].isna().sum()
+feature_cols = [c for c in df_im_vis.columns if c not in _im_id_cols]
+n_missing = df_im_vis[feature_cols].isna().sum()
 
 stats_cmp = pd.DataFrame({
     'n_missing':   n_missing,
@@ -212,11 +220,21 @@ df_cl_clean, df_cl_bcat, df_cl_vis = preprocess.clean_cl(df_cl)
 print('TableReport before ')
 
 # Derived column sets used throughout clinical EDA
-_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+# questionnaire_missing is a metadata flag added by clean_cl step [7b] —
+# excluded from feature analysis but printed here for review.
+_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint',
+                'questionnaire_missing']
 _cl_num_cols = [c for c in df_cl_vis.select_dtypes(include='float64').columns
                 if c not in _cl_id_cols]
 
 print(f"  Numeric feature columns (float64, excl. IDs): {len(_cl_num_cols)}")
+
+if 'questionnaire_missing' in df_cl_vis.columns:
+    _qm = df_cl_vis[df_cl_vis['questionnaire_missing']][['Patient', 'Timepoint']]
+    print(f"\n  Rows with missing questionnaire data (pain_under_load → pain_points all NaN): "
+          f"{len(_qm)}")
+    if len(_qm) > 0:
+        print(_qm.to_string(index=False))
 
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------

@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 import re
 from pathlib import Path
-from skrub import TableReport
-import scikit_na as na
 import hoggorm as ho
 import prince as ps
 import matplotlib.pyplot as plt
@@ -41,38 +39,52 @@ def load_data(data_path=None):
 
 # ── Raw dataset overview ──────────────────────────────────────────────────────
 
-def dataset_overview(df, name, patient_col='Patient', timepoint_col='Timepoint',
-                     max_plot_columns=138):
-    """Print TableReport, NA heatmap and basic statistics for a raw dataset.
+def dataset_overview(df, name, patient_col='Patient', timepoint_col='Timepoint'):
+    """Print basic statistics for a dataset. Works for both immunological and clinical.
+
+    TableReport and NA heatmap are intentionally excluded — call them manually
+    in results.py where needed (they do not render inside function calls in the
+    interactive window).
 
     Parameters
     ----------
-    df               : pd.DataFrame
-    name             : str   label used in print headers (e.g. 'Immunological')
-    patient_col      : str   column containing patient IDs
-    timepoint_col    : str   column containing timepoint labels
-    max_plot_columns : int   passed to TableReport
+    df            : pd.DataFrame
+    name          : str   label used in print headers (e.g. 'Immunological')
+    patient_col   : str   column containing patient IDs (default 'Patient')
+    timepoint_col : str or None
+        Column containing timepoint labels. Pass None if not present (e.g.
+        raw clinical data before forward-fill).
     """
     print(f"\n{'='*60}")
     print(f"  {name} Dataset Overview")
     print(f"{'='*60}")
-
-    print(f"\nTableReport of raw {name} dataset:")
-    TableReport(df, max_plot_columns=max_plot_columns)
-
-    print(f"\nNA heatmap — {name} dataset:")
-    na.altair.plot_heatmap(df)
-
-    print(f"\n=== Raw {name} dataset statistics ===")
     print(f"  Shape         : {df.shape[0]} rows × {df.shape[1]} columns")
+
     if patient_col in df.columns:
         print(f"  Patients      : {df[patient_col].dropna().nunique()}")
-    if timepoint_col in df.columns:
+
+    if timepoint_col and timepoint_col in df.columns:
         print(f"  Timepoints    : {df[timepoint_col].dropna().nunique()}")
-        print(f"\n  Measurements per timepoint:")
+        print(f"\n  Rows per timepoint:")
         print(df[timepoint_col].value_counts().sort_index().to_string())
-    print(f"\n  Missing values: {df.isna().sum().sum()} total "
-          f"({df.isna().mean().mean()*100:.1f}% of all cells)")
+
+    total_nan  = df.isna().sum().sum()
+    total_vals = df.shape[0] * df.shape[1]
+    print(f"\n  Missing values: {total_nan} ({total_nan / total_vals * 100:.1f}% of all cells)")
+
+    # Column dtype breakdown
+    dtype_counts = df.dtypes.value_counts()
+    print(f"\n  Column dtype breakdown:")
+    for dtype, count in dtype_counts.items():
+        print(f"    {dtype}: {count} columns")
+
+    # Top-10 columns with most missing values
+    top_nan = df.isna().sum().sort_values(ascending=False).head(10)
+    top_nan = top_nan[top_nan > 0]
+    if len(top_nan) > 0:
+        print(f"\n  Top columns with missing values (up to 10):")
+        for col, n in top_nan.items():
+            print(f"    {col}: {n} ({n / len(df) * 100:.1f}%)")
 
 
 # ── Patient timepoint coverage ────────────────────────────────────────────────

@@ -212,8 +212,16 @@ def clean_im(df_im, verbose=True):
     # 2 — drop known empty rows
     if verbose:
         print("  [2] Dropping known empty rows")
+    # Capture Patient IDs at the rows being dropped before they are removed
+    _to_drop_pts = df_im.loc[
+        [i for i in IM_EMPTY_ROW_INDICES if i in df_im.index], 'Patient'
+    ].dropna().unique().tolist() if 'Patient' in df_im.columns else []
     df_im = drop_rows_by_index(df_im, IM_EMPTY_ROW_INDICES, verbose=verbose)
     df_im = df_im.reset_index(drop=True)
+    if verbose and 'Patient' in df_im.columns:
+        if _to_drop_pts:
+            print(f"  Patient IDs in dropped rows: {sorted(_to_drop_pts)}")
+        print(f"  Unique patients remaining: {df_im['Patient'].dropna().nunique()}")
 
     # 3 — replace German NaN markers
     if verbose:
@@ -328,6 +336,7 @@ def remove_outlier_observations(df, outliers=None,
             status = "removed" if found else "not found"
             print(f"    Patient {patient}  T{timepoint}  ({status})")
         print(f"  Shape before: {df.shape}  →  after: {result.shape}")
+        print(f"  Unique patients remaining: {result[patient_col].nunique()}")
 
     return result
 
@@ -1083,14 +1092,18 @@ def rename_columns_cl(df_cl_clean, rename_map=None, verbose=True):
 
 
 def drop_unused_cl(df_cl_clean, verbose=True):
-    """Drop metadata columns, rows with no measurement date, and all-NaN questionnaire rows.
+    """Drop metadata columns and rows with no measurement date.
 
     Steps
     -----
     1. Drop admin columns ('Unnamed: 0', 'Unnamed: 2', 'further comments',
        'Comments questionnaire')
-    2. Drop rows with no date (empty measurement slots)
-    3. Drop rows where ALL questionnaire columns (symptoms_months → improvement_percent) are NaN
+    2. Drop rows with no date (completely empty measurement slots from Excel)
+
+    Note: The all-NaN clinical row check is intentionally NOT done here.
+    It is deferred to clean_cl step [7b], which runs AFTER NaN marker
+    replacement (step 7), so that rows whose entries consist entirely of
+    k.A./n.D. markers are also caught.
 
     Requires columns already renamed via rename_columns_cl.
 
@@ -1109,22 +1122,18 @@ def drop_unused_cl(df_cl_clean, verbose=True):
     cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire']
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
 
-    # 2 — Drop rows with no date
+    # 2 — Drop rows with no date (blank Excel rows)
     if 'date' in df.columns:
-        n_before = len(df)
+        no_date = df[df['date'].isna()]
         df = df[df['date'].notna()].copy()
         if verbose:
-            print(f"  Dropped {n_before - len(df)} rows with no date")
-
-    # 3 — Drop all-NaN questionnaire rows
-    if 'symptoms_months' in df.columns and 'improvement_percent' in df.columns:
-        questionnaire_range = df.loc[:, 'symptoms_months':'improvement_percent'].columns
-        n_before  = len(df)
-        all_q_nan = df[questionnaire_range].isna().all(axis=1)
-        if verbose and all_q_nan.sum() > 0:
-            print(f"\n  Dropping {all_q_nan.sum()} rows with all questionnaire columns NaN:")
-            print(df[all_q_nan][['Patient', 'Timepoint']].to_string())
-        df = df[~all_q_nan].copy()
+            if len(no_date) > 0:
+                dropped_pts = sorted(no_date['Patient'].dropna().unique().tolist())
+                print(f"  Dropped {len(no_date)} rows with no date "
+                      f"(Patient IDs in dropped rows: {dropped_pts})")
+            else:
+                print(f"  Dropped 0 rows with no date")
+            print(f"  Unique patients remaining: {df['Patient'].nunique()}")
 
     if verbose:
         print(f"\n  After drop_unused: {df['Patient'].nunique()} patients, {len(df)} rows")
@@ -1625,6 +1634,10 @@ def clean_cl(df_cl, verbose=True):
     5.  Apply manual data corrections  (manual_corrections_cl)
     6.  Parse/transform all columns  (parse_transform_cl)
     7.  Replace German NaN markers in-place  (replace_missing_markers)
+    7b. Drop rows where date is NaN OR all columns from symptoms_months
+        onwards are NaN (runs AFTER marker replacement so k.A./n.D. rows
+        are caught too). Flag questionnaire_missing=True for rows where
+        pain_under_load → pain_points are all NaN.
     8.  Fix dtypes  (fix_dtypes_cl)
     9.  Make baseline CatBoost copy  (df_cl_bcat)
     10. Drop columns with >25% NaN  (drop_high_nan_columns)
@@ -1668,6 +1681,47 @@ def clean_cl(df_cl, verbose=True):
     if verbose:
         print("\n  [7] Replacing German NaN markers")
     replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=verbose)
+
+    # [7b] — Drop empty rows + flag missing questionnaire data
+    # Runs AFTER NaN marker replacement so k.A./n.D. entries are already NaN.
+    #
+    # Drop condition (either is sufficient):
+    #   (a) date is NaN  — belt-and-suspenders over step [4]; also catches any
+    #       edge cases where a date became NaN after parsing.
+    #   (b) every column from symptoms_months onwards is NaN — patient had a
+    #       valid date but provided no clinical data at all (or all entries
+    #       were k.A./n.D. markers now converted to NaN).
+    #
+    # Flag: questionnaire_missing=True for rows where pain_under_load through
+    #       pain_points are ALL NaN (questionnaire not completed, but the row
+    #       may still carry diagnosis / treatment / response data).
+    drop_mask = df_cl_clean['date'].isna() if 'date' in df_cl_clean.columns \
+        else pd.Series(False, index=df_cl_clean.index)
+    if 'symptoms_months' in df_cl_clean.columns:
+        sym_idx  = df_cl_clean.columns.get_loc('symptoms_months')
+        from_sym = df_cl_clean.columns[sym_idx:]
+        drop_mask = drop_mask | df_cl_clean[from_sym].isna().all(axis=1)
+    n_dropped = drop_mask.sum()
+    if verbose:
+        print(f"\n  [7b] Dropping {n_dropped} rows "
+              f"(date NaN or all columns from symptoms_months onwards NaN):")
+        if n_dropped > 0:
+            print(df_cl_clean[drop_mask][['Patient', 'Timepoint']].to_string())
+    df_cl_clean = df_cl_clean[~drop_mask].copy()
+    if verbose:
+        print(f"  Unique patients remaining after [7b]: "
+              f"{df_cl_clean['Patient'].nunique()}")
+
+    if 'pain_under_load' in df_cl_clean.columns and 'pain_points' in df_cl_clean.columns:
+        q_cols = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].columns
+        df_cl_clean['questionnaire_missing'] = df_cl_clean[q_cols].isna().all(axis=1)
+        n_flagged = df_cl_clean['questionnaire_missing'].sum()
+        if verbose:
+            print(f"  [7b] Flagged {n_flagged} rows with no questionnaire data "
+                  f"(pain_under_load → pain_points all NaN):")
+            if n_flagged > 0:
+                print(df_cl_clean[df_cl_clean['questionnaire_missing']][
+                    ['Patient', 'Timepoint']].to_string())
 
     if verbose:
         print("\n  [8] Fixing dtypes")
@@ -1750,6 +1804,10 @@ def impute_miceforest(df, id_cols, name, num_datasets=5, iterations=10,
     cat_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name == 'category']
     num_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name != 'category']
 
+    # Record which columns have NaN before imputation (using renamed X)
+    nan_before = X.isna().sum()
+    cols_with_nan = nan_before[nan_before > 0].rename(index=reverse_map)
+
     kernel = mf.ImputationKernel(
         X,
         num_datasets=num_datasets,
@@ -1782,6 +1840,10 @@ def impute_miceforest(df, id_cols, name, num_datasets=5, iterations=10,
         axis=1,
     )[df.columns]
 
+    total_imputed = int(cols_with_nan.sum())
+    print(f"  Imputed {total_imputed} values across {len(cols_with_nan)} columns:")
+    for col, n in cols_with_nan.items():
+        print(f"    {col}: {n}")
     print(f"  df_imputed shape : {df_imputed.shape}")
     print(f"  Remaining NaN    : {df_imputed.isna().sum().sum()}")
     print(f"\nTableReport of miceforest-imputed {name} dataset:")
@@ -1809,9 +1871,17 @@ def impute_median(df, id_cols, name):
     df_median = df.reset_index(drop=True).copy()
     num_feats = [c for c in feat_cols if pd.api.types.is_numeric_dtype(df_median[c])]
 
+    nan_before = df_median[num_feats].isna().sum()
+    cols_with_nan = nan_before[nan_before > 0]
+
     for col in num_feats:
         df_median[col] = df_median[col].fillna(df_median[col].median())
 
+    total_imputed = int(cols_with_nan.sum())
+    print(f"  Imputed {total_imputed} values across {len(cols_with_nan)} columns:")
+    for col, n in cols_with_nan.items():
+        print(f"    {col}: {n}")
+    print(f"  Remaining NaN: {df_median[num_feats].isna().sum().sum()}")
     print(f"\nTableReport of median-imputed {name} dataset:")
     TableReport(df_median)
 
