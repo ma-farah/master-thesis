@@ -1691,38 +1691,38 @@ def clean_cl(df_cl, verbose=True):
     #   (b) every column from symptoms_months onwards is NaN — patient had a
     #       valid date but provided no clinical data at all (or all entries
     #       were k.A./n.D. markers now converted to NaN).
-    #
-    # Flag: questionnaire_missing=True for rows where pain_under_load through
-    #       pain_points are ALL NaN (questionnaire not completed, but the row
-    #       may still carry diagnosis / treatment / response data).
-    drop_mask = df_cl_clean['date'].isna() if 'date' in df_cl_clean.columns \
-        else pd.Series(False, index=df_cl_clean.index)
+    # --- Drop rows with missing date or no clinical data ---
+    
+    drop_mask = pd.Series(False, index=df_cl_clean.index)
+
+    if 'date' in df_cl_clean.columns:
+        drop_mask |= df_cl_clean['date'].isna()
+
     if 'symptoms_months' in df_cl_clean.columns:
-        sym_idx  = df_cl_clean.columns.get_loc('symptoms_months')
-        from_sym = df_cl_clean.columns[sym_idx:]
-        drop_mask = drop_mask | df_cl_clean[from_sym].isna().all(axis=1)
-    n_dropped = drop_mask.sum()
-    if verbose:
-        print(f"\n  [7b] Dropping {n_dropped} rows "
-              f"(date NaN or all columns from symptoms_months onwards NaN):")
-        if n_dropped > 0:
-            print(df_cl_clean[drop_mask][['Patient', 'Timepoint']].to_string())
-    df_cl_clean = df_cl_clean[~drop_mask].copy()
-    if verbose:
-        print(f"  Unique patients remaining after [7b]: "
-              f"{df_cl_clean['Patient'].nunique()}")
+        from_sym = df_cl_clean.loc[:, 'symptoms_months':]
+        drop_mask |= from_sym.isna().all(axis=1)
 
-    if 'pain_under_load' in df_cl_clean.columns and 'pain_points' in df_cl_clean.columns:
-        q_cols = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].columns
-        df_cl_clean['questionnaire_missing'] = df_cl_clean[q_cols].isna().all(axis=1)
-        n_flagged = df_cl_clean['questionnaire_missing'].sum()
-        if verbose:
-            print(f"  [7b] Flagged {n_flagged} rows with no questionnaire data "
-                  f"(pain_under_load → pain_points all NaN):")
-            if n_flagged > 0:
-                print(df_cl_clean[df_cl_clean['questionnaire_missing']][
-                    ['Patient', 'Timepoint']].to_string())
+    if verbose and drop_mask.any():
+        print(f"\n  [7b] Dropping {drop_mask.sum()} rows "
+            f"(date NaN or all columns from symptoms_months onwards NaN):")
+        print(df_cl_clean.loc[drop_mask, ['Patient', 'Timepoint']].to_string())
 
+    df_cl_clean = df_cl_clean.loc[~drop_mask].copy()
+
+    # --- Drop rows with missing questionnaire ---
+    if {'pain_under_load', 'pain_points'}.issubset(df_cl_clean.columns):
+
+        q_mask = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].isna().all(axis=1)
+
+        if verbose and q_mask.any():
+            print(f"\n  [7c] Dropping {q_mask.sum()} rows with missing questionnaire:")
+            print(df_cl_clean.loc[q_mask, ['Patient', 'Timepoint']].to_string())
+
+        df_cl_clean = df_cl_clean.loc[~q_mask].copy()
+
+    if verbose:
+        print(f"\n  Unique patients remaining: {df_cl_clean['Patient'].nunique()}")
+    
     if verbose:
         print("\n  [8] Fixing dtypes")
     df_cl_clean = fix_dtypes_cl(df_cl_clean, verbose=verbose)

@@ -37,8 +37,6 @@ na.altair.plot_heatmap(df_im)
 explore.dataset_overview(df_im, name='Immunological')
 explore.patient_timepoint_summary(df_im, name='Immunological')
 
-# na heatmap and tablereport not working
-
 
 #%%---------- Step 2 — Clean immunological dataset ----------------------------
 
@@ -176,7 +174,7 @@ no_od_df_im, outlier_candidates_im = explore.run_pyod_zryan(
     feature_cols=_im_feat_cols,
     patient_col='Patient',
     timepoint_col='Timepoint',
-    contamination=0.1,
+    contamination=0.05,
     name='Immunological (MICE)',
 )
 
@@ -186,7 +184,7 @@ no_od_df_im_med, outlier_candidates_im_med = explore.run_pyod_zryan(
     feature_cols=_im_feat_cols,
     patient_col='Patient',
     timepoint_col='Timepoint',
-    contamination=0.1,
+    contamination=0.05,
     name='Immunological (median)',
 )
 
@@ -206,10 +204,17 @@ print('\n' + '#'*60)
 print('  CLINICAL DATASET')
 print('#'*60)
 
+
+print("TableReport of raw clincial dataset:")
+TableReport(df_cl, max_plot_columns=138)
+
+print("Na analysis of raw clinical dataset:")
+na.altair.plot_heatmap(df_cl)
+
 explore.dataset_overview(df_cl, name='Clinical', patient_col='Patient',
                          timepoint_col=None)
 
-# tablereport and na not showing up.
+# tablereport and na not showing up?
 
 
 #%%---------- Step 6 — Clean clinical dataset ---------------------------------
@@ -217,27 +222,17 @@ explore.dataset_overview(df_cl, name='Clinical', patient_col='Patient',
 print('\nStep 6: Cleaning clinical dataset')
 df_cl_clean, df_cl_bcat, df_cl_vis = preprocess.clean_cl(df_cl)
 
-print('TableReport before ')
+# need to remove patients with missing questionarre data: 149 rows!
 
-# Derived column sets used throughout clinical EDA
-# questionnaire_missing is a metadata flag added by clean_cl step [7b] —
-# excluded from feature analysis but printed here for review.
-_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint',
-                'questionnaire_missing']
-_cl_num_cols = [c for c in df_cl_vis.select_dtypes(include='float64').columns
-                if c not in _cl_id_cols]
+print('Tablereport of Clinical dataset (before dropping 25% nan)')
+TableReport(df_cl_bcat)
 
-print(f"  Numeric feature columns (float64, excl. IDs): {len(_cl_num_cols)}")
-
-if 'questionnaire_missing' in df_cl_vis.columns:
-    _qm = df_cl_vis[df_cl_vis['questionnaire_missing']][['Patient', 'Timepoint']]
-    print(f"\n  Rows with missing questionnaire data (pain_under_load → pain_points all NaN): "
-          f"{len(_qm)}")
-    if len(_qm) > 0:
-        print(_qm.to_string(index=False))
+print('Tablereport of Clinical dataset (after dropping 25% nan)')
+TableReport(df_cl_vis)
 
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------
+
 
 print('\nStep 5a: EDA — Pearson correlation (clinical, float64 features)')
 cl_pearson_matrix, cl_pearson_pairs = explore.pearson_correlation(
@@ -385,10 +380,18 @@ TableReport(df_cl_bcat_t1, max_plot_columns=180)
 
 TableReport(df_bcat_combined_t1, max_plot_columns=180)
 
+df_bcat_combined_t1 = (
+    df_bcat_combined_t1
+    .drop(columns=['pain_scale_t2_im', 'pain_reduction_pct_im'], errors='ignore')
+    .rename(columns={
+        'pain_scale_t2_cl': 'pain_scale_t2',
+        'pain_reduction_pct_cl': 'pain_reduction_pct'
+    })
+)
 
 # remove outlier patients from clinical dataset as well!
 
-# total 147 patients
+# total 127 patients......?
 
 #%%---------- Step 10 — Run baseline CatBoost (both targets) -----------------
 
