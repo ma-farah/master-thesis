@@ -472,7 +472,8 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
 
     fold_results   = []
     best_params_list = []
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    # Show each Optuna trial so progress is visible during long runs
+    optuna.logging.set_verbosity(optuna.logging.INFO)
 
     start = time.time()
 
@@ -484,11 +485,12 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
         # Base CatBoost model — fixed non-tuned params; cat_features set in constructor.
+        # iterations=300 here (inner CV only) keeps tuning tractable; the final model uses 1000.
         # custom_metric is intentionally omitted: sklearn's clone() cannot round-trip
         # CatBoost's internal representation of custom_metric via get_params/set_params.
         # Metrics are evaluated externally via sklearn's scoring='neg_root_mean_squared_error'.
         base_model = CatBoostRegressor(
-            iterations=1000,
+            iterations=300, # try 1000
             cat_features=cat_cols,
             random_seed=random_state,
             verbose=0,
@@ -501,7 +503,7 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
             cv=inner_cv,
             scoring='neg_root_mean_squared_error',
             n_trials=20,
-            n_jobs=1,   # CatBoost is already multi-threaded internally
+            n_jobs=-1,   
             verbose=0,
         )
 
