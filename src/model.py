@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from catboost import CatBoostRegressor, Pool
 import shap
@@ -146,12 +147,15 @@ def run_catboost_regressor(df_model, target_col, name,
     results_df = pd.concat(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    # Print the mean ± std summary for each metric
-    print(f"\n  Summary ({n_splits}x{n_repeats} CV):")
+    # Print the mean ± std ± 95% CI summary for each metric
+    n_folds = n_splits * n_repeats
+    t_crit  = stats.t.ppf(0.975, df=n_folds - 1)
+    print(f"\n  Summary ({n_splits}x{n_repeats} CV, 95% CI):")
     for m in metric_cols:
-        mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
-        sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
+        mv  = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
+        sv  = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
+        ci  = t_crit * sv / np.sqrt(n_folds)
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
 
     return results_df, model, X, y_pred
 
@@ -176,19 +180,24 @@ def plot_shap_regressor(model, X, name):
 
 
 def print_regression_summary(results_dict, target_col):
-    """Print a mean ± std summary table across all datasets for a given target."""
+    """Print a mean ± std (95% CI) summary table across all datasets for a given target."""
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
     rows = []
     for ds_name, res_df in results_dict.items():
         fold_rows = res_df[~res_df['Fold'].isin(['Mean', 'Std'])]
+        n      = len(fold_rows)
+        t_crit = stats.t.ppf(0.975, df=n - 1)
         row = {'Dataset': ds_name}
         for m in metric_cols:
-            row[m] = f"{fold_rows[m].mean():.3f} ± {fold_rows[m].std():.4f}"
+            mv = fold_rows[m].mean()
+            sv = fold_rows[m].std()
+            ci = t_crit * sv / np.sqrt(n)
+            row[m] = f"{mv:.3f} ± {sv:.4f} [{mv - ci:.3f}, {mv + ci:.3f}]"
         rows.append(row)
     summary = pd.DataFrame(rows)
-    print(f"\n{'='*70}")
-    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}")
-    print(f"{'='*70}")
+    print(f"\n{'='*90}")
+    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}  (mean ± std, 95% CI)")
+    print(f"{'='*90}")
     print(summary.to_string(index=False))
     return summary
 
@@ -401,7 +410,7 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
     """Advanced CatBoostRegressor with nested CV and Optuna hyperparameter tuning.
 
     Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
-    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per Optuna trial. later try 25.
+    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per Optuna trial, later try 25.
     Optuna   : 20 trials per outer fold, objective = minimize RMSE via
                OptunaSearchCV with scoring='neg_root_mean_squared_error'.
     Final model trained on full dataset with last outer fold's best params for SHAP.
@@ -532,10 +541,15 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
     results_df = pd.concat(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    # Print summary
-    print(f"\n  Summary (4×5 outer CV, 20 Optuna trials):")
+    # Print summary with 95% CI
+    n_outer = len(fold_results)
+    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
+    print(f"\n  Summary (4×5 outer CV, 20 Optuna trials, 95% CI):")
     for m in metric_cols:
-        print(f"    {m:<5}: {mean_row[m]:.3f} ± {std_row[m]:.4f}")
+        mv = mean_row[m]
+        sv = std_row[m]
+        ci = t_crit * sv / np.sqrt(n_outer)
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
 
     # Best hyperparameters table across outer folds
     best_params_df = pd.DataFrame(best_params_list)
