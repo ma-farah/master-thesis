@@ -366,7 +366,7 @@ CL_RENAME_MAP = {
     "Weight [kg]": "weight_kg", "Height [cm]": "height_cm",
     "Overweight? BMI": "overweight_bmi",
     "Erfassungszeitpunkt": "measurement_timepoint", "Datum": "date",
-    "Beschwerden seit": "symptoms_months", "vorherige Therapie": "previous_therapy",
+    "Beschwerden seit": "months_last_visit", "vorherige Therapie": "previous_therapy",
     "unter Belastung": "pain_under_load", "bei Nacht": "pain_night",
     "tagsüber": "pain_daytime", "in Ruhe": "pain_at_rest",
     "bei ersten Schritten/Morgensteifigkeit": "morning_stiffness",
@@ -646,9 +646,9 @@ def standardize_target_volume(series):
 
 
 def standardize_diagnosis(series):
-    """Standardize diagnosis: map German/English variants to English names.
+    """Standardize diagnosis column by mapping German/English variants to English names:
 
-    Combined diagnoses are kept as 'Name1, Name2'.
+    Combined diagnoses are mapped as 'Name1, Name2'.
     """
     diagnosis_map = [
         ('Achillodynia',          ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis']),
@@ -1239,7 +1239,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     5.  cumulative_dose → numeric (Gy)
     6.  gender          → 'w' → 'f'
     7.  overweight_bmi  → overweight (ja/nein) + bmi (float)
-    8.  symptoms_months → numeric months
+    8.  months_last_visit → numeric months
     9.  previous_therapy→ binary columns previous_therapy_1 … _7
     10. response        → response_category + response_percent
     11. ordinal columns → extract_numeric
@@ -1341,21 +1341,21 @@ def parse_transform_cl(df_cl_clean, verbose=True):
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
 
-    # 8 — symptoms_months: parse duration strings to numeric months
-    if 'symptoms_months' in df.columns:
+    # 8 — months_last_visit: parse duration strings to numeric months
+    if 'months_last_visit' in df.columns:
         if verbose:
-            print("\n=== symptoms_months (before) ===")
-            print(df['symptoms_months'].value_counts(dropna=False).head(20).to_string())
+            print("\n=== months_last_visit (before) ===")
+            print(df['months_last_visit'].value_counts(dropna=False).head(20).to_string())
         date_col = df['date'] if 'date' in df.columns else None
-        df['symptoms_months'] = pd.to_numeric(
-            parse_symptoms_duration(df['symptoms_months'], date_col), errors='coerce'
+        df['months_last_visit'] = pd.to_numeric(
+            parse_symptoms_duration(df['months_last_visit'], date_col), errors='coerce'
         )
         if verbose:
-            valid = df['symptoms_months'].dropna()
+            valid = df['months_last_visit'].dropna()
             if len(valid) > 0:
-                print(f"\n=== symptoms_months (after) ===")
+                print(f"\n=== months_last_visit (after) ===")
                 print(f"  range {valid.min():.0f}–{valid.max():.0f} months, "
-                      f"{df['symptoms_months'].isna().sum()} missing")
+                      f"{df['months_last_visit'].isna().sum()} missing")
 
     # 9 — previous_therapy → binary indicator columns
     if 'previous_therapy' in df.columns:
@@ -1495,132 +1495,6 @@ def remove_no_pain_scale_rows(df, verbose=True):
     return result
 
 
-def create_target_variables(df_cl_vis, verbose=True):
-    """Compute pain reduction targets from T1 and T2 pain_scale values.
-
-    Targets
-    -------
-    pain_scale_t1        : T1 pain level (float)
-    pain_scale_t2        : T2 pain level — secondary regression target
-    pain_scale_reduction : T1 − T2 absolute reduction (reference only)
-    pain_reduction_pct   : (T1 − T2) / T1 × 100 — primary regression target
-
-    Only patients with BOTH T1 and T2 pain_scale values are included.
-    Raises ValueError if any patient has pain_scale_t1 = 0 (undefined percentage).
-
-    Parameters
-    ----------
-    df_cl_vis : pd.DataFrame  — full clinical dataset (T1–T5, used to extract targets)
-    df_cl_mod : pd.DataFrame, optional
-        If given, show per-timepoint pain_scale distribution from df_cl_mod.
-    verbose   : bool
-
-    Returns
-    -------
-    pain_targets : pd.DataFrame
-        One row per patient with columns:
-        Patient, pain_scale_t1, pain_scale_t2, pain_scale_reduction, pain_reduction_pct
-    """
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    pain_t1 = (
-        df_cl_vis[df_cl_vis['Timepoint'] == 1][['Patient', 'pain_scale']]
-        .rename(columns={'pain_scale': 'pain_scale_t1'})
-        .dropna(subset=['pain_scale_t1'])
-    )
-    pain_t2 = (
-        df_cl_vis[df_cl_vis['Timepoint'] == 2][['Patient', 'pain_scale']]
-        .rename(columns={'pain_scale': 'pain_scale_t2'})
-        .dropna(subset=['pain_scale_t2'])
-    )
-
-    pain_targets = pain_t1.merge(pain_t2, on='Patient', how='inner')
-    pain_targets['pain_scale_reduction'] = (
-        pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2']
-    )
-
-    zero_t1 = pain_targets[pain_targets['pain_scale_t1'] == 0]
-    if len(zero_t1) > 0:
-        raise ValueError(
-            f"Cannot compute pain_reduction_pct: {len(zero_t1)} patient(s) have "
-            f"pain_scale_t1 = 0: {zero_t1['Patient'].tolist()}"
-        )
-
-    pain_targets['pain_reduction_pct'] = (
-        (pain_targets['pain_scale_t1'] - pain_targets['pain_scale_t2'])
-        / pain_targets['pain_scale_t1'] * 100
-    )
-
-    if verbose:
-        print(f"\nPatients with T1 + T2 pain_scale (usable for regression): {len(pain_targets)}")
-        print(f"pain_scale_t2 range:      "
-              f"{pain_targets['pain_scale_t2'].min():.1f} – "
-              f"{pain_targets['pain_scale_t2'].max():.1f}")
-        print(f"pain_scale_reduction:     "
-              f"{pain_targets['pain_scale_reduction'].min():.1f} – "
-              f"{pain_targets['pain_scale_reduction'].max():.1f} pts")
-        print(f"pain_reduction_pct range: "
-              f"{pain_targets['pain_reduction_pct'].min():.1f} – "
-              f"{pain_targets['pain_reduction_pct'].max():.1f} %  "
-              f"(positive = improvement, negative = worsening)")
-        print(f"pain_reduction_pct stats:\n{pain_targets['pain_reduction_pct'].describe()}")
-
-        colors = sns.color_palette('mako', 5)
-        fig, axes = plt.subplots(1, 3, figsize=(18, 4))
-
-        axes[0].hist(pain_targets['pain_scale_t2'].dropna(), bins=20, color=colors[1])
-        axes[0].set_title('pain_scale_t2 (T2 pain level)')
-        axes[0].set_xlabel('Pain Scale (0–10)')
-        axes[0].set_ylabel('Number of Patients')
-
-        axes[1].hist(pain_targets['pain_scale_reduction'].dropna(), bins=20, color=colors[2])
-        axes[1].set_title('pain_scale_reduction (T1 − T2 pts, reference)')
-        axes[1].set_xlabel('Point Reduction (positive = improvement)')
-        axes[1].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
-        axes[1].legend()
-
-        axes[2].hist(pain_targets['pain_reduction_pct'].dropna(), bins=20, color=colors[3])
-        axes[2].set_title('pain_reduction_pct (% relative to T1, primary target)')
-        axes[2].set_xlabel('Pain Reduction (%)')
-        axes[2].axvline(0, color='white', linestyle='--', linewidth=1, label='No change')
-        axes[2].legend()
-
-        plt.suptitle('Distribution of Potential Regression Targets', fontweight='bold')
-        plt.tight_layout()
-        plt.show()
-
-        # Per-timepoint pain_scale distribution 
-        timepoints = sorted(df_cl_vis['Timepoint'].dropna().unique().astype(int))
-        colors_tp  = sns.color_palette('mako', len(timepoints))
-        n_cols     = min(3, len(timepoints))
-        n_rows     = (len(timepoints) + n_cols - 1) // n_cols
-        fig2, axes2 = plt.subplots(n_rows, n_cols,
-                                       figsize=(6 * n_cols, 4 * n_rows),
-                                       squeeze=False)
-        axes2_flat = axes2.flatten()
-
-        for i, (tp, color) in enumerate(zip(timepoints, colors_tp)):
-            data = df_cl_vis.loc[df_cl_vis['Timepoint'] == tp, 'pain_scale'].dropna()
-            axes2_flat[i].hist(data, bins=15, color=color, edgecolor='white')
-            axes2_flat[i].set_title(f'T{tp}  (n={len(data)})')
-            axes2_flat[i].set_xlabel('Pain Scale (0–10)')
-            axes2_flat[i].set_ylabel('Count')
-            if len(data) > 0:
-                axes2_flat[i].axvline(data.median(), color='white', linestyle='--',
-                                          linewidth=1.5, label=f'Median {data.median():.1f}')
-                axes2_flat[i].legend(fontsize=9)
-
-        for j in range(len(timepoints), len(axes2_flat)):
-            axes2_flat[j].set_visible(False)
-
-        plt.suptitle('Distribution of pain_scale by Timepoint', fontweight='bold')
-        plt.tight_layout()
-        plt.show()
-
-    return pain_targets
-
-
 def clean_cl(df_cl, verbose=True):
     """Full cleaning pipeline for the raw clinical dataset.
 
@@ -1633,7 +1507,7 @@ def clean_cl(df_cl, verbose=True):
     5.  Apply manual data corrections  (manual_corrections_cl)
     6.  Parse/transform all columns  (parse_transform_cl)
     7.  Replace German NaN markers in-place  (replace_missing_markers)
-    7b. Drop rows where date is NaN OR all columns from symptoms_months
+    7b. Drop rows where date is NaN OR all columns from months_last_visit
         onwards are NaN (runs AFTER marker replacement so k.A./n.D. rows
         are caught too). Flag questionnaire_missing=True for rows where
         pain_under_load → pain_points are all NaN.
@@ -1687,7 +1561,7 @@ def clean_cl(df_cl, verbose=True):
     # Drop condition (either is sufficient):
     #   (a) date is NaN  — belt-and-suspenders over step [4]; also catches any
     #       edge cases where a date became NaN after parsing.
-    #   (b) every column from symptoms_months onwards is NaN — patient had a
+    #   (b) every column from months_last_visit onwards is NaN — patient had a
     #       valid date but provided no clinical data at all (or all entries
     #       were k.A./n.D. markers now converted to NaN).
     # --- Drop rows with missing date or no clinical data ---
@@ -1697,13 +1571,13 @@ def clean_cl(df_cl, verbose=True):
     if 'date' in df_cl_clean.columns:
         drop_mask |= df_cl_clean['date'].isna()
 
-    if 'symptoms_months' in df_cl_clean.columns:
-        from_sym = df_cl_clean.loc[:, 'symptoms_months':]
+    if 'months_last_visit' in df_cl_clean.columns:
+        from_sym = df_cl_clean.loc[:, 'months_last_visit':]
         drop_mask |= from_sym.isna().all(axis=1)
 
     if verbose and drop_mask.any():
         print(f"\n  [7b] Dropping {drop_mask.sum()} rows "
-            f"(date NaN or all columns from symptoms_months onwards NaN):")
+            f"(date NaN or all columns from months_last_visit onwards NaN):")
         print(df_cl_clean.loc[drop_mask, ['Patient', 'Timepoint']].to_string())
 
     df_cl_clean = df_cl_clean.loc[~drop_mask].copy()

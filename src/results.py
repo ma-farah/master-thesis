@@ -354,13 +354,59 @@ df_cl_vis = preprocess.remove_no_pain_scale_rows(df_cl_vis)
 df_cl_mod = df_cl_vis.copy()
 
 
-#%%---------- Step 8 — Target variables ---------------------------------------
+#%%---------- Step 8 — Construct regression targets from clinical data --------
 
-print('\nStep 8: Computing regression targets (pain_scale_reduction, pain_reduction_pct, pain_scale_t2)')
-pain_targets = preprocess.create_target_variables(df_cl_vis)  # use with nan also.
+print('\nStep 8: Constructing regression targets from clinical data')
 
-print(f"\n  TableReport of df_cl_vis:")
-TableReport(df_cl_vis, max_plot_columns=100)
+# Primary target: pain_scale reduction (T1 → T2)
+# construct_datasets_targets returns only patients with non-NaN values at both
+# timepoints and in all computed columns, so no further NaN filtering is needed.
+pain_targets = model.construct_datasets_targets(df_cl_vis, 'pain_scale', [1, 2])
+
+# Additional pain questionnaire targets (T1 → T2 differences)
+# These serve as alternative regression targets; distributions shown below.
+targets_daytime    = model.construct_datasets_targets(df_cl_vis, 'pain_daytime',    [1, 2])
+targets_under_load = model.construct_datasets_targets(df_cl_vis, 'pain_under_load', [1, 2])
+targets_at_rest    = model.construct_datasets_targets(df_cl_vis, 'pain_at_rest',    [1, 2])
+
+
+#%%---------- Step 8b — Target distributions ----------------------------------
+
+print('\nStep 8b: Plotting target distributions')
+
+# Collect all reduction_pct columns across all target DataFrames for plotting
+_target_frames = {
+    'pain_scale':      pain_targets,
+    'pain_daytime':    targets_daytime,
+    'pain_under_load': targets_under_load,
+    'pain_at_rest':    targets_at_rest,
+}
+
+fig, axes = plt.subplots(2, len(_target_frames), figsize=(5 * len(_target_frames), 8))
+_colors = sns.color_palette('mako', len(_target_frames))
+
+for col_idx, (name, tdf) in enumerate(_target_frames.items()):
+    prefix  = name.replace('_scale', '')   # matches construct_datasets_targets naming
+    red_col = f'{prefix}_reduction'
+    pct_col = f'{prefix}_reduction_pct'
+
+    # Absolute reduction
+    ax0 = axes[0, col_idx]
+    sns.histplot(tdf[red_col].dropna(), kde=True, ax=ax0,
+                 color=_colors[col_idx], bins=20)
+    ax0.set_title(f'{name}\nAbsolute reduction (T1−T2)')
+    ax0.set_xlabel('Reduction')
+
+    # Percent reduction
+    ax1 = axes[1, col_idx]
+    sns.histplot(tdf[pct_col].dropna(), kde=True, ax=ax1,
+                 color=_colors[col_idx], bins=20)
+    ax1.set_title(f'{name}\nPercent reduction (%)')
+    ax1.set_xlabel('Reduction (%)')
+
+plt.suptitle('Target Distributions (T1 → T2)', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
 
 
 #%%########## BASELINE CATBOOST ################################################
@@ -370,61 +416,87 @@ print('  BASELINE CATBOOST MODEL')
 print('#'*60)
 
 
-#%%---------- Step 9 — Prepare baseline T1 datasets --------------------------
+#%%---------- Step 9 — Prepare modeling datasets (immunological T1-T2 diffs) --
 
-print('\nStep 9: Preparing baseline T1 datasets')
-df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1 = model.prepare_baseline_datasets(
-    df_im_vis, df_cl_vis, pain_targets
+print('\nStep 9: Creating model datasets (immunological T1−T2 differences)')
+
+# create_model_datasets returns:
+#   df_immu_alone : immu difference features + targets
+#   df_combined   : immu difference features + clinical baseline features + targets
+# Only patients with immu measurements at BOTH T1 and T2 are included.
+df_immu_alone, df_combined = model.create_model_datasets(
+    df_cl_vis, df_im_vis, pain_targets, timepoints=[1, 2]
 )
 
-TableReport(df_im_raw_t1, max_plot_columns=180)
 
-TableReport(df_cl_bcat_t1, max_plot_columns=180)
+#%%---------- Step 10 — Run baseline CatBoost (both datasets, primary target) -
 
-TableReport(df_bcat_combined_t1, max_plot_columns=180)
+print('\nStep 10: Running baseline CatBoost — pain_reduction_pct')
 
-df_bcat_combined_t1 = (
-    df_bcat_combined_t1
-    .drop(columns=['pain_scale_reduction_im', 'pain_reduction_pct_im'], errors='ignore')
-    .rename(columns={
-        'pain_scale_reduction_cl': 'pain_scale_reduction',
-        'pain_reduction_pct_cl':   'pain_reduction_pct',
-    })
+_primary_target = 'pain_reduction_pct'
+# rename
+res_immu, model_immu, X_immu, ypred_immu = model.run_catboost_regressor(
+    df_immu_alone, _primary_target, 'Immunological T1−T2 diff')
+
+res_comb, model_comb, X_comb, ypred_comb = model.run_catboost_regressor(
+    df_combined, _primary_target, 'Combined T1−T2 diff')
+
+model.print_regression_summary(
+    {'Immunological': res_immu, 'Combined': res_comb},
+    _primary_target
 )
 
-# total 123 patients?
+# SHAP for both baseline datasets
+baseline_shap_immu = model.plot_shap_regressor(
+    model_immu, X_immu, f'Baseline Immunological — {_primary_target}')
+baseline_shap_comb = model.plot_shap_regressor(
+    model_comb, X_comb, f'Baseline Combined — {_primary_target}')
 
-#%%---------- Step 10 — Run baseline CatBoost (both targets) -----------------
+# 2D density heatmap: predicted vs actual (regression equivalent of confusion matrix)
+_y_true_immu = df_immu_alone[_primary_target].dropna().reset_index(drop=True)
+_y_true_comb = df_combined[_primary_target].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    _y_true_immu, ypred_immu.dropna(), f'Baseline Immunological — {_primary_target}')
+model.plot_prediction_heatmap(
+    _y_true_comb, ypred_comb.dropna(), f'Baseline Combined — {_primary_target}')
 
-print('\nStep 10: Running baseline CatBoost (pain_scale_reduction + pain_reduction_pct + pain_scale_t2)')
-baseline_results, baseline_shap = model.run_baseline_catboost(
-    df_im_raw_t1,
-    df_cl_bcat_t1,
-    df_bcat_combined_t1,
-)
+baseline_results = {
+    'Immunological': (res_immu, model_immu, X_immu, ypred_immu),
+    'Combined':      (res_comb, model_comb, X_comb, ypred_comb),
+}
 
-# using pain_reduction_pct as target forward
 
-#%%########## ADVANCED MODELS (placeholders) ###################################
+#%%########## ADVANCED MODELS ##################################################
 
-print('\nStep 11: Advanced CatBoost (Nested CV + Optuna)')
+print('\n' + '#'*60)
+print('  ADVANCED CATBOOST MODEL (Nested CV + Optuna)')
+print('#'*60)
 
-#%%---------- Step 11a — Prepare combined dataset for advanced modeling -------
 
-df_combined = model.prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets)
+#%%---------- Step 11 — Advanced CatBoost on combined dataset -----------------
 
-#%%---------- Step 11b — Run advanced CatBoost --------------------------------
+print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — combined dataset only')
 
+# Advanced modeling uses df_combined (immu T1-T2 diffs + clinical baseline)
+# No separate immunological-only run for advanced — combined dataset only.
 adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_catboost(
     df_combined,
-    target_col='pain_reduction_pct',
+    target_col=_primary_target,
 )
 
-#%%---------- Step 11c — SHAP analysis on final model -------------------------
 
-adv_shap = model.plot_shap_regressor(adv_model, adv_X, 'Advanced CatBoost — pain_reduction_pct')
+#%%---------- Step 12 — SHAP analysis on final advanced model -----------------
+
+print('\nStep 12: SHAP analysis on advanced CatBoost final model')
+
+adv_shap = model.plot_shap_regressor(
+    adv_model, adv_X, f'Advanced CatBoost — {_primary_target}')
+
+# 2D density heatmap for advanced model
+_y_true_adv = df_combined[_primary_target].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    _y_true_adv, adv_ypred.dropna(), f'Advanced CatBoost — {_primary_target}')
 
 
-
-print('\nStep 12: Advanced HGB (Nested CV + Optuna) — PLACEHOLDER')
+print('\nStep 13: Advanced HGB (Nested CV + Optuna) — PLACEHOLDER')
 # TODO: implement model.run_advanced_hgb(df_combined)

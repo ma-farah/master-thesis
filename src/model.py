@@ -3,11 +3,259 @@ import time
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from catboost import CatBoostRegressor, Pool
 import shap
+
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+# Pain questionnaire columns are potential regression targets, not model features.
+# create_model_datasets() strips them from the clinical feature set automatically.
+CL_PAIN_QUESTIONNAIRE_COLS = [
+    'pain_under_load', 'pain_at_rest', 'pain_daytime',
+    'pain_night', 'morning_stiffness', 'pain_scale',
+]
+
+# Substrings that flag a column as a leaky outcome variable in clinical data.
+# Any clinical column whose name contains one of these strings is excluded from
+# model features because it encodes treatment response or derived outcomes.
+CL_MODEL_LEAKY_PATTERNS = ['response', 'improvement_percent', 'pain_reduction']
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATASET CONSTRUCTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def construct_datasets_targets(df1, column_name, timepoints):
+    """Compute per-patient regression targets from a clinical column across two timepoints.
+
+    For column_name and timepoints [t_a, t_b], computes per patient:
+      - {col}_t{ta}            : raw baseline value (T_a)
+      - {col}_t{tb}            : raw post-treatment value (T_b)  ← leaky, for reference only
+      - {col}_reduction        : absolute reduction  = value_ta - value_tb
+      - {col}_reduction_pct    : percent reduction   = reduction / value_ta × 100
+
+    Only patients that satisfy ALL of the following are included:
+      - have a non-NaN measurement at T_a
+      - have a non-NaN measurement at T_b
+      - have a non-NaN computed reduction (i.e. no division-by-zero when value_ta == 0)
+
+    Prints a summary of target distributions and the list of eligible patient IDs.
+
+    Parameters
+    ----------
+    df1         : pd.DataFrame  Cleaned clinical dataset (df_cl_vis).
+                                Must contain 'Patient', 'Timepoint', and column_name.
+    column_name : str           Column to build targets from, e.g. 'pain_scale',
+                                'pain_daytime', 'pain_under_load'.
+    timepoints  : list[int]     [t_a, t_b] — reduction is computed as t_a minus t_b.
+                                Typically [1, 2] (baseline → first follow-up).
+
+    Returns
+    -------
+    targets : pd.DataFrame
+        One row per eligible patient with columns:
+          Patient, {col}_t{ta}, {col}_t{tb}, {prefix}_reduction, {prefix}_reduction_pct
+        where prefix = column_name with '_scale' stripped (e.g. 'pain_scale' → 'pain').
+        Patients with NaN in any computed target column are excluded.
+    """
+    t_a, t_b = timepoints[0], timepoints[1]
+    col_ta  = f'{column_name}_t{t_a}'
+    col_tb  = f'{column_name}_t{t_b}'
+
+    # Strip '_scale' from the prefix so 'pain_scale' becomes 'pain_reduction'
+    # and 'pain_reduction_pct' rather than 'pain_scale_reduction[_pct]'.
+    # Other columns (pain_daytime, pain_under_load, …) are unaffected.
+    prefix  = column_name.replace('_scale', '')
+    col_red = f'{prefix}_reduction'
+    col_pct = f'{prefix}_reduction_pct'
+
+    # Extract the column at each timepoint (one row per patient, drop duplicates)
+    ta_vals = (
+        df1[df1['Timepoint'] == t_a][['Patient', column_name]]
+        .rename(columns={column_name: col_ta})
+        .drop_duplicates('Patient')
+        .reset_index(drop=True)
+    )
+    tb_vals = (
+        df1[df1['Timepoint'] == t_b][['Patient', column_name]]
+        .rename(columns={column_name: col_tb})
+        .drop_duplicates('Patient')
+        .reset_index(drop=True)
+    )
+
+    # Inner join: keep only patients present at BOTH timepoints with non-NaN values
+    targets = ta_vals.merge(tb_vals, on='Patient', how='inner')
+    targets = targets.dropna(subset=[col_ta, col_tb]).reset_index(drop=True)
+
+    # Absolute reduction (positive = improvement)
+    targets[col_red] = targets[col_ta] - targets[col_tb]
+
+    # Percent reduction: set to NaN when baseline is 0 to avoid division-by-zero
+    targets[col_pct] = np.where(
+        targets[col_ta] != 0,
+        (targets[col_ta] - targets[col_tb]) / targets[col_ta] * 100,
+        np.nan,
+    )
+
+    # Drop any patient whose computed target columns contain NaN
+    # (handles division-by-zero and any other edge cases)
+    targets = targets.dropna(subset=[col_red, col_pct]).reset_index(drop=True)
+
+    # Print summary
+    eligible = sorted(targets['Patient'].tolist())
+    print(f"\n{'='*60}")
+    print(f"  Targets: '{column_name}'  (T{t_a} → T{t_b})")
+    print(f"{'='*60}")
+    print(f"  Patients with T{t_a} values    : {ta_vals[col_ta].notna().sum()}")
+    print(f"  Patients with T{t_b} values    : {tb_vals[col_tb].notna().sum()}")
+    print(f"  Eligible (non-NaN both, n)    : {len(targets)}")
+    print(f"  Eligible patient IDs          : {eligible}")
+    print(f"\n  Target distributions:")
+    for c in [col_red, col_pct]:
+        s = targets[c]
+        print(f"    {c:<42s}  mean={s.mean():.3f}  std={s.std():.3f}"
+              f"  [{s.min():.3f}, {s.max():.3f}]")
+
+    return targets
+
+
+
+def create_model_datasets(df_cl, df_im, targets, timepoints):
+    """Create wide-format modeling datasets from clinical and immunological data.
+
+    Immunological features: for each feature, only the T_a − T_b difference is
+    kept as a column (e.g. 'basophils_t1_minus_t2'). Raw T_a and T_b values are
+    NOT included. Only patients with immunological measurements at BOTH timepoints
+    are eligible.
+
+    Clinical features: T_a (baseline) rows only — the forward-filled patient-level
+    variables such as age, gender, diagnosis. Pain questionnaire columns
+    (CL_PAIN_QUESTIONNAIRE_COLS) and leaky metadata columns (CL_MODEL_LEAKY_PATTERNS)
+    are excluded automatically.
+
+    Target columns merged: all columns from the targets DataFrame EXCEPT the raw
+    post-treatment value ({col}_t{t_b}), which is always leaky. The baseline raw
+    value ({col}_t{t_a}) and computed reduction/pct columns are included and will
+    be handled by run_catboost_regressor's exclusion logic (which excludes target_col
+    and any column matching leaky patterns).
+
+    Patients with NaN in all target columns after merging are excluded (this handles
+    any residual NaN not caught by construct_datasets_targets).
+
+    Parameters
+    ----------
+    df_cl      : pd.DataFrame  Cleaned clinical dataset (df_cl_vis or df_cl_mod).
+                               Must contain 'Patient', 'Timepoint', and clinical features.
+    df_im      : pd.DataFrame  Immunological dataset (df_im_vis or df_im_mod).
+                               Must contain 'Patient', 'Timepoint', and immu features.
+    targets    : pd.DataFrame  Output from construct_datasets_targets().
+                               Must contain 'Patient' + target columns.
+    timepoints : list[int]     [t_a, t_b] to define the immunological difference direction.
+                               Typically [1, 2].
+
+    Returns
+    -------
+    df_immu_alone : pd.DataFrame
+        One row per patient: immu difference features + target columns.
+    df_combined : pd.DataFrame
+        One row per patient: immu difference features + clinical baseline features
+        + target columns.
+    """
+    t_a, t_b = timepoints[0], timepoints[1]
+    id_cols  = {'Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint'}
+
+    # ── IMMUNOLOGICAL: T_a − T_b differences only (one row per patient) ────────
+
+    # Restrict to the two timepoints of interest
+    df_im_tp = df_im[df_im['Timepoint'].isin([t_a, t_b])].copy()
+
+    # Identify patients that have measurements at BOTH timepoints
+    tp_counts     = df_im_tp.groupby('Patient')['Timepoint'].nunique()
+    patients_both = tp_counts[tp_counts == 2].index
+    df_im_tp      = df_im_tp[df_im_tp['Patient'].isin(patients_both)]
+
+    # Feature columns = everything except ID columns
+    im_feat_cols = [c for c in df_im_tp.columns if c not in id_cols]
+
+    # Extract T_a and T_b separately; rename columns with timepoint suffix (temporary)
+    df_im_ta = (
+        df_im_tp[df_im_tp['Timepoint'] == t_a][['Patient'] + im_feat_cols]
+        .rename(columns={c: f'{c}_t{t_a}' for c in im_feat_cols})
+        .reset_index(drop=True)
+    )
+    df_im_tb = (
+        df_im_tp[df_im_tp['Timepoint'] == t_b][['Patient'] + im_feat_cols]
+        .rename(columns={c: f'{c}_t{t_b}' for c in im_feat_cols})
+        .reset_index(drop=True)
+    )
+
+    # Merge to align T_a and T_b rows; compute difference; drop raw T_a and T_b columns
+    df_im_merged = df_im_ta.merge(df_im_tb, on='Patient', how='inner')
+    diff_cols = {}
+    for c in im_feat_cols:
+        col_name         = f'{c}_t{t_a}_minus_t{t_b}'
+        diff_cols[c]     = col_name
+        df_im_merged[col_name] = df_im_merged[f'{c}_t{t_a}'] - df_im_merged[f'{c}_t{t_b}']
+
+    # Keep only Patient + difference columns (discard raw T_a and T_b feature columns)
+    df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
+
+    # ── CLINICAL: T_a baseline rows only, pain questionnaire + leaky cols removed ─
+
+    cl_leaky    = [c for c in df_cl.columns
+                   if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
+    cl_exclude  = id_cols | set(CL_PAIN_QUESTIONNAIRE_COLS) | set(cl_leaky)
+    cl_feat_cols = [c for c in df_cl.columns if c not in cl_exclude]
+
+    df_cl_t1 = (
+        df_cl[df_cl['Timepoint'] == t_a][['Patient'] + cl_feat_cols]
+        .drop_duplicates('Patient')
+        .reset_index(drop=True)
+    )
+
+    print(f"\n  Clinical features excluded:")
+    print(f"    Pain questionnaire cols : {CL_PAIN_QUESTIONNAIRE_COLS}")
+    print(f"    Leaky metadata cols     : {sorted(cl_leaky)}")
+    print(f"    Clinical features kept  : {len(cl_feat_cols)}")
+
+    # ── TARGETS: exclude the raw post-treatment value (leaky) before merging ────
+
+    # {col}_t{t_b} is the observed outcome at T_b — always leaky when the target
+    # is the T_a → T_b change. All other target columns (baseline T_a value and
+    # computed reductions) are kept and will be excluded by run_catboost_regressor
+    # if they appear leaky relative to the chosen target_col.
+    leaky_raw_tb  = [c for c in targets.columns if c.endswith(f'_t{t_b}')]
+    target_merge  = ['Patient'] + [c for c in targets.columns
+                                   if c != 'Patient' and c not in leaky_raw_tb]
+
+    # ── MERGE into final datasets ─────────────────────────────────────────────
+
+    # Immunological-only: difference features + target columns
+    df_immu_alone = df_im_wide.merge(targets[target_merge], on='Patient', how='inner')
+
+    # Combined: difference features + clinical T_a baseline + target columns
+    df_combined = (
+        df_im_wide
+        .merge(df_cl_t1, on='Patient', how='inner')
+        .merge(targets[target_merge], on='Patient', how='inner')
+    )
+
+    print(f"\nModel datasets ready (T{t_a}–T{t_b} immunological differences only):")
+    print(f"  Immunological diff features : {len(diff_cols)}  "
+          f"(one T{t_a}−T{t_b} diff per original feature)")
+    print(f"  Clinical baseline features  : {len(cl_feat_cols)}")
+    print(f"  df_immu_alone : shape={df_immu_alone.shape}, "
+          f"patients={df_immu_alone['Patient'].nunique()}")
+    print(f"  df_combined   : shape={df_combined.shape}, "
+          f"patients={df_combined['Patient'].nunique()}")
+
+    return df_immu_alone, df_combined
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -34,6 +282,7 @@ def regression_metrics(y_true, y_pred):
     return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
 
 
+
 def run_catboost_regressor(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42):
     """Run a baseline CatBoostRegressor with RepeatedKFold cross-validation.
@@ -45,9 +294,10 @@ def run_catboost_regressor(df_model, target_col, name,
 
     Automatically excluded from features:
       - ID columns  : Patient, Timepoint, Date, date, measurement_timepoint
-      - Leaky cols  : any column whose name contains 'response',
-                      'improvement_percent', 'pain_scale', or
-                      'pain_reduction_pct'
+      - Leaky cols  : any column whose name matches CL_MODEL_LEAKY_PATTERNS
+                      ('response', 'improvement_percent', 'pain_reduction') —
+                      catches all reduction/pct columns regardless of target name
+      - target_col  : the specific regression target passed as argument
 
     Parameters
     ----------
@@ -65,21 +315,15 @@ def run_catboost_regressor(df_model, target_col, name,
     X          : pd.DataFrame       Feature matrix used (rows with non-NaN target).
     y_pred     : pd.Series          Out-of-fold predictions aligned to X's index.
     """
-    # Build the exclusion set: ID columns + target + any leaky column names
-    
-    always_exclude = [
-        'Patient',
-        'Timepoint',
-        'Date',
-        'date',
-        'measurement_timepoint',
-        'pain_scale',          # T1 baseline pain — embedded in both target formulas
-        'pain_scale_t2',       # T2 outcome — always leaky
-        'pain_scale_reduction',
-        'pain_reduction_pct',
-    ]
-
-    exclude = set(always_exclude + [target_col])
+    # Build the exclusion set: ID columns + target_col + pattern-matched leaky cols.
+    # Pattern matching handles any target naming produced by construct_datasets_targets
+    # (e.g. pain_daytime_reduction, pain_under_load_reduction_pct, ...) without
+    # requiring hardcoded column names.
+    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_patterns = CL_MODEL_LEAKY_PATTERNS  # ['response', 'improvement_percent', 'pain_reduction']
+    leaky_cols = [c for c in df_model.columns
+                  if any(pat in c for pat in leaky_patterns)]
+    exclude = set(id_cols) | set(leaky_cols) | {target_col}
 
     # Subset to feature columns and extract target; drop rows where target is NaN
     feature_cols = [c for c in df_model.columns if c not in exclude]
@@ -160,6 +404,52 @@ def run_catboost_regressor(df_model, target_col, name,
     return results_df, model, X, y_pred
 
 
+def plot_prediction_heatmap(y_true, y_pred, name, bins=10):
+    """2D density heatmap of predicted vs actual regression values.
+
+    Each cell shows how many patients had a given (predicted, actual) combination.
+    A perfect model clusters along the diagonal. Off-diagonal density reveals
+    systematic over- or under-prediction in specific ranges.
+
+    With small samples (~100 patients), bins=10 gives a reasonable resolution
+    without too many empty cells. Adjust bins downward if the plot looks too sparse.
+
+    Parameters
+    ----------
+    y_true : array-like   True target values.
+    y_pred : array-like   Regression predictions from model.predict().
+    name   : str          Label shown in the plot title.
+    bins   : int          Number of bins along each axis (default 10).
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    # 2D histogram heatmap: x = predicted, y = actual
+    # cbar_kws label is 'Patient count' since each cell is a count of patients
+    sns.histplot(
+        x=y_pred, y=y_true,
+        bins=bins,
+        cmap='mako',
+        cbar=True,
+        cbar_kws={'label': 'Patient count'},
+        ax=ax,
+    )
+
+    # Diagonal reference line = perfect prediction
+    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+    ax.plot(lims, lims, linestyle='--', color='white', linewidth=1.2,
+            alpha=0.7, label='Perfect prediction')
+
+    ax.set_xlabel('Predicted pain reduction (%)', fontsize=11)
+    ax.set_ylabel('Actual pain reduction (%)',    fontsize=11)
+    ax.set_title(f'Predicted vs Actual — {name}', fontsize=12)
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_shap_regressor(model, X, name):
     """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
     print(f"\n=== SHAP Analysis: {name} ===")
@@ -201,210 +491,9 @@ def print_regression_summary(results_dict, target_col):
     print(summary.to_string(index=False))
     return summary
 
-def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
-    """Build the three T1 modeling datasets for baseline CatBoost.
-
-    All three datasets receive targets merged in via left join.
-    run_catboost_regressor handles leaky column exclusion internally via
-    leaky_patterns — no manual dropping needed here.
-
-    Parameters
-    ----------
-    df_im_vis    : pd.DataFrame   immunological dataset after >25% NaN drop (NOT imputed)
-    df_cl_vis   : pd.DataFrame    clinical dataset,  cleaned
-    pain_targets : pd.DataFrame   per-patient targets: Patient, pain_scale_t2,  pain_scale_reduction, pain_reduction_pct
-
-    Returns
-    -------
-    df_im_raw_t1       : immunological T1 + targets
-    df_cl_bcat_t1      : clinical T1 (raw) + targets
-    df_bcat_combined_t1: inner join of the two above (suffixes _im/_cl for duplicate cols)
-    """
-    model_patients = set(pain_targets['Patient'].values)
-
-    # Immunological T1 + targets
-    df_im_raw_t1 = (
-        df_im_vis[
-            (df_im_vis['Timepoint'] == 1) &
-            (df_im_vis['Patient'].isin(model_patients))
-        ]
-        .copy()
-        .reset_index(drop=True)
-    )
-    df_im_raw_t1 = df_im_raw_t1.merge(
-        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
-        on='Patient', how='left'
-    )
-
-    # Clinical T1 (raw, unparsed) + targets
-    df_cl_bcat_t1 = (
-        df_cl_bcat[
-            (df_cl_bcat['Timepoint'] == 1) &
-            (df_cl_bcat['Patient'].isin(model_patients))
-        ]
-        .copy()
-        .reset_index(drop=True)
-    )
-    df_cl_bcat_t1 = df_cl_bcat_t1.merge(
-        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
-        on='Patient', how='left'
-    )
-
-    # Combined T1: inner join on Patient + Timepoint
-    # Both sides are already filtered to Timepoint==1; joining on both keys
-    # avoids duplicates and ensures exact patient-timepoint matching.
-    # Duplicate feature columns get suffixes _im/_cl;
-    # run_catboost_regressor excludes leaky cols via leaky_patterns.
-    df_bcat_combined_t1 = df_im_raw_t1.merge(
-        df_cl_bcat_t1,
-        on=['Patient', 'Timepoint'], how='inner',
-        suffixes=('_im', '_cl')
-    )
-
-    print(f"\nBaseline T1 datasets:")
-    print(f"  Immunological : {df_im_raw_t1.shape},  patients: {df_im_raw_t1['Patient'].nunique()}")
-    print(f"  Clinical      : {df_cl_bcat_t1.shape},  patients: {df_cl_bcat_t1['Patient'].nunique()}")
-    print(f"  Combined      : {df_bcat_combined_t1.shape}, patients: {df_bcat_combined_t1['Patient'].nunique()}")
-
-    return df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1
-
-
-
-
-
-
-def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):
-    """Run baseline CatBoost on both regression targets across all three datasets.
-
-    Runs pain_reduction_pct (primary) and pain_scale_t2 (secondary).
-    Prints SHAP plots for each dataset × target combination.
-
-    Parameters
-    ----------
-    df_im_raw_t1        : immunological T1 + targets
-    df_cl_bcat_t1       : clinical T1 (raw) + targets
-    df_bcat_combined_t1 : combined T1 + targets
-
-    Returns
-    -------
-    results : dict with keys 'pain_reduction_pct, 'pain_reduction_pct' and 'pain_scale_t2',
-              each containing a dict: {dataset_name: (results_df, model, X, y_pred)}
-    shap_values : dict with the same structure, values are shap_values arrays
-    """
-    results     = {}
-    shap_values = {}
-
-    for target in ['pain_scale_reduction', 'pain_reduction_pct']:
-        print(f"\n{'='*70}")
-        print(f"  CATBOOST BASELINE REGRESSOR — Target: {target}")
-        print(f"{'='*70}")
-
-        res_im,   model_im,   X_im,   ypred_im   = run_catboost_regressor(
-            df_im_raw_t1,       target, "Immunological (raw T1)")
-        res_cl,   model_cl,   X_cl,   ypred_cl   = run_catboost_regressor(
-            df_cl_bcat_t1,      target, "Clinical (raw T1)")
-        res_comb, model_comb, X_comb, ypred_comb = run_catboost_regressor(
-            df_bcat_combined_t1, target, "Combined (raw T1)")
-
-        print_regression_summary(
-            {"Immunological": res_im, "Clinical": res_cl, "Combined": res_comb},
-            target
-        )
-
-        sv_im   = plot_shap_regressor(model_im,   X_im,   f"Immunological — {target}")
-        sv_cl   = plot_shap_regressor(model_cl,   X_cl,   f"Clinical — {target}")
-        sv_comb = plot_shap_regressor(model_comb, X_comb, f"Combined — {target}")
-
-        results[target] = {
-            'Immunological': (res_im,   model_im,   X_im,   ypred_im),
-            'Clinical':      (res_cl,   model_cl,   X_cl,   ypred_cl),
-            'Combined':      (res_comb, model_comb, X_comb, ypred_comb),
-        }
-        shap_values[target] = {
-            'Immunological': sv_im,
-            'Clinical':      sv_cl,
-            'Combined':      sv_comb,
-        }
-
-    return results, shap_values
-
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # ADVANCED CATBOOST  (Nested CV + Optuna)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets):
-    """Build the single combined T1 dataset for advanced CatBoost modeling.
-
-    Inner join of df_im_vis T1 + df_cl_mod T1 on Patient + Timepoint.
-    Merges pain_scale_reduction and pain_reduction_pct targets.
-    Duplicate target columns from both sides get _im/_cl suffixes; the _im
-    copies are dropped and _cl copies are renamed to clean names.
-
-    Parameters
-    ----------
-    df_im_vis    : pd.DataFrame  Immunological dataset (NOT imputed, outliers removed).
-    df_cl_mod    : pd.DataFrame  Clinical dataset, parsed + cleaned (df_cl_vis copy).
-    pain_targets : pd.DataFrame  Per-patient targets: Patient, pain_scale_reduction,
-                                 pain_reduction_pct.
-
-    Returns
-    -------
-    df_combined : pd.DataFrame  Combined T1 dataset ready for advanced modeling.
-    """
-    model_patients = set(pain_targets['Patient'].values)
-
-    # Immunological T1 rows + targets
-    df_im_t1 = (
-        df_im_vis[
-            (df_im_vis['Timepoint'] == 1) &
-            (df_im_vis['Patient'].isin(model_patients))
-        ]
-        .copy()
-        .reset_index(drop=True)
-    )
-    df_im_t1 = df_im_t1.merge(
-        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
-        on='Patient', how='left'
-    )
-
-    # Clinical T1 rows + targets
-    df_cl_t1 = (
-        df_cl_mod[
-            (df_cl_mod['Timepoint'] == 1) &
-            (df_cl_mod['Patient'].isin(model_patients))
-        ]
-        .copy()
-        .reset_index(drop=True)
-    )
-    df_cl_t1 = df_cl_t1.merge(
-        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
-        on='Patient', how='left'
-    )
-
-    # Inner join on Patient + Timepoint; duplicate feature cols get _im/_cl suffixes
-    df_combined = df_im_t1.merge(
-        df_cl_t1,
-        on=['Patient', 'Timepoint'], how='inner',
-        suffixes=('_im', '_cl')
-    )
-
-    # Drop _im copies of target cols; rename _cl copies to clean names
-    df_combined = (
-        df_combined
-        .drop(columns=['pain_scale_reduction_im', 'pain_reduction_pct_im'], errors='ignore')
-        .rename(columns={
-            'pain_scale_reduction_cl': 'pain_scale_reduction',
-            'pain_reduction_pct_cl':   'pain_reduction_pct',
-        })
-    )
-
-    print(f"\Tuned Modeling Combined T1 dataset: {df_combined.shape}, "
-          f"patients: {df_combined['Patient'].nunique()}")
-
-    return df_combined
-
 
 def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_state=42):
     """Advanced CatBoostRegressor with nested CV and Optuna hyperparameter tuning.
@@ -435,15 +524,17 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
     except ImportError:
         from optuna_integration import OptunaSearchCV
 
-    # Build the exclusion set — identical logic to baseline
-    always_exclude = [
-        'Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint',
-        'pain_scale',
-        'pain_scale_t2',
-        'pain_scale_reduction',
-        'pain_reduction_pct',
-    ]
-    exclude = set(always_exclude + [target_col])
+    # Build the exclusion set — same pattern-based logic as run_catboost_regressor.
+    # ID columns are always excluded; any column whose name contains a leaky
+    # pattern substring (CL_MODEL_LEAKY_PATTERNS) is also excluded, so all
+    # derived outcome columns (pain_reduction, pain_reduction_pct, response_*, …)
+    # are removed regardless of which target_col is passed in.
+
+    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_patterns = CL_MODEL_LEAKY_PATTERNS  # ['response', 'improvement_percent', 'pain_reduction']
+    leaky_cols = [c for c in df_combined.columns
+                  if any(pat in c for pat in leaky_patterns)]
+    exclude = set(id_cols) | set(leaky_cols) | {target_col}
 
     # Subset features and target; drop rows with NaN target
     feature_cols = [c for c in df_combined.columns if c not in exclude]
@@ -467,7 +558,7 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
 
     # Outer and inner CV splitters
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state) # try 25 repeats!
 
     # Optuna hyperparameter search space for CatBoost
     param_distributions = {
@@ -481,6 +572,7 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
 
     fold_results   = []
     best_params_list = []
+
     # Show each Optuna trial so progress is visible during long runs
     optuna.logging.set_verbosity(optuna.logging.INFO)
 

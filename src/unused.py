@@ -751,5 +751,125 @@ for t in timepoints:
     print(f"Top 10 contributing variables to PC2 for Timepoint {t}:")
     print(loading_scores[1].abs().sort_values(ascending=False).head(10))
     print("\n")
-    
-       
+
+
+
+#%% Old modeling dataset prep functions (replaced by construct_datasets_targets + create_model_datasets)
+
+
+def prepare_baseline_datasets(df_im_vis, df_cl_bcat, pain_targets):
+    """Build the three T1 modeling datasets for baseline CatBoost (old version).
+
+    Replaced by construct_datasets_targets() + create_model_datasets().
+    Kept here for reference.
+    """
+    model_patients = set(pain_targets['Patient'].values)
+
+    df_im_raw_t1 = (
+        df_im_vis[
+            (df_im_vis['Timepoint'] == 1) &
+            (df_im_vis['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_im_raw_t1 = df_im_raw_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    df_cl_bcat_t1 = (
+        df_cl_bcat[
+            (df_cl_bcat['Timepoint'] == 1) &
+            (df_cl_bcat['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_cl_bcat_t1 = df_cl_bcat_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    df_bcat_combined_t1 = df_im_raw_t1.merge(
+        df_cl_bcat_t1,
+        on=['Patient', 'Timepoint'], how='inner',
+        suffixes=('_im', '_cl')
+    )
+
+    return df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1
+
+
+def run_baseline_catboost(df_im_raw_t1, df_cl_bcat_t1, df_bcat_combined_t1):
+    """Run baseline CatBoost on three datasets (old version).
+
+    Replaced by direct calls to run_catboost_regressor() in results.py.
+    Kept here for reference.
+    """
+    import model as _model
+    results     = {}
+    shap_values = {}
+
+    for target in ['pain_scale_reduction', 'pain_reduction_pct']:
+        res_im,   model_im,   X_im,   ypred_im   = _model.run_catboost_regressor(
+            df_im_raw_t1,       target, "Immunological (raw T1)")
+        res_cl,   model_cl,   X_cl,   ypred_cl   = _model.run_catboost_regressor(
+            df_cl_bcat_t1,      target, "Clinical (raw T1)")
+        res_comb, model_comb, X_comb, ypred_comb = _model.run_catboost_regressor(
+            df_bcat_combined_t1, target, "Combined (raw T1)")
+
+        results[target] = {
+            'Immunological': (res_im,   model_im,   X_im,   ypred_im),
+            'Clinical':      (res_cl,   model_cl,   X_cl,   ypred_cl),
+            'Combined':      (res_comb, model_comb, X_comb, ypred_comb),
+        }
+    return results, shap_values
+
+
+def prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets):
+    """Build combined T1 dataset for advanced CatBoost (old version).
+
+    Replaced by construct_datasets_targets() + create_model_datasets().
+    Kept here for reference.
+    """
+    model_patients = set(pain_targets['Patient'].values)
+
+    df_im_t1 = (
+        df_im_vis[
+            (df_im_vis['Timepoint'] == 1) &
+            (df_im_vis['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_im_t1 = df_im_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    df_cl_t1 = (
+        df_cl_mod[
+            (df_cl_mod['Timepoint'] == 1) &
+            (df_cl_mod['Patient'].isin(model_patients))
+        ]
+        .copy()
+        .reset_index(drop=True)
+    )
+    df_cl_t1 = df_cl_t1.merge(
+        pain_targets[['Patient', 'pain_scale_reduction', 'pain_reduction_pct']],
+        on='Patient', how='left'
+    )
+
+    df_combined = df_im_t1.merge(
+        df_cl_t1, on=['Patient', 'Timepoint'], how='inner',
+        suffixes=('_im', '_cl')
+    )
+    df_combined = (
+        df_combined
+        .drop(columns=['pain_scale_reduction_im', 'pain_reduction_pct_im'], errors='ignore')
+        .rename(columns={
+            'pain_scale_reduction_cl': 'pain_scale_reduction',
+            'pain_reduction_pct_cl':   'pain_reduction_pct',
+        })
+    )
+    return df_combined
