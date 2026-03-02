@@ -223,15 +223,16 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     print(f"    Leaky metadata cols     : {sorted(cl_leaky)}")
     print(f"    Clinical features kept  : {len(cl_feat_cols)}")
 
-    # ── TARGETS: exclude the raw post-treatment value (leaky) before merging ────
+    # ── TARGETS: only keep computed reduction columns (no raw pain values) ────────
 
-    # {col}_t{t_b} is the observed outcome at T_b — always leaky when the target
-    # is the T_a → T_b change. All other target columns (baseline T_a value and
-    # computed reductions) are kept and will be excluded by run_catboost_regressor
-    # if they appear leaky relative to the chosen target_col.
-    leaky_raw_tb  = [c for c in targets.columns if c.endswith(f'_t{t_b}')]
-    target_merge  = ['Patient'] + [c for c in targets.columns
-                                   if c != 'Patient' and c not in leaky_raw_tb]
+    # Exclude both raw timepoint values (_t{t_a} and _t{t_b}) — the baseline
+    # pain value (_t{t_a}) is a pain-level feature and must not be a model input;
+    # the post-treatment value (_t{t_b}) is always leaky. Only the computed
+    # reduction columns (_reduction, _reduction_pct) are merged in.
+    raw_tp_cols  = [c for c in targets.columns
+                    if c.endswith(f'_t{t_a}') or c.endswith(f'_t{t_b}')]
+    target_merge = ['Patient'] + [c for c in targets.columns
+                                  if c != 'Patient' and c not in raw_tp_cols]
 
     # ── MERGE into final datasets ─────────────────────────────────────────────
 

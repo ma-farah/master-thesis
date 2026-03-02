@@ -72,7 +72,7 @@ im_rv2_df = explore.rv2_matrix(
     timepoints=[1, 2, 3, 4, 5],
     id_cols=_im_id_cols,
     name='Immunological',
-    # feat_cols=None → uses all non-id columns (immunological is all numeric)
+    # feat_cols=None uses all non-id columns (immunological is all numeric)
 )
 
 
@@ -233,7 +233,9 @@ TableReport(df_cl_vis)
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------
 
-# cl id cols
+_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+_cl_num_cols = [c for c in df_cl_vis.columns
+                if c not in _cl_id_cols and df_cl_vis[c].dtype == 'float64']
 
 print('\nStep 5a: EDA — Pearson correlation (clinical, float64 features)')
 cl_pearson_matrix, cl_pearson_pairs = explore.pearson_correlation(
@@ -367,7 +369,6 @@ pain_targets = model.construct_datasets_targets(df_cl_vis, 'pain_scale', [1, 2])
 # These serve as alternative regression targets; distributions shown below.
 targets_daytime    = model.construct_datasets_targets(df_cl_vis, 'pain_daytime',    [1, 2])
 targets_under_load = model.construct_datasets_targets(df_cl_vis, 'pain_under_load', [1, 2])
-targets_at_rest    = model.construct_datasets_targets(df_cl_vis, 'pain_at_rest',    [1, 2])
 
 
 #%%---------- Step 8b — Target distributions ----------------------------------
@@ -379,7 +380,6 @@ _target_frames = {
     'pain_scale':      pain_targets,
     'pain_daytime':    targets_daytime,
     'pain_under_load': targets_under_load,
-    'pain_at_rest':    targets_at_rest,
 }
 
 fig, axes = plt.subplots(2, len(_target_frames), figsize=(5 * len(_target_frames), 8))
@@ -420,50 +420,48 @@ print('#'*60)
 
 print('\nStep 9: Creating model datasets (immunological T1−T2 differences)')
 
-# create_model_datasets returns:
-#   df_immu_alone : immu difference features + targets
-#   df_combined   : immu difference features + clinical baseline features + targets
-# Only patients with immu measurements at BOTH T1 and T2 are included.
-df_immu_alone, df_combined = model.create_model_datasets(
-    df_cl_vis, df_im_vis, pain_targets, timepoints=[1, 2]
-)
-
-
-#%%---------- Step 10 — Run baseline CatBoost (both datasets, primary target) -
-
-print('\nStep 10: Running baseline CatBoost — pain_reduction_pct')
-
-_primary_target = 'pain_reduction_pct'
-# rename
-res_immu, model_immu, X_immu, ypred_immu = model.run_catboost_regressor(
-    df_immu_alone, _primary_target, 'Immunological T1−T2 diff')
-
-res_comb, model_comb, X_comb, ypred_comb = model.run_catboost_regressor(
-    df_combined, _primary_target, 'Combined T1−T2 diff')
-
-model.print_regression_summary(
-    {'Immunological': res_immu, 'Combined': res_comb},
-    _primary_target
-)
-
-# SHAP for both baseline datasets
-baseline_shap_immu = model.plot_shap_regressor(
-    model_immu, X_immu, f'Baseline Immunological — {_primary_target}')
-baseline_shap_comb = model.plot_shap_regressor(
-    model_comb, X_comb, f'Baseline Combined — {_primary_target}')
-
-# 2D density heatmap: predicted vs actual (regression equivalent of confusion matrix)
-_y_true_immu = df_immu_alone[_primary_target].dropna().reset_index(drop=True)
-_y_true_comb = df_combined[_primary_target].dropna().reset_index(drop=True)
-model.plot_prediction_heatmap(
-    _y_true_immu, ypred_immu.dropna(), f'Baseline Immunological — {_primary_target}')
-model.plot_prediction_heatmap(
-    _y_true_comb, ypred_comb.dropna(), f'Baseline Combined — {_primary_target}')
-
-baseline_results = {
-    'Immunological': (res_immu, model_immu, X_immu, ypred_immu),
-    'Combined':      (res_comb, model_comb, X_comb, ypred_comb),
+# Build one (df_immu_alone, df_combined) pair per target.
+# pain_reduction and pain_reduction_pct share pain_targets (same patients/dataset);
+# the advanced model (Step 11) uses pain_reduction_pct from that same df_combined.
+_baseline_targets = {
+    'pain_reduction':            pain_targets,
+    'pain_daytime_reduction':    targets_daytime,
+    'pain_under_load_reduction': targets_under_load,
 }
+
+_model_datasets = {}
+for _tgt, _tdf in _baseline_targets.items():
+    _df_immu, _df_comb = model.create_model_datasets(
+        df_cl_vis, df_im_vis, _tdf, timepoints=[1, 2]
+    )
+    _model_datasets[_tgt] = (_df_immu, _df_comb)
+
+TableReport(_model_datasets['pain_reduction'][0], max_plot_columns=180)
+TableReport(_model_datasets['pain_reduction'][1], max_plot_columns=180)
+
+
+#%%---------- Step 10 — Run baseline CatBoost (all targets, no SHAP) ----------
+
+print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_daytime_reduction, pain_under_load_reduction')
+
+baseline_results = {}
+for _tgt, (_df_immu, _df_comb) in _model_datasets.items():
+    _res_immu, _mdl_immu, _X_immu, _ypred_immu = model.run_catboost_regressor(
+        _df_immu, _tgt, 'Immunological T1−T2 diff')
+    _res_comb, _mdl_comb, _X_comb, _ypred_comb = model.run_catboost_regressor(
+        _df_comb, _tgt, 'Combined T1−T2 diff')
+    baseline_results[_tgt] = {
+        'Immunological': (_res_immu, _mdl_immu, _X_immu, _ypred_immu),
+        'Combined':      (_res_comb, _mdl_comb, _X_comb, _ypred_comb),
+    }
+
+for _tgt, _ds in baseline_results.items():
+    model.print_regression_summary(
+        {ds: res[0] for ds, res in _ds.items()}, _tgt)
+
+
+
+# SHAP / Heatmaps:
 
 
 #%%########## ADVANCED MODELS ##################################################
@@ -477,10 +475,14 @@ print('#'*60)
 
 print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — combined dataset only')
 
-# Advanced modeling uses df_combined (immu T1-T2 diffs + clinical baseline)
-# No separate immunological-only run for advanced — combined dataset only.
+# Advanced modeling uses the combined dataset for pain_reduction_pct (primary target).
+# pain_reduction_pct is produced alongside pain_reduction in pain_targets, so it
+# is already present in _model_datasets['pain_reduction'][1].
+_primary_target = 'pain_reduction_pct'
+_df_combined_adv = _model_datasets['pain_reduction'][1]
+
 adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_catboost(
-    df_combined,
+    _df_combined_adv,
     target_col=_primary_target,
 )
 
@@ -493,7 +495,7 @@ adv_shap = model.plot_shap_regressor(
     adv_model, adv_X, f'Advanced CatBoost — {_primary_target}')
 
 # 2D density heatmap for advanced model
-_y_true_adv = df_combined[_primary_target].dropna().reset_index(drop=True)
+_y_true_adv = _df_combined_adv[_primary_target].dropna().reset_index(drop=True)
 model.plot_prediction_heatmap(
     _y_true_adv, adv_ypred.dropna(), f'Advanced CatBoost — {_primary_target}')
 
