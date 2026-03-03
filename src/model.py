@@ -13,16 +13,11 @@ import shap
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Pain questionnaire columns are potential regression targets, not model features.
-# create_model_datasets() strips them from the clinical feature set automatically.
-CL_PAIN_QUESTIONNAIRE_COLS = [
-    'pain_under_load', 'pain_at_rest', 'pain_daytime',
-    'pain_night', 'morning_stiffness', 'pain_scale',
-]
-
-# Substrings that flag a column as a leaky outcome variable in clinical data.
-# Any clinical column whose name contains one of these strings is excluded from
-# model features because it encodes treatment response or derived outcomes.
+# Substrings that flag a column as a leaky outcome variable.
+# Used in run_catboost_regressor and run_advanced_catboost to exclude derived
+# outcome columns (pain_reduction, pain_reduction_pct, response_*, …) that enter
+# the dataset through the targets merge.  Clinical pain questionnaire cols are
+# filtered upstream in results.py Step 7 (df_cl_mod) before reaching these functions.
 CL_MODEL_LEAKY_PATTERNS = ['response', 'improvement_percent', 'pain_reduction']
 
 
@@ -134,9 +129,9 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     are eligible.
 
     Clinical features: T_a (baseline) rows only — the forward-filled patient-level
-    variables such as age, gender, diagnosis. Pain questionnaire columns
-    (CL_PAIN_QUESTIONNAIRE_COLS) and leaky metadata columns (CL_MODEL_LEAKY_PATTERNS)
-    are excluded automatically.
+    variables such as age, gender, diagnosis. Pain questionnaire columns and leaky
+    metadata columns are expected to be already removed from df_cl (df_cl_mod) before
+    being passed here (done in results.py Step 7); only ID columns are excluded here.
 
     Target columns merged: all columns from the targets DataFrame EXCEPT the raw
     post-treatment value ({col}_t{t_b}), which is always leaky. The baseline raw
@@ -205,12 +200,11 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     # Keep only Patient + difference columns (discard raw T_a and T_b feature columns)
     df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
 
-    # ── CLINICAL: T_a baseline rows only, pain questionnaire + leaky cols removed ─
+    # ── CLINICAL: T_a baseline rows only ─────────────────────────────────────────
+    # df_cl (df_cl_mod) is pre-filtered: pain questionnaire cols and leaky metadata
+    # cols were already removed in results.py Step 7. Only exclude ID cols here.
 
-    cl_leaky    = [c for c in df_cl.columns
-                   if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
-    cl_exclude  = id_cols | set(CL_PAIN_QUESTIONNAIRE_COLS) | set(cl_leaky)
-    cl_feat_cols = [c for c in df_cl.columns if c not in cl_exclude]
+    cl_feat_cols = [c for c in df_cl.columns if c not in id_cols]
 
     df_cl_t1 = (
         df_cl[df_cl['Timepoint'] == t_a][['Patient'] + cl_feat_cols]
@@ -218,10 +212,7 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
         .reset_index(drop=True)
     )
 
-    print(f"\n  Clinical features excluded:")
-    print(f"    Pain questionnaire cols : {CL_PAIN_QUESTIONNAIRE_COLS}")
-    print(f"    Leaky metadata cols     : {sorted(cl_leaky)}")
-    print(f"    Clinical features kept  : {len(cl_feat_cols)}")
+    print(f"\n  Clinical features: {len(cl_feat_cols)} (pain/leaky cols pre-filtered upstream)")
 
     # ── TARGETS: only keep computed reduction columns (no raw pain values) ────────
 
