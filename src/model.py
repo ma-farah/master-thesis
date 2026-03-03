@@ -554,12 +554,11 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
 
     # Optuna hyperparameter search space for CatBoost
     param_distributions = {
-        'depth':               optuna.distributions.IntDistribution(3, 8),
+        'depth':               optuna.distributions.IntDistribution(3, 10),
         'learning_rate':       optuna.distributions.FloatDistribution(1e-3, 0.3, log=True),
-        'l2_leaf_reg':         optuna.distributions.FloatDistribution(1e-2, 10.0, log=True),
+        'l2_leaf_reg':         optuna.distributions.FloatDistribution(1, 10.0, log=True),
         'bagging_temperature': optuna.distributions.FloatDistribution(0.0, 1.0),
-        'random_strength':     optuna.distributions.FloatDistribution(0.0, 10.0),
-        'min_data_in_leaf':    optuna.distributions.IntDistribution(1, 30),
+        'random_strength':     optuna.distributions.FloatDistribution(0.0, 10.0)
     }
 
     fold_results   = []
