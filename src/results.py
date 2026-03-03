@@ -503,7 +503,6 @@ print('\n' + '#'*60)
 print('  ADVANCED CATBOOST MODEL (Nested CV + Optuna)')
 print('#'*60)
 
-
 #%%---------- Step 11 — Advanced CatBoost on combined dataset -----------------
 
 print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — combined dataset only')
