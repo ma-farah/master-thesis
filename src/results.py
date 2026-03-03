@@ -220,15 +220,55 @@ explore.dataset_overview(df_cl, name='Clinical', patient_col='Patient',
 #%%---------- Step 6 — Clean clinical dataset ---------------------------------
 
 print('\nStep 6: Cleaning clinical dataset')
-df_cl_clean, df_cl_bcat, df_cl_vis = preprocess.clean_cl(df_cl)
+df_cl_vis = preprocess.clean_cl(df_cl)
 
-# need to remove patients with missing questionarre data: 149 rows!
-
-print('Tablereport of Clinical dataset (before dropping 25% nan)')
-TableReport(df_cl_bcat)
-
-print('Tablereport of Clinical dataset (after dropping 25% nan)')
+print('TableReport of cleaned clinical dataset (all columns, for EDA):')
 TableReport(df_cl_vis)
+
+
+#%%---------- Step 5_stats — Clinical descriptive statistics ------------------
+
+print('\nStep 5_stats: Clinical descriptive statistics and distributions')
+
+_cl_t1 = df_cl_vis[df_cl_vis['Timepoint'] == 1].copy()
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+_mako3 = sns.color_palette('mako', 3)
+
+# Age
+sns.histplot(_cl_t1['age_at_start'].dropna(), kde=True, ax=axes[0],
+             color=_mako3[1], bins=15)
+axes[0].set_title('Age distribution (T1)')
+axes[0].set_xlabel('Age')
+axes[0].set_ylabel('Count')
+
+# Gender
+_gender_counts = _cl_t1['gender'].value_counts()
+axes[1].bar(_gender_counts.index.astype(str), _gender_counts.values,
+            color=_mako3[:len(_gender_counts)])
+axes[1].set_title('Gender distribution (T1)')
+axes[1].set_ylabel('Count')
+
+# Diagnosis
+_diag_counts = _cl_t1['diagnosis'].value_counts()
+axes[2].barh(_diag_counts.index.astype(str), _diag_counts.values,
+             color=_mako3[1])
+axes[2].set_title('Diagnosis distribution (T1)')
+axes[2].set_xlabel('Count')
+axes[2].invert_yaxis()
+
+plt.tight_layout()
+plt.show()
+
+# Pain scale per timepoint
+fig, ax = plt.subplots(figsize=(8, 4))
+sns.boxplot(data=df_cl_vis[df_cl_vis['pain_scale'].notna()],
+            x='Timepoint', y='pain_scale', ax=ax, palette='mako')
+ax.set_title('Pain scale distribution per timepoint (T1–T5)')
+ax.set_xlabel('Timepoint')
+ax.set_ylabel('Pain scale (1–10)')
+plt.tight_layout()
+plt.show()
 
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------
@@ -313,56 +353,49 @@ explore.pca_colored(
 )
 
 
-#%%---------- Step 5f — Imputation (clinical, for PyOD) ----------------------
 
-print('\nStep 5f: Imputing clinical dataset (miceforest, all features)')
-_cl_imp_id_cols = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+#%%---------- Step 7 — df_cl_mod: modeling-only copy -------------------------
 
-df_cl_imputed = preprocess.impute_miceforest(
-    df_cl_vis,
-    id_cols=_cl_imp_id_cols,
-    name='Clinical',
-    num_datasets=5,
-    iterations=10,
-    mean_match_candidates=0,   # KD-tree mean matching fails for mixed-type data
+print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, leaky cols)')
+
+# Take copy of df_cl_vis (contains all columns) 
+df_cl_mod = df_cl_vis.copy()
+
+# Drop columns with >25% NaN (reduce features before modeling)
+_mod_protect = ['Patient', 'Timepoint', 'pain_scale', 'date', 'measurement_timepoint']
+df_cl_mod = preprocess.drop_high_nan_columns(
+    df_cl_mod, threshold=0.25, exclude_cols=_mod_protect,
+    check_per_timepoint=True,
 )
 
+# Remove rows where pain_scale is NaN (because it will be used as target=)
+df_cl_mod = preprocess.remove_no_pain_scale_rows(df_cl_mod)
 
-#%%---------- Step 5g — PyOD outlier detection (clinical) — PLACEHOLDER ------
+# Drop pain questionnaire columns (not model features — targets are built separately)
+_pain_cols = [c for c in df_cl_mod.columns
+              if c in set(preprocess.CL_PAIN_QUESTIONNAIRE_COLS)]
+df_cl_mod = df_cl_mod.drop(columns=_pain_cols)
 
-print('\nStep 5g: PyOD outlier detection — clinical dataset (Zryan approach)')
-# TODO: run after confirming imputed clinical dataset is correct
-# _cl_feat_cols = [c for c in df_cl_imputed.columns if c not in _cl_imp_id_cols]
-# no_od_df_cl, outlier_candidates_cl = explore.run_pyod_zryan(
-#     df_cl_imputed,
-#     feature_cols=_cl_feat_cols,
-#     patient_col='Patient',
-#     timepoint_col='Timepoint',
-#     contamination=0.1,
-#     name='Clinical',
-# )
-
-
-#%%---------- Step 7 — df_cl_mod: drop leaky cols + remove no-pain rows ------
-
-print('\nStep 7: Creating df_cl_mod (drop leaky columns + remove NaN pain_scale rows)')
-_leaky_cols = [c for c in df_cl_vis.columns
+# Drop other leaky columns (response, improvement_percent, etc.)
+_leaky_cols = [c for c in df_cl_mod.columns
                if any(pat in c for pat in preprocess.CL_LEAKY_PATTERNS)]
-print(f"  Dropping leaky/metadata columns ({len(_leaky_cols)}): {_leaky_cols}")
+df_cl_mod = df_cl_mod.drop(columns=_leaky_cols)
 
-df_cl_vis = df_cl_vis.drop(columns=_leaky_cols)
-df_cl_vis = preprocess.remove_no_pain_scale_rows(df_cl_vis)
-
-df_cl_mod = df_cl_vis.copy()
+print(f"  df_cl_vis : {df_cl_vis.shape}  (all columns, for EDA)")
+print(f"  df_cl_mod : {df_cl_mod.shape}  (modeling only)")
+print(f"  Dropped pain cols  : {_pain_cols}")
+print(f"  Dropped leaky cols : {_leaky_cols}")
 
 
 #%%---------- Step 8 — Construct regression targets from clinical data --------
 
 print('\nStep 8: Constructing regression targets from clinical data')
+# use df_cl_cis as reference because we have all columns.
 
 # Primary target: pain_scale reduction (T1 → T2)
 # construct_datasets_targets returns only patients with non-NaN values at both
 # timepoints and in all computed columns, so no further NaN filtering is needed.
+# Targets are built from df_cl_vis (still contains pain columns)
 pain_targets = model.construct_datasets_targets(df_cl_vis, 'pain_scale', [1, 2])
 
 # Additional pain questionnaire targets (T1 → T2 differences)
@@ -432,7 +465,7 @@ _baseline_targets = {
 _model_datasets = {}
 for _tgt, _tdf in _baseline_targets.items():
     _df_immu, _df_comb = model.create_model_datasets(
-        df_cl_vis, df_im_vis, _tdf, timepoints=[1, 2]
+        df_cl_mod, df_im_vis, _tdf, timepoints=[1, 2]
     )
     _model_datasets[_tgt] = (_df_immu, _df_comb)
 
@@ -461,7 +494,7 @@ for _tgt, _ds in baseline_results.items():
 
 
 
-# SHAP / Heatmaps:
+# SHAP / Heatmaps?
 
 
 #%%########## ADVANCED MODELS ##################################################

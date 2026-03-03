@@ -61,24 +61,6 @@ def drop_columns(df, columns, verbose=True):
     return df.drop(columns=present)
 
 
-def drop_rows_by_index(df, indices, verbose=True):
-    """Drop rows by explicit index labels, ignoring any that are absent.
-
-    Parameters
-    ----------
-    df      : pd.DataFrame
-    indices : list of int/label  — index values to drop
-    verbose : bool
-
-    Returns
-    -------
-    pd.DataFrame with rows removed (copy)
-    """
-    present = [i for i in indices if i in df.index]
-    if verbose:
-        print(f"  Dropping {len(present)} rows at index: {present}")
-    return df.drop(index=present)
-
 
 def drop_high_nan_columns(df, threshold=0.25, exclude_cols=None,
                            timepoint_col='Timepoint', check_per_timepoint=True,
@@ -1512,9 +1494,9 @@ def clean_cl(df_cl, verbose=True):
         are caught too). Flag questionnaire_missing=True for rows where
         pain_under_load → pain_points are all NaN.
     8.  Fix dtypes  (fix_dtypes_cl)
-    9.  Make baseline CatBoost copy  (df_cl_bcat)
-    10. Drop columns with >25% NaN  (drop_high_nan_columns)
-    11. Make EDA/visualization copy  (df_cl_vis)
+    9.  Return df_cl_vis with ALL columns (no >25% NaN drop).
+        Modeling-specific reductions (>25% NaN drop, pain cols, leaky cols)
+        are applied in results.py when creating df_cl_mod.
 
     Parameters
     ----------
@@ -1523,9 +1505,7 @@ def clean_cl(df_cl, verbose=True):
 
     Returns
     -------
-    df_cl_clean : cleaned dataset (after dtype fix, before >25% NaN drop)
-    df_cl_bcat  : copy taken before >25% NaN drop (for baseline CatBoost)
-    df_cl_vis   : copy taken after  >25% NaN drop (for EDA / visualization)
+    df_cl_vis : fully cleaned dataset, all columns, for EDA and visualization.
     """
     if verbose:
         print("\n  [1] Forward-filling patient-level columns + extracting Timepoint")
@@ -1555,16 +1535,8 @@ def clean_cl(df_cl, verbose=True):
         print("\n  [7] Replacing German NaN markers")
     replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=verbose)
 
-    # [7b] — Drop empty rows + flag missing questionnaire data
+    # [7b] — Drop empty rows (no questionarre data)
     # Runs AFTER NaN marker replacement so k.A./n.D. entries are already NaN.
-    #
-    # Drop condition (either is sufficient):
-    #   (a) date is NaN  — belt-and-suspenders over step [4]; also catches any
-    #       edge cases where a date became NaN after parsing.
-    #   (b) every column from months_last_visit onwards is NaN — patient had a
-    #       valid date but provided no clinical data at all (or all entries
-    #       were k.A./n.D. markers now converted to NaN).
-    # --- Drop rows with missing date or no clinical data ---
 
     drop_mask = pd.Series(False, index=df_cl_clean.index)
 
@@ -1600,27 +1572,15 @@ def clean_cl(df_cl, verbose=True):
         print("\n  [8] Fixing dtypes")
     df_cl_clean = fix_dtypes_cl(df_cl_clean, verbose=verbose)
 
-    # 9 — baseline CatBoost copy (before >25% NaN drop)
-    df_cl_bcat = df_cl_clean.copy()
-
-    # 10 — drop high-NaN columns
-    if verbose:
-        print("\n  [10] Dropping columns with >25% NaN")
-    _exclude = ['Patient', 'Timepoint', 'pain_scale', 'date', 'measurement_timepoint']
-    df_cl_clean = drop_high_nan_columns(
-        df_cl_clean, threshold=0.25, exclude_cols=_exclude,
-        check_per_timepoint=True, verbose=verbose,
-    )
-
-    # 11 — EDA/visualization copy (after >25% NaN drop)
+    # 9 — visualization/EDA copy: all columns, no >25% NaN drop yet.
+    # Modeling-specific reductions (>25% NaN drop, pain cols, leaky cols)
+    # are applied in results.py when creating df_cl_mod.
     df_cl_vis = df_cl_clean.copy()
 
     if verbose:
-        print(f"\n  df_cl_clean : {df_cl_clean.shape}")
-        print(f"  df_cl_bcat  : {df_cl_bcat.shape}")
-        print(f"  df_cl_vis   : {df_cl_vis.shape}")
+        print(f"\n  df_cl_vis : {df_cl_vis.shape}  (all columns, ready for EDA)")
 
-    return df_cl_clean, df_cl_bcat, df_cl_vis
+    return df_cl_vis
 
 
 

@@ -1,10 +1,7 @@
 # imports
 import pandas as pd
 import numpy as np
-import re
 from pathlib import Path
-import hoggorm as ho
-import prince as ps
 import matplotlib.pyplot as plt
 import seaborn as sns
 import phik
