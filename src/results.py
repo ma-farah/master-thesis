@@ -230,29 +230,29 @@ TableReport(df_cl_vis)
 
 print('\nStep 5_stats: Clinical descriptive statistics and distributions')
 
-_cl_t1 = df_cl_vis[df_cl_vis['Timepoint'] == 1].copy()
+cl_t1 = df_cl_vis[df_cl_vis['Timepoint'] == 1].copy()
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-_mako3 = sns.color_palette('mako', 3)
+mako3 = sns.color_palette('mako', 3)
 
 # Age
-sns.histplot(_cl_t1['age_at_start'].dropna(), kde=True, ax=axes[0],
-             color=_mako3[1], bins=15)
+sns.histplot(cl_t1['age_at_start'].dropna(), kde=True, ax=axes[0],
+             color=mako3[1], bins=15)
 axes[0].set_title('Age distribution (T1)')
 axes[0].set_xlabel('Age')
 axes[0].set_ylabel('Count')
 
 # Gender
-_gender_counts = _cl_t1['gender'].value_counts()
-axes[1].bar(_gender_counts.index.astype(str), _gender_counts.values,
-            color=_mako3[:len(_gender_counts)])
+gender_counts = cl_t1['gender'].value_counts()
+axes[1].bar(gender_counts.index.astype(str), gender_counts.values,
+            color=mako3[:len(gender_counts)])
 axes[1].set_title('Gender distribution (T1)')
 axes[1].set_ylabel('Count')
 
 # Diagnosis
-_diag_counts = _cl_t1['diagnosis'].value_counts()
-axes[2].barh(_diag_counts.index.astype(str), _diag_counts.values,
-             color=_mako3[1])
+diag_counts = cl_t1['diagnosis'].value_counts()
+axes[2].barh(diag_counts.index.astype(str), diag_counts.values,
+             color=mako3[1])
 axes[2].set_title('Diagnosis distribution (T1)')
 axes[2].set_xlabel('Count')
 axes[2].invert_yaxis()
@@ -273,14 +273,14 @@ plt.show()
 
 #%%---------- Step 5a — Pearson correlation (clinical) ------------------------
 
-_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
-_cl_num_cols = [c for c in df_cl_vis.columns
-                if c not in _cl_id_cols and df_cl_vis[c].dtype == 'float64']
+cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+cl_num_cols = [c for c in df_cl_vis.columns
+                if c not in cl_id_cols and df_cl_vis[c].dtype == 'float64']
 
 print('\nStep 5a: EDA — Pearson correlation (clinical, float64 features)')
 cl_pearson_matrix, cl_pearson_pairs = explore.pearson_correlation(
     df_cl_vis,
-    id_cols=_cl_id_cols,
+    id_cols=cl_id_cols,
     name='Clinical',
     n_top=40,
 )
@@ -291,8 +291,8 @@ cl_pearson_matrix, cl_pearson_pairs = explore.pearson_correlation(
 print('\nStep 5a (phik): Phik correlation (clinical, all feature types)')
 cl_phik_matrix, cl_phik_pairs = explore.phik_correlation(
     df_cl_vis,
-    id_cols=_cl_id_cols,
-    num_cols=_cl_num_cols,
+    id_cols=cl_id_cols,
+    num_cols=cl_num_cols,
     name='Clinical',
     n_top=40,
 )
@@ -304,9 +304,9 @@ print('\nStep 5b: RV2 matrix (clinical)')
 cl_rv2_df = explore.rv2_matrix(
     df_cl_vis,
     timepoints=[1, 2, 3, 4, 5],
-    id_cols=_cl_id_cols,
+    id_cols=cl_id_cols,
     name='Clinical',
-    feat_cols=_cl_num_cols,   # clinical RV2 uses numeric columns only
+    feat_cols=cl_num_cols,   # clinical RV2 uses numeric columns only
 )
 
 
@@ -316,9 +316,9 @@ print('\nStep 5c: PCA per timepoint T1–T5 (clinical)')
 cl_pca_store = explore.pca_per_timepoint(
     df_cl_vis,
     timepoints=[1, 2, 3, 4, 5],
-    id_cols=_cl_id_cols,
+    id_cols=cl_id_cols,
     name='Clinical',
-    feat_cols=_cl_num_cols,
+    feat_cols=cl_num_cols,
     ncomp=10,
 )
 
@@ -326,7 +326,7 @@ cl_pca_store = explore.pca_per_timepoint(
 #%%---------- Step 5d — PCA score plots coloured by clinical metadata ---------
 
 print('\nStep 5d: PCA coloured by gender / pain_scale / response_category / diagnosis (clinical)')
-_cl_color_configs = [
+cl_color_configs = [
     ('gender',            'categorical', 'mako'),
     ('pain_scale',        'continuous',  'mako'),
     ('response_category', 'categorical', 'mako'),
@@ -336,7 +336,7 @@ _cl_color_configs = [
 explore.pca_colored(
     cl_pca_store,
     timepoints=[1, 2, 3, 4, 5],
-    color_configs=_cl_color_configs,
+    color_configs=cl_color_configs,
     name='Clinical',
 )
 
@@ -347,7 +347,7 @@ print('\nStep 6: Immunological PCA T1–T5 coloured by clinical categories (df_c
 explore.pca_colored(
     im_pca_store,
     timepoints=[1, 2, 3, 4, 5],
-    color_configs=_cl_color_configs,
+    color_configs=cl_color_configs,
     name='Immunological colored by Clinical',
     color_source_df=df_cl_vis,
 )
@@ -362,9 +362,9 @@ print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, le
 df_cl_mod = df_cl_vis.copy()
 
 # Drop columns with >25% NaN (reduce features before modeling)
-_mod_protect = ['Patient', 'Timepoint', 'pain_scale', 'date', 'measurement_timepoint']
+mod_protect = ['Patient', 'Timepoint', 'pain_scale', 'date', 'measurement_timepoint']
 df_cl_mod = preprocess.drop_high_nan_columns(
-    df_cl_mod, threshold=0.25, exclude_cols=_mod_protect,
+    df_cl_mod, threshold=0.25, exclude_cols=mod_protect,
     check_per_timepoint=True,
 )
 
@@ -372,25 +372,25 @@ df_cl_mod = preprocess.drop_high_nan_columns(
 df_cl_mod = preprocess.remove_no_pain_scale_rows(df_cl_mod)
 
 # Drop pain questionnaire columns (not model features — targets are built separately)
-_pain_cols = [c for c in df_cl_mod.columns
+pain_cols = [c for c in df_cl_mod.columns
               if c in set(preprocess.CL_PAIN_QUESTIONNAIRE_COLS)]
-df_cl_mod = df_cl_mod.drop(columns=_pain_cols)
+df_cl_mod = df_cl_mod.drop(columns=pain_cols)
 
 # Drop other leaky columns (response, improvement_percent, etc.)
-_leaky_cols = [c for c in df_cl_mod.columns
+leaky_cols = [c for c in df_cl_mod.columns
                if any(pat in c for pat in preprocess.CL_LEAKY_PATTERNS)]
-df_cl_mod = df_cl_mod.drop(columns=_leaky_cols)
+df_cl_mod = df_cl_mod.drop(columns=leaky_cols)
 
 print(f"  df_cl_vis : {df_cl_vis.shape}  (all columns, for EDA)")
 print(f"  df_cl_mod : {df_cl_mod.shape}  (modeling only)")
-print(f"  Dropped pain cols  : {_pain_cols}")
-print(f"  Dropped leaky cols : {_leaky_cols}")
+print(f"  Dropped pain cols  : {pain_cols}")
+print(f"  Dropped leaky cols : {leaky_cols}")
 
 
 #%%---------- Step 8 — Construct regression targets from clinical data --------
 
 print('\nStep 8: Constructing regression targets from clinical data')
-# use df_cl_cis as reference because we have all columns.
+# use df_cl_vis as reference because we have all columns.
 
 # Primary target: pain_scale reduction (T1 → T2)
 # construct_datasets_targets returns only patients with non-NaN values at both
@@ -409,16 +409,16 @@ targets_under_load = model.construct_datasets_targets(df_cl_vis, 'pain_under_loa
 print('\nStep 8b: Plotting target distributions')
 
 # Collect all reduction_pct columns across all target DataFrames for plotting
-_target_frames = {
+target_frames = {
     'pain_scale':      pain_targets,
     'pain_daytime':    targets_daytime,
     'pain_under_load': targets_under_load,
 }
 
-fig, axes = plt.subplots(2, len(_target_frames), figsize=(5 * len(_target_frames), 8))
-_colors = sns.color_palette('mako', len(_target_frames))
+fig, axes = plt.subplots(2, len(target_frames), figsize=(5 * len(target_frames), 8))
+colors = sns.color_palette('mako', len(target_frames))
 
-for col_idx, (name, tdf) in enumerate(_target_frames.items()):
+for col_idx, (name, tdf) in enumerate(target_frames.items()):
     prefix  = name.replace('_scale', '')   # matches construct_datasets_targets naming
     red_col = f'{prefix}_reduction'
     pct_col = f'{prefix}_reduction_pct'
@@ -426,14 +426,14 @@ for col_idx, (name, tdf) in enumerate(_target_frames.items()):
     # Absolute reduction
     ax0 = axes[0, col_idx]
     sns.histplot(tdf[red_col].dropna(), kde=True, ax=ax0,
-                 color=_colors[col_idx], bins=20)
+                 color=colors[col_idx], bins=20)
     ax0.set_title(f'{name}\nAbsolute reduction (T1−T2)')
     ax0.set_xlabel('Reduction')
 
     # Percent reduction
     ax1 = axes[1, col_idx]
     sns.histplot(tdf[pct_col].dropna(), kde=True, ax=ax1,
-                 color=_colors[col_idx], bins=20)
+                 color=colors[col_idx], bins=20)
     ax1.set_title(f'{name}\nPercent reduction (%)')
     ax1.set_xlabel('Reduction (%)')
 
@@ -456,21 +456,21 @@ print('\nStep 9: Creating model datasets (immunological T1−T2 differences)')
 # Build one (df_immu_alone, df_combined) pair per target.
 # pain_reduction and pain_reduction_pct share pain_targets (same patients/dataset);
 # the advanced model (Step 11) uses pain_reduction_pct from that same df_combined.
-_baseline_targets = {
+baseline_targets = {
     'pain_reduction':            pain_targets,
     'pain_daytime_reduction':    targets_daytime,
     'pain_under_load_reduction': targets_under_load,
 }
 
-_model_datasets = {}
-for _tgt, _tdf in _baseline_targets.items():
-    _df_immu, _df_comb = model.create_model_datasets(
-        df_cl_mod, df_im_vis, _tdf, timepoints=[1, 2]
+model_datasets = {}
+for tgt, tdf in baseline_targets.items():
+    df_immu, df_comb = model.create_model_datasets(
+        df_cl_mod, df_im_vis, tdf, timepoints=[1, 2]
     )
-    _model_datasets[_tgt] = (_df_immu, _df_comb)
+    model_datasets[tgt] = (df_immu, df_comb)
 
-TableReport(_model_datasets['pain_reduction'][0], max_plot_columns=180)
-TableReport(_model_datasets['pain_reduction'][1], max_plot_columns=180)
+TableReport(model_datasets['pain_reduction'][0], max_plot_columns=180)
+TableReport(model_datasets['pain_reduction'][1], max_plot_columns=180)
 
 
 #%%---------- Step 10 — Run baseline CatBoost (all targets, no SHAP) ----------
@@ -478,19 +478,19 @@ TableReport(_model_datasets['pain_reduction'][1], max_plot_columns=180)
 print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_daytime_reduction, pain_under_load_reduction')
 
 baseline_results = {}
-for _tgt, (_df_immu, _df_comb) in _model_datasets.items():
-    _res_immu, _mdl_immu, _X_immu, _ypred_immu = model.run_catboost_regressor(
-        _df_immu, _tgt, 'Immunological T1−T2 diff')
-    _res_comb, _mdl_comb, _X_comb, _ypred_comb = model.run_catboost_regressor(
-        _df_comb, _tgt, 'Combined T1−T2 diff')
-    baseline_results[_tgt] = {
-        'Immunological': (_res_immu, _mdl_immu, _X_immu, _ypred_immu),
-        'Combined':      (_res_comb, _mdl_comb, _X_comb, _ypred_comb),
+for tgt, (df_immu, df_comb) in model_datasets.items():
+    res_immu, mdl_immu, X_immu, ypred_immu = model.run_catboost_regressor(
+        df_immu, tgt, 'Immunological T1−T2 diff')
+    res_comb, mdl_comb, X_comb, ypred_comb = model.run_catboost_regressor(
+        df_comb, tgt, 'Combined T1−T2 diff')
+    baseline_results[tgt] = {
+        'Immunological': (res_immu, mdl_immu, X_immu, ypred_immu),
+        'Combined':      (res_comb, mdl_comb, X_comb, ypred_comb),
     }
 
-for _tgt, _ds in baseline_results.items():
+for tgt, ds_results in baseline_results.items():
     model.print_regression_summary(
-        {ds: res[0] for ds, res in _ds.items()}, _tgt)
+        {ds: res[0] for ds, res in ds_results.items()}, tgt)
 
 
 
@@ -510,13 +510,13 @@ print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — combined dataset on
 
 # Advanced modeling uses the combined dataset for pain_reduction_pct (primary target).
 # pain_reduction_pct is produced alongside pain_reduction in pain_targets, so it
-# is already present in _model_datasets['pain_reduction'][1].
-_primary_target = 'pain_reduction_pct'
-_df_combined_adv = _model_datasets['pain_reduction'][1]
+# is already present in model_datasets['pain_reduction'][1].
+primary_target = 'pain_reduction_pct'
+df_combined_adv = model_datasets['pain_reduction'][1]
 
 adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_catboost(
-    _df_combined_adv,
-    target_col=_primary_target,
+    df_combined_adv,
+    target_col=primary_target,
 )
 
 
@@ -525,12 +525,12 @@ adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_c
 print('\nStep 12: SHAP analysis on advanced CatBoost final model')
 
 adv_shap = model.plot_shap_regressor(
-    adv_model, adv_X, f'Advanced CatBoost — {_primary_target}')
+    adv_model, adv_X, f'Advanced CatBoost — {primary_target}')
 
 # 2D density heatmap for advanced model
-_y_true_adv = _df_combined_adv[_primary_target].dropna().reset_index(drop=True)
+y_true_adv = df_combined_adv[primary_target].dropna().reset_index(drop=True)
 model.plot_prediction_heatmap(
-    _y_true_adv, adv_ypred.dropna(), f'Advanced CatBoost — {_primary_target}')
+    y_true_adv, adv_ypred.dropna(), f'Advanced CatBoost — {primary_target}')
 
 
 print('\nStep 13: Advanced HGB (Nested CV + Optuna) — PLACEHOLDER')
