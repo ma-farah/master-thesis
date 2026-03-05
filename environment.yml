@@ -32,5 +32,6 @@ dependencies:
       - adjustText
       - six
       - git+https://github.com/khliland/missing-methods.git  # NIPALS PCA/PLS/RV2 with NaN support
+      - git+https://github.com/NMBU-Data-Science/RENT.git    # RENT feature selection (not on PyPI)
 
-  # last updated 23.02.2026
+  # last updated 05.03.2026
