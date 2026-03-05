@@ -61,6 +61,24 @@ def drop_columns(df, columns, verbose=True):
     return df.drop(columns=present)
 
 
+def drop_rows_by_index(df, indices, verbose=True):
+    """Drop rows by explicit index labels, ignoring any that are absent.
+
+    Parameters
+    ----------
+    df      : pd.DataFrame
+    indices : list of int/label  — index values to drop
+    verbose : bool
+
+    Returns
+    -------
+    pd.DataFrame with rows removed (copy)
+    """
+    present = [i for i in indices if i in df.index]
+    if verbose:
+        print(f"  Dropping {len(present)} rows at index: {present}")
+    return df.drop(index=present)
+
 
 def drop_high_nan_columns(df, threshold=0.25, exclude_cols=None,
                            timepoint_col='Timepoint', check_per_timepoint=True,
@@ -278,6 +296,8 @@ IM_CONFIRMED_OUTLIERS = [
     (159, 2),
     (109, 5),
     (266, 4),
+    (266, 4),
+    (255, 1)
 ]
 
 
@@ -362,9 +382,23 @@ CL_RENAME_MAP = {
 
 CL_CATEGORICAL_COLS = [
     'gender', 'overweight', 'pain_points', 'diagnosis',
-    'target_volume', 'filter_material',
+    'target_volume',
     'response', 'response_category',
 ]
+
+# Pain questionnaire ordinal columns (not model features — targets are built separately)
+CL_PAIN_QUESTIONNAIRE_COLS = [
+    'pain_under_load', 'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness',
+]
+
+# Radiation equipment columns — excluded from modeling (not clinically predictive)
+CL_RADIATION_EQUIPMENT_COLS = ['fha', 'ma', 'kv', 'single_fraction']
+
+# Additional columns excluded from modeling:
+# pain_scale   — baseline pain value; no pain-related features as model inputs
+# pain_points  — body location; excluded per expert decision
+# months_last_visit — symptom duration; excluded per expert decision
+CL_EXTRA_MODEL_DROP_COLS = ['pain_scale', 'pain_points', 'months_last_visit']
 
 # Column name patterns that identify leaky/metadata columns (must not be model features)
 CL_LEAKY_PATTERNS = [
@@ -1276,16 +1310,9 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         print("\n=== pain_points (after) ===")
         print(df['pain_points'].value_counts().head(20).to_dict())
 
-    # 4 — filter → filter_mm + filter_material
+    # 4 — filter: drop (not used in modeling or EDA)
     if 'filter' in df.columns:
-        if verbose:
-            print("\n=== filter (before) ===")
-            print(df['filter'].value_counts(dropna=False).to_string())
-        df = split_filter_column(df)
-        if verbose:
-            print("\n=== filter (after) ===")
-            print(f"  filter_mm      : {sorted(df['filter_mm'].dropna().unique())}")
-            print(f"  filter_material: {df['filter_material'].value_counts().to_dict()}")
+        df = df.drop(columns=['filter'])
 
     # 5 — cumulative_dose
     if 'cumulative_dose' in df.columns:
@@ -1454,27 +1481,6 @@ def fix_dtypes_cl(df_cl_clean, verbose=True):
 
     return df
 
-
-def remove_no_pain_scale_rows(df, verbose=True):
-    """Remove rows where pain_scale is NaN.
-
-    Parameters
-    ----------
-    df      : pd.DataFrame
-    verbose : bool
-
-    Returns
-    -------
-    pd.DataFrame — copy with pain_scale NaN rows removed and index reset
-    """
-    n_before        = len(df)
-    patients_before = df['Patient'].nunique()
-    result = df[df['pain_scale'].notna()].reset_index(drop=True)
-    if verbose:
-        print(f"  Dropped {n_before - len(result)} rows with NaN pain_scale "
-              f"({patients_before - result['Patient'].nunique()} patients lost)")
-        print(f"  Shape: {result.shape}, Patients: {result['Patient'].nunique()}")
-    return result
 
 
 def clean_cl(df_cl, verbose=True):

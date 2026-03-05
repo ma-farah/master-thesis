@@ -7,6 +7,7 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
+from sklearn.ensemble import HistGradientBoostingRegressor
 from catboost import CatBoostRegressor, Pool
 import shap
 
@@ -18,7 +19,7 @@ import shap
 # outcome columns (pain_reduction, pain_reduction_pct, response_*, …) that enter
 # the dataset through the targets merge.  Clinical pain questionnaire cols are
 # filtered upstream in results.py Step 7 (df_cl_mod) before reaching these functions.
-CL_MODEL_LEAKY_PATTERNS = ['response', 'improvement_percent', 'pain_reduction']
+CL_MODEL_LEAKY_PATTERNS = ['response', 'improvement_percent', '_reduction']
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -351,25 +352,21 @@ def run_catboost_regressor(df_model, target_col, name,
         model = CatBoostRegressor(
             iterations=1000,
             loss_function='RMSE',
-            custom_metric=['MAE', 'R2'],
             random_seed=random_state,
             verbose=0,
         )
         model.fit(
             Pool(X_train, y_train, cat_features=cat_cols),
-            eval_set=Pool(X_test, y_test, cat_features=cat_cols),
-            use_best_model=False,
         )
 
         preds = model.predict(X_test)
         y_pred.iloc[test_idx] = preds
 
-        # Pull CatBoost's own validation metrics from evals_result_ at the final iteration
-        val  = model.evals_result_['validation']
-        rmse = val['RMSE'][-1]
-        mae  = val['MAE'][-1]
-        r2   = val['R2'][-1]
-        mse  = rmse ** 2      # MSE is not a native CatBoost metric; derived from RMSE
+        # Compute metrics from predictions (consistent with advanced model)
+        mae  = mean_absolute_error(y_test, preds)
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        mse  = rmse ** 2
+        r2   = r2_score(y_test, preds)
         m = {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
         fold_results.append({'Fold': fold + 1, **m})
         print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
@@ -462,24 +459,21 @@ def plot_shap_regressor(model, X, name):
 
 
 def print_regression_summary(results_dict, target_col):
-    """Print a mean ± std (95% CI) summary table across all datasets for a given target."""
+    """Print a mean ± std summary table across all datasets for a given target."""
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
     rows = []
     for ds_name, res_df in results_dict.items():
         fold_rows = res_df[~res_df['Fold'].isin(['Mean', 'Std'])]
-        n      = len(fold_rows)
-        t_crit = stats.t.ppf(0.975, df=n - 1)
         row = {'Dataset': ds_name}
         for m in metric_cols:
             mv = fold_rows[m].mean()
             sv = fold_rows[m].std()
-            ci = t_crit * sv / np.sqrt(n)
-            row[m] = f"{mv:.3f} ± {sv:.4f} [{mv - ci:.3f}, {mv + ci:.3f}]"
+            row[m] = f"{mv:.3f} ± {sv:.4f}"
         rows.append(row)
     summary = pd.DataFrame(rows)
-    print(f"\n{'='*90}")
-    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}  (mean ± std, 95% CI)")
-    print(f"{'='*90}")
+    print(f"\n{'='*75}")
+    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}  (mean ± std)")
+    print(f"{'='*75}")
     print(summary.to_string(index=False))
     return summary
 
@@ -660,8 +654,142 @@ def run_advanced_catboost(df_combined, target_col='pain_reduction_pct', random_s
 # ADVANCED HGB  (Nested CV + Optuna) — placeholder
 # ══════════════════════════════════════════════════════════════════════════════
 
-# TODO: implement HistGradientBoostingRegressor nested CV
-# Same nested CV structure as Advanced CatBoost
-# OrdinalEncoder for categoricals inside Pipeline
-# Objective: minimize RMSE
-# Feature importance: HGB built-in + SHAP
+def run_advanced_hgb(df_combined, target_col='pain_reduction_pct', random_state=42):
+    """HistGradientBoostingRegressor with nested CV and Optuna hyperparameter tuning.
+
+    Identical outer/inner CV structure to run_advanced_catboost:
+      Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
+      Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per Optuna trial.
+      Optuna   : 20 trials per outer fold, objective = minimize RMSE.
+
+    HGB handles missing values and categoricals natively (sklearn >= 1.2,
+    categorical_features='from_dtype'). Categorical columns must have dtype
+    'category' in X — conversion is done here before the CV loop.
+
+    Parameters
+    ----------
+    df_combined  : pd.DataFrame  Combined T1 dataset (immunological + clinical).
+    target_col   : str           Regression target (default: 'pain_reduction_pct').
+    random_state : int           Random seed (default 42).
+
+    Returns
+    -------
+    results_df     : pd.DataFrame                  Per-fold metrics + Mean/Std rows.
+    best_params_df : pd.DataFrame                  Best params per outer fold.
+    model          : HistGradientBoostingRegressor  Final model trained on full data.
+    X              : pd.DataFrame                  Feature matrix used.
+    y_pred         : pd.Series                     Full-data predictions from final model.
+    """
+    import optuna
+    try:
+        from optuna.integration import OptunaSearchCV
+    except ImportError:
+        from optuna_integration import OptunaSearchCV
+
+    # Same exclusion logic as run_advanced_catboost
+    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    leaky_cols = [c for c in df_combined.columns
+                  if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
+    exclude = set(id_cols) | set(leaky_cols) | {target_col}
+
+    feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[feature_cols].copy()
+    y = df_combined[target_col].copy()
+
+    valid = y.notna()
+    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    # HGB handles categoricals natively when dtype is 'category' (sklearn >= 1.2)
+    for col in X.select_dtypes(include=['object', 'category']).columns:
+        X[col] = X[col].astype('category')
+
+    print(f"\n{'='*65}")
+    print(f"  Advanced HGB — {target_col}")
+    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits/trial  |  Trials: 20")
+    print(f"{'='*65}")
+
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+
+    param_distributions = {
+        'max_iter':          optuna.distributions.IntDistribution(100, 1000),
+        'max_depth':         optuna.distributions.IntDistribution(3, 10),
+        'learning_rate':     optuna.distributions.FloatDistribution(1e-3, 0.3, log=True),
+        'min_samples_leaf':  optuna.distributions.IntDistribution(5, 50),
+        'l2_regularization': optuna.distributions.FloatDistribution(1e-4, 10.0, log=True),
+        'max_leaf_nodes':    optuna.distributions.IntDistribution(15, 63),
+    }
+
+    fold_results     = []
+    best_params_list = []
+    optuna.logging.set_verbosity(optuna.logging.INFO)
+    start = time.time()
+
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
+        print(f"\n  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
+
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        base_model = HistGradientBoostingRegressor(
+            categorical_features='from_dtype',
+            random_state=random_state,
+        )
+
+        optuna_search = OptunaSearchCV(
+            estimator=base_model,
+            param_distributions=param_distributions,
+            cv=inner_cv,
+            scoring='neg_root_mean_squared_error',
+            n_trials=20,
+            n_jobs=-1,
+            verbose=0,
+        )
+
+        optuna_search.fit(X_train, y_train)
+        best_params_list.append(optuna_search.best_params_)
+
+        preds = optuna_search.predict(X_test)
+        rmse  = np.sqrt(mean_squared_error(y_test, preds))
+        mae   = mean_absolute_error(y_test, preds)
+        r2    = r2_score(y_test, preds)
+        mse   = rmse ** 2
+
+        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
+        print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        print(f"    Best params: {optuna_search.best_params_}")
+
+    elapsed = time.time() - start
+    print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
+
+    results_df  = pd.DataFrame(fold_results)
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df = pd.concat(
+        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    n_outer = len(fold_results)
+    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
+    print(f"\n  Summary (4×5 outer CV, 20 Optuna trials, 95% CI):")
+    for m in metric_cols:
+        mv = mean_row[m]; sv = std_row[m]
+        ci = t_crit * sv / np.sqrt(n_outer)
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
+
+    best_params_df = pd.DataFrame(best_params_list)
+    best_params_df.index = [f"Fold {i+1}" for i in range(len(best_params_list))]
+    print(f"\n  Best hyperparameters per outer fold:")
+    print(best_params_df.to_string())
+
+    # Final model on full dataset (last fold's best params) for SHAP
+    final_model = HistGradientBoostingRegressor(
+        categorical_features='from_dtype',
+        random_state=random_state,
+        **optuna_search.best_params_,
+    )
+    final_model.fit(X, y)
+    y_pred = pd.Series(final_model.predict(X), index=range(len(X)), dtype='float64')
+
+    return results_df, best_params_df, final_model, X, y_pred

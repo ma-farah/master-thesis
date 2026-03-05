@@ -52,7 +52,7 @@ TableReport(df_im_vis, max_plot_columns=180)
 
 
 #%%---------- Step 2a — Pearson correlation ------------------------------------
-
+# should use df_im_bcat ? since it has all columns?
 print('\nStep 2a: EDA — Pearson correlation (immunological)')
 _im_id_cols = ['Patient', 'Timepoint', 'Date']
 
@@ -356,25 +356,32 @@ explore.pca_colored(
 
 #%%---------- Step 7 — df_cl_mod: modeling-only copy -------------------------
 
-print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, leaky cols)')
+print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, radiation cols, leaky cols)')
 
 # Take copy of df_cl_vis (contains all columns) 
 df_cl_mod = df_cl_vis.copy()
 
 # Drop columns with >25% NaN (reduce features before modeling)
-mod_protect = ['Patient', 'Timepoint', 'pain_scale', 'date', 'measurement_timepoint']
+mod_protect = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
 df_cl_mod = preprocess.drop_high_nan_columns(
     df_cl_mod, threshold=0.25, exclude_cols=mod_protect,
     check_per_timepoint=True,
 )
 
-# Remove rows where pain_scale is NaN (because it will be used as target=)
-df_cl_mod = preprocess.remove_no_pain_scale_rows(df_cl_mod)
-
 # Drop pain questionnaire columns (not model features — targets are built separately)
 pain_cols = [c for c in df_cl_mod.columns
               if c in set(preprocess.CL_PAIN_QUESTIONNAIRE_COLS)]
 df_cl_mod = df_cl_mod.drop(columns=pain_cols)
+
+# Drop radiation equipment columns (not clinically predictive)
+rad_cols = [c for c in df_cl_mod.columns
+            if c in set(preprocess.CL_RADIATION_EQUIPMENT_COLS)]
+df_cl_mod = df_cl_mod.drop(columns=rad_cols)
+
+# Drop additional columns: baseline pain_scale, pain_points, months_last_visit
+extra_cols = [c for c in df_cl_mod.columns
+              if c in set(preprocess.CL_EXTRA_MODEL_DROP_COLS)]
+df_cl_mod = df_cl_mod.drop(columns=extra_cols)
 
 # Drop other leaky columns (response, improvement_percent, etc.)
 leaky_cols = [c for c in df_cl_mod.columns
@@ -383,8 +390,10 @@ df_cl_mod = df_cl_mod.drop(columns=leaky_cols)
 
 print(f"  df_cl_vis : {df_cl_vis.shape}  (all columns, for EDA)")
 print(f"  df_cl_mod : {df_cl_mod.shape}  (modeling only)")
-print(f"  Dropped pain cols  : {pain_cols}")
-print(f"  Dropped leaky cols : {leaky_cols}")
+print(f"  Dropped pain cols      : {pain_cols}")
+print(f"  Dropped radiation cols : {rad_cols}")
+print(f"  Dropped extra cols     : {extra_cols}")
+print(f"  Dropped leaky cols     : {leaky_cols}")
 
 
 #%%---------- Step 8 — Construct regression targets from clinical data --------
@@ -453,29 +462,37 @@ print('#'*60)
 
 print('\nStep 9: Creating model datasets (immunological T1−T2 differences)')
 
-# Build one (df_immu_alone, df_combined) pair per target.
-# pain_reduction and pain_reduction_pct share pain_targets (same patients/dataset);
-# the advanced model (Step 11) uses pain_reduction_pct from that same df_combined.
-baseline_targets = {
+# Build one (df_immu_alone, df_combined) pair per unique target source.
+# pain_reduction_pct is computed from the same pain_targets as pain_reduction,
+# so we alias it rather than calling create_model_datasets a second time.
+# The leaky sibling column (e.g. pain_daytime_reduction_pct when running on
+# pain_daytime_reduction) is excluded inside run_catboost_regressor via the
+# '_reduction' pattern in CL_MODEL_LEAKY_PATTERNS.
+_unique_targets = {
     'pain_reduction':            pain_targets,
     'pain_daytime_reduction':    targets_daytime,
     'pain_under_load_reduction': targets_under_load,
 }
 
 model_datasets = {}
-for tgt, tdf in baseline_targets.items():
+for tgt, tdf in _unique_targets.items():
     df_immu, df_comb = model.create_model_datasets(
         df_cl_mod, df_im_vis, tdf, timepoints=[1, 2]
     )
     model_datasets[tgt] = (df_immu, df_comb)
 
+# pain_reduction_pct lives in the same dataset as pain_reduction
+model_datasets['pain_reduction_pct'] = model_datasets['pain_reduction']
+
 TableReport(model_datasets['pain_reduction'][0], max_plot_columns=180)
 TableReport(model_datasets['pain_reduction'][1], max_plot_columns=180)
+TableReport(model_datasets['pain_daytime_reduction'][1], max_plot_columns=180)
+TableReport(model_datasets['pain_under_load_reduction'][1], max_plot_columns=180)
 
 
 #%%---------- Step 10 — Run baseline CatBoost (all targets, no SHAP) ----------
 
-print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_daytime_reduction, pain_under_load_reduction')
+print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_reduction_pct, pain_daytime_reduction, pain_under_load_reduction')
 
 baseline_results = {}
 for tgt, (df_immu, df_comb) in model_datasets.items():
@@ -494,43 +511,250 @@ for tgt, ds_results in baseline_results.items():
 
 
 
-# SHAP / Heatmaps?
+#%%---------- Step 10b — Model dataset diagnostics ---------------------------
+
+print('\nStep 10b: Model dataset diagnostics — target distributions and sample sizes')
+
+for tgt, (df_immu, df_comb) in model_datasets.items():
+    y = df_comb[tgt].dropna()
+    print(f"\n{'─'*55}")
+    print(f"  Target : {tgt}")
+    print(f"  n (combined, non-NaN target) : {len(y)}")
+    print(f"  Features in combined dataset : {df_comb.shape[1]}")
+    print(f"  mean={y.mean():.2f}  std={y.std():.2f}  "
+          f"min={y.min():.2f}  max={y.max():.2f}")
+    print(f"  skew={y.skew():.2f}  kurt={y.kurt():.2f}")
+    print(f"  % zeros (no change) : {(y == 0).mean()*100:.1f}%")
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3))
+    sns.histplot(y, kde=True, ax=axes[0], color=sns.color_palette('mako', 1)[0], bins=20)
+    axes[0].set_title(f'{tgt} — distribution')
+    axes[0].set_xlabel(tgt)
+    axes[1].boxplot(y.dropna(), vert=False)
+    axes[1].set_title(f'{tgt} — boxplot (outliers)')
+    axes[1].set_xlabel(tgt)
+    plt.tight_layout()
+    plt.show()
+
+print(f"\n{'─'*55}")
+print("  Feature–target Pearson correlations (top 10, combined dataset):")
+for tgt, (df_immu, df_comb) in model_datasets.items():
+    id_like = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
+    num_cols = [c for c in df_comb.select_dtypes(include='number').columns
+                if c not in id_like]
+    corrs = df_comb[num_cols].corrwith(df_comb[tgt]).drop(index=tgt, errors='ignore')
+    corrs = corrs.dropna().abs().sort_values(ascending=False).head(10)
+    print(f"\n  {tgt}:")
+    print(corrs.to_string())
 
 
-#%%########## ADVANCED MODELS ##################################################
+#%%########## ADVANCED MODELS — CATBOOST ######################################
 
 print('\n' + '#'*60)
-print('  ADVANCED CATBOOST MODEL (Nested CV + Optuna)')
+print('  CATBOOST MODEL (Nested CV + Optuna)')
 print('#'*60)
 
-#%%---------- Step 11 — Advanced CatBoost on combined dataset -----------------
 
-print('\nStep 11: Advanced CatBoost (Nested CV + Optuna) — combined dataset only')
+#%%---------- Step 11a — CatBoost: pain_reduction_pct ------------------------
 
-# Advanced modeling uses the combined dataset for pain_reduction_pct (primary target).
-# pain_reduction_pct is produced alongside pain_reduction in pain_targets, so it
-# is already present in model_datasets['pain_reduction'][1].
-primary_target = 'pain_reduction_pct'
-df_combined_adv = model_datasets['pain_reduction'][1]
+print('\nStep 11a: CatBoost (Nested CV + Optuna) — pain_reduction_pct')
 
-adv_results, adv_best_params, adv_model, adv_X, adv_ypred = model.run_advanced_catboost(
-    df_combined_adv,
-    target_col=primary_target,
-)
+cb_pct_results, cb_pct_params, cb_pct_model, cb_pct_X, cb_pct_ypred = \
+    model.run_advanced_catboost(
+        model_datasets['pain_reduction'][1],
+        target_col='pain_reduction_pct',
+    )
 
 
-#%%---------- Step 12 — SHAP analysis on final advanced model -----------------
+#%%---------- Step 11b — CatBoost SHAP: pain_reduction_pct -------------------
 
-print('\nStep 12: SHAP analysis on advanced CatBoost final model')
+print('\nStep 11b: SHAP — CatBoost (pain_reduction_pct)')
 
-adv_shap = model.plot_shap_regressor(
-    adv_model, adv_X, f'Advanced CatBoost — {primary_target}')
+cb_pct_shap = model.plot_shap_regressor(
+    cb_pct_model, cb_pct_X, 'CatBoost — pain_reduction_pct')
 
-# 2D density heatmap for advanced model
-y_true_adv = df_combined_adv[primary_target].dropna().reset_index(drop=True)
+y_true_cb_pct = model_datasets['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
 model.plot_prediction_heatmap(
-    y_true_adv, adv_ypred.dropna(), f'Advanced CatBoost — {primary_target}')
+    y_true_cb_pct, cb_pct_ypred.dropna(), 'CatBoost — pain_reduction_pct')
 
 
-print('\nStep 13: Advanced HGB (Nested CV + Optuna) — PLACEHOLDER')
-# TODO: implement model.run_advanced_hgb(df_combined)
+#%%---------- Step 12a — CatBoost: pain_under_load_reduction -----------------
+
+print('\nStep 12a: CatBoost (Nested CV + Optuna) — pain_under_load_reduction')
+
+cb_ul_results, cb_ul_params, cb_ul_model, cb_ul_X, cb_ul_ypred = \
+    model.run_advanced_catboost(
+        model_datasets['pain_under_load_reduction'][1],
+        target_col='pain_under_load_reduction',
+    )
+
+
+#%%---------- Step 12b — CatBoost SHAP: pain_under_load_reduction ------------
+
+print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction)')
+
+cb_ul_shap = model.plot_shap_regressor(
+    cb_ul_model, cb_ul_X, 'CatBoost — pain_under_load_reduction')
+
+y_true_cb_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_cb_ul, cb_ul_ypred.dropna(), 'CatBoost — pain_under_load_reduction')
+
+
+#%%########## ADVANCED MODELS — HGB ###########################################
+
+print('\n' + '#'*60)
+print('  HGB MODEL (Nested CV + Optuna)')
+print('#'*60)
+
+
+#%%---------- Step 13a — HGB: pain_reduction_pct -----------------------------
+
+print('\nStep 13a: HGB (Nested CV + Optuna) — pain_reduction_pct')
+
+hgb_pct_results, hgb_pct_params, hgb_pct_model, hgb_pct_X, hgb_pct_ypred = \
+    model.run_advanced_hgb(
+        model_datasets['pain_reduction'][1],
+        target_col='pain_reduction_pct',
+    )
+
+
+#%%---------- Step 13b — HGB SHAP: pain_reduction_pct -----------------------
+
+print('\nStep 13b: SHAP — HGB (pain_reduction_pct)')
+
+hgb_pct_shap = model.plot_shap_regressor(
+    hgb_pct_model, hgb_pct_X, 'HGB — pain_reduction_pct')
+
+y_true_hgb_pct = model_datasets['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_hgb_pct, hgb_pct_ypred.dropna(), 'HGB — pain_reduction_pct')
+
+
+#%%---------- Step 14a — HGB: pain_under_load_reduction ----------------------
+
+print('\nStep 14a: HGB (Nested CV + Optuna) — pain_under_load_reduction')
+
+hgb_ul_results, hgb_ul_params, hgb_ul_model, hgb_ul_X, hgb_ul_ypred = \
+    model.run_advanced_hgb(
+        model_datasets['pain_under_load_reduction'][1],
+        target_col='pain_under_load_reduction',
+    )
+
+
+#%%---------- Step 14b — HGB SHAP: pain_under_load_reduction -----------------
+
+print('\nStep 14b: SHAP — HGB (pain_under_load_reduction)')
+
+hgb_ul_shap = model.plot_shap_regressor(
+    hgb_ul_model, hgb_ul_X, 'HGB — pain_under_load_reduction')
+
+y_true_hgb_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_hgb_ul, hgb_ul_ypred.dropna(), 'HGB — pain_under_load_reduction')
+
+
+#%%########## T1 → T3 ANALYSIS ################################################
+
+print('\n' + '#'*60)
+print('  T1 → T3 ANALYSIS (immunological T1–T3 differences)')
+print('#'*60)
+
+
+#%%---------- Step 15 — Construct T1→T3 targets and datasets -----------------
+
+print('\nStep 15: Constructing T1→T3 regression targets and model datasets')
+
+pain_targets_t3      = model.construct_datasets_targets(df_cl_vis, 'pain_scale',      [1, 3])
+targets_under_load_t3 = model.construct_datasets_targets(df_cl_vis, 'pain_under_load', [1, 3])
+
+t3_unique_targets = {
+    'pain_reduction':            pain_targets_t3,
+    'pain_under_load_reduction': targets_under_load_t3,
+}
+
+model_datasets_t3 = {}
+for tgt, tdf in t3_unique_targets.items():
+    df_immu_t3, df_comb_t3 = model.create_model_datasets(
+        df_cl_mod, df_im_vis, tdf, timepoints=[1, 3]
+    )
+    model_datasets_t3[tgt] = (df_immu_t3, df_comb_t3)
+
+model_datasets_t3['pain_reduction_pct'] = model_datasets_t3['pain_reduction']
+
+
+#%%---------- Step 15b — T1→T3 target diagnostics ----------------------------
+
+print('\nStep 15b: T1→T3 target distributions and sample sizes')
+
+t3_plot_targets = ['pain_reduction_pct', 'pain_under_load_reduction']
+
+for tgt in t3_plot_targets:
+    df_immu_t3, df_comb_t3 = model_datasets_t3[
+        'pain_reduction' if tgt == 'pain_reduction_pct' else tgt
+    ]
+    y = df_comb_t3[tgt].dropna()
+    print(f"\n{'─'*55}")
+    print(f"  Target : {tgt}  (T1→T3)")
+    print(f"  n (combined, non-NaN target) : {len(y)}")
+    print(f"  Features in combined dataset : {df_comb_t3.shape[1]}")
+    print(f"  mean={y.mean():.2f}  std={y.std():.2f}  "
+          f"min={y.min():.2f}  max={y.max():.2f}")
+    print(f"  skew={y.skew():.2f}  kurt={y.kurt():.2f}")
+    print(f"  % zeros (no change) : {(y == 0).mean()*100:.1f}%")
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3))
+    sns.histplot(y, kde=True, ax=axes[0], color=sns.color_palette('mako', 1)[0], bins=20)
+    axes[0].set_title(f'{tgt} T1→T3 — distribution')
+    axes[0].set_xlabel(tgt)
+    axes[1].boxplot(y.dropna(), vert=False)
+    axes[1].set_title(f'{tgt} T1→T3 — boxplot')
+    axes[1].set_xlabel(tgt)
+    plt.tight_layout()
+    plt.show()
+
+
+#%%---------- Step 16a — CatBoost T1→T3: pain_reduction_pct ------------------
+
+print('\nStep 16a: CatBoost T1→T3 (Nested CV + Optuna) — pain_reduction_pct')
+
+cb_t3_pct_results, cb_t3_pct_params, cb_t3_pct_model, cb_t3_pct_X, cb_t3_pct_ypred = \
+    model.run_advanced_catboost(
+        model_datasets_t3['pain_reduction'][1],
+        target_col='pain_reduction_pct',
+    )
+
+
+#%%---------- Step 16b — CatBoost T1→T3 SHAP: pain_reduction_pct ------------
+
+print('\nStep 16b: SHAP — CatBoost T1→T3 (pain_reduction_pct)')
+
+cb_t3_pct_shap = model.plot_shap_regressor(
+    cb_t3_pct_model, cb_t3_pct_X, 'CatBoost T1→T3 — pain_reduction_pct')
+
+y_true_cb_t3_pct = model_datasets_t3['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_cb_t3_pct, cb_t3_pct_ypred.dropna(), 'CatBoost T1→T3 — pain_reduction_pct')
+
+
+#%%---------- Step 17a — CatBoost T1→T3: pain_under_load_reduction -----------
+
+print('\nStep 17a: CatBoost T1→T3 (Nested CV + Optuna) — pain_under_load_reduction')
+
+cb_t3_ul_results, cb_t3_ul_params, cb_t3_ul_model, cb_t3_ul_X, cb_t3_ul_ypred = \
+    model.run_advanced_catboost(
+        model_datasets_t3['pain_under_load_reduction'][1],
+        target_col='pain_under_load_reduction',
+    )
+
+
+#%%---------- Step 17b — CatBoost T1→T3 SHAP: pain_under_load_reduction -----
+
+print('\nStep 17b: SHAP — CatBoost T1→T3 (pain_under_load_reduction)')
+
+cb_t3_ul_shap = model.plot_shap_regressor(
+    cb_t3_ul_model, cb_t3_ul_X, 'CatBoost T1→T3 — pain_under_load_reduction')
+
+y_true_cb_t3_ul = model_datasets_t3['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_cb_t3_ul, cb_t3_ul_ypred.dropna(), 'CatBoost T1→T3 — pain_under_load_reduction')
