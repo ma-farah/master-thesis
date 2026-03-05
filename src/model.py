@@ -413,7 +413,7 @@ def plot_prediction_heatmap(y_true, y_pred, name, bins=10):
 
     # Diagonal reference line = perfect prediction
     lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
-    ax.plot(lims, lims, linestyle='--', color='white', linewidth=1.2,
+    ax.plot(lims, lims, linestyle='--', color='red', linewidth=1.2,
             alpha=0.7, label='Perfect prediction')
 
     ax.set_xlabel('Predicted pain reduction (%)', fontsize=11)
