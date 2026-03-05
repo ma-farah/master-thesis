@@ -401,10 +401,6 @@ print(f"  Dropped leaky cols     : {leaky_cols}")
 print('\nStep 8: Constructing regression targets from clinical data')
 # use df_cl_vis as reference because we have all columns.
 
-# Primary target: pain_scale reduction (T1 → T2)
-# construct_datasets_targets returns only patients with non-NaN values at both
-# timepoints and in all computed columns, so no further NaN filtering is needed.
-# Targets are built from df_cl_vis (still contains pain columns)
 pain_targets = model.construct_datasets_targets(df_cl_vis, 'pain_scale', [1, 2])
 
 # Additional pain questionnaire targets (T1 → T2 differences)
@@ -618,9 +614,6 @@ hgb_pct_results, hgb_pct_params, hgb_pct_model, hgb_pct_X, hgb_pct_ypred = \
         target_col='pain_reduction_pct',
     )
 
-
-#%%---------- Step 13b — HGB SHAP: pain_reduction_pct -----------------------
-
 print('\nStep 13b: SHAP — HGB (pain_reduction_pct)')
 
 hgb_pct_shap = model.plot_shap_regressor(
@@ -640,18 +633,16 @@ hgb_ul_results, hgb_ul_params, hgb_ul_model, hgb_ul_X, hgb_ul_ypred = \
         model_datasets['pain_under_load_reduction'][1],
         target_col='pain_under_load_reduction',
     )
-
-
-#%%---------- Step 14b — HGB SHAP: pain_under_load_reduction -----------------
-
 print('\nStep 14b: SHAP — HGB (pain_under_load_reduction)')
 
 hgb_ul_shap = model.plot_shap_regressor(
     hgb_ul_model, hgb_ul_X, 'HGB — pain_under_load_reduction')
 
 y_true_hgb_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+
 model.plot_prediction_heatmap(
     y_true_hgb_ul, hgb_ul_ypred.dropna(), 'HGB — pain_under_load_reduction')
+
 
 
 #%%########## T1 → T3 ANALYSIS ################################################
@@ -758,3 +749,136 @@ cb_t3_ul_shap = model.plot_shap_regressor(
 y_true_cb_t3_ul = model_datasets_t3['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
 model.plot_prediction_heatmap(
     y_true_cb_t3_ul, cb_t3_ul_ypred.dropna(), 'CatBoost T1→T3 — pain_under_load_reduction')
+
+#%%---------- Step 18a — CatBoost + RENT: pain_reduction_pct (T1→T2) ---------
+
+print('\nStep 18a: CatBoost + RENT (Nested CV + Optuna) — pain_reduction_pct (T1→T2)')
+
+cb_rent_pct_results, cb_rent_pct_params, cb_rent_pct_model, cb_rent_pct_X, cb_rent_pct_ypred, cb_rent_pct_features = \
+    model.run_advanced_catboost_rent(
+        model_datasets['pain_reduction'][1], target_col='pain_reduction_pct')
+
+
+
+#%%---------- Step 18b — CatBoost + RENT SHAP: pain_reduction_pct -----------
+
+print('\nStep 18b: SHAP — CatBoost + RENT (pain_reduction_pct)')
+
+cb_rent_pct_shap = model.plot_shap_regressor(
+    cb_rent_pct_model, cb_rent_pct_X, 'CatBoost + RENT — pain_reduction_pct')
+
+y_true_cb_rent_pct = model_datasets['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_cb_rent_pct, cb_rent_pct_ypred.dropna(), 'CatBoost + RENT — pain_reduction_pct')
+
+
+
+#%%---------- Step 19a — CatBoost + RENT: pain_under_load_reduction (T1→T2) --
+
+print('\nStep 19a: CatBoost + RENT (Nested CV + Optuna) — pain_under_load_reduction (T1→T2)')
+
+cb_rent_ul_results, cb_rent_ul_params, cb_rent_ul_model, cb_rent_ul_X, cb_rent_ul_ypred, cb_rent_ul_features = \
+    model.run_advanced_catboost_rent(
+        model_datasets['pain_under_load_reduction'][1], target_col='pain_under_load_reduction')
+
+
+#%%---------- Step 19b — CatBoost + RENT SHAP: pain_under_load_reduction -----
+
+print('\nStep 19b: SHAP — CatBoost + RENT (pain_under_load_reduction)')
+
+cb_rent_ul_shap = model.plot_shap_regressor(
+    cb_rent_ul_model, cb_rent_ul_X, 'CatBoost + RENT — pain_under_load_reduction')
+
+y_true_cb_rent_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_cb_rent_ul, cb_rent_ul_ypred.dropna(), 'CatBoost + RENT — pain_under_load_reduction')
+
+#%%########## ADVANCED MODELS — ELASTICNET + RENT ##############################
+
+print('\n' + '#'*60)
+print('  ELASTICNET + RENT MODEL (Nested CV + Optuna)')
+print('#'*60)
+
+
+#%%---------- Step 20a — ElasticNet + RENT: pain_reduction_pct (T1→T2) -------
+
+print('\nStep 20a: ElasticNet + RENT (Nested CV + Optuna) — pain_reduction_pct (T1→T2)')
+
+en_rent_pct_results, en_rent_pct_params, en_rent_pct_model, en_rent_pct_X, en_rent_pct_ypred, en_rent_pct_features = \
+    model.run_advanced_elasticnet_rent(
+        model_datasets['pain_reduction'][1], target_col='pain_reduction_pct')
+
+#%%---------- Step 20b — ElasticNet + RENT coefficients: pain_reduction_pct ---
+
+print('\nStep 20b: ElasticNet coefficients — pain_reduction_pct')
+
+en_rent_pct_coef = model.plot_elasticnet_coefficients(
+    en_rent_pct_model, list(en_rent_pct_X.columns), 'ElasticNet + RENT — pain_reduction_pct')
+
+y_true_en_rent_pct = model_datasets['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_en_rent_pct, en_rent_pct_ypred.dropna(), 'ElasticNet + RENT — pain_reduction_pct')
+
+#%%---------- Step 21a — ElasticNet + RENT: pain_under_load_reduction (T1→T2) -
+
+print('\nStep 21a: ElasticNet + RENT (Nested CV + Optuna) — pain_under_load_reduction (T1→T2)')
+
+en_rent_ul_results, en_rent_ul_params, en_rent_ul_model, en_rent_ul_X, en_rent_ul_ypred, en_rent_ul_features = \
+    model.run_advanced_elasticnet_rent(
+        model_datasets['pain_under_load_reduction'][1], target_col='pain_under_load_reduction')
+
+#%%---------- Step 21b — ElasticNet + RENT coefficients: pain_under_load_reduction -
+
+print('\nStep 21b: ElasticNet coefficients — pain_under_load_reduction')
+
+en_rent_ul_coef = model.plot_elasticnet_coefficients(
+    en_rent_ul_model, list(en_rent_ul_X.columns), 'ElasticNet + RENT — pain_under_load_reduction')
+
+y_true_en_rent_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_en_rent_ul, en_rent_ul_ypred.dropna(), 'ElasticNet + RENT — pain_under_load_reduction')
+
+#%%########## ADVANCED MODELS — PLS + RENT #####################################
+
+print('\n' + '#'*60)
+print('  PLS + RENT MODEL (Nested CV + Optuna)')
+print('#'*60)
+
+
+#%%---------- Step 22a — PLS + RENT: pain_reduction_pct (T1→T2) ---------------
+
+print('\nStep 22a: PLS + RENT (Nested CV + Optuna) — pain_reduction_pct (T1→T2)')
+
+pls_rent_pct_results, pls_rent_pct_params, pls_rent_pct_model, pls_rent_pct_X, pls_rent_pct_ypred, pls_rent_pct_features = \
+    model.run_advanced_pls_rent(
+        model_datasets['pain_reduction'][1], target_col='pain_reduction_pct')
+
+#%%---------- Step 22b — PLS + RENT coefficients: pain_reduction_pct ----------
+
+print('\nStep 22b: PLS coefficients — pain_reduction_pct')
+
+pls_rent_pct_coef = model.plot_pls_coefficients(
+    pls_rent_pct_model, list(pls_rent_pct_X.columns), 'PLS + RENT — pain_reduction_pct')
+
+y_true_pls_rent_pct = model_datasets['pain_reduction'][1]['pain_reduction_pct'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_pls_rent_pct, pls_rent_pct_ypred.dropna(), 'PLS + RENT — pain_reduction_pct')
+
+#%%---------- Step 23a — PLS + RENT: pain_under_load_reduction (T1→T2) --------
+
+print('\nStep 23a: PLS + RENT (Nested CV + Optuna) — pain_under_load_reduction (T1→T2)')
+
+pls_rent_ul_results, pls_rent_ul_params, pls_rent_ul_model, pls_rent_ul_X, pls_rent_ul_ypred, pls_rent_ul_features = \
+    model.run_advanced_pls_rent(
+        model_datasets['pain_under_load_reduction'][1], target_col='pain_under_load_reduction')
+
+#%%---------- Step 23b — PLS + RENT coefficients: pain_under_load_reduction ---
+
+print('\nStep 23b: PLS coefficients — pain_under_load_reduction')
+
+pls_rent_ul_coef = model.plot_pls_coefficients(
+    pls_rent_ul_model, list(pls_rent_ul_X.columns), 'PLS + RENT — pain_under_load_reduction')
+
+y_true_pls_rent_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+model.plot_prediction_heatmap(
+    y_true_pls_rent_ul, pls_rent_ul_ypred.dropna(), 'PLS + RENT — pain_under_load_reduction')
