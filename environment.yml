@@ -31,7 +31,7 @@ dependencies:
       - hoggormplot
       - adjustText
       - six
-      - git+https://github.com/khliland/missing-methods.git  # NIPALS PCA/PLS/RV2 with NaN support
-      - git+https://github.com/NMBU-Data-Science/RENT.git    # RENT feature selection (not on PyPI)
+      - git+https://github.com/khliland/missing-methods.git
+      - git+https://github.com/NMBU-Data-Science/RENT.git
 
   # last updated 05.03.2026
