@@ -200,16 +200,21 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
     print(f"\n  Clinical features: {len(cl_feat_cols)} (pain/leaky cols pre-filtered upstream)")
 
-    # ── TARGETS: only keep computed reduction columns (no raw pain values) ────────
+    # ── TARGETS: include baseline (_t{t_a}), exclude leaky post-treatment (_t{t_b}) ──
 
-    # Exclude both raw timepoint values (_t{t_a} and _t{t_b}) — the baseline
-    # pain value (_t{t_a}) is a pain-level feature and must not be a model input;
-    # the post-treatment value (_t{t_b}) is always leaky. Only the computed
-    # reduction columns (_reduction, _reduction_pct) are merged in.
-    raw_tp_cols  = [c for c in targets.columns
-                    if c.endswith(f'_t{t_a}') or c.endswith(f'_t{t_b}')]
-    target_merge = ['Patient'] + [c for c in targets.columns
-                                  if c != 'Patient' and c not in raw_tp_cols]
+    # The baseline value (_t{t_a}) is a legitimate predictor — it captures the
+    # patient's starting severity for the target being modelled. It is included as
+    # a feature. The post-treatment value (_t{t_b}) is always leaky and excluded.
+    # Reduction columns (_reduction, _reduction_pct) are merged in but are then
+    # excluded from the feature matrix by CL_MODEL_LEAKY_PATTERNS inside each
+    # model function; only the specific target_col is retained as the response.
+    #
+    # Because each call to create_model_datasets is tied to one targets DataFrame
+    # (pain_scale targets OR pain_under_load targets), each dataset carries only
+    # its own baseline — there is no cross-contamination between targets.
+    leaky_tp_cols = [c for c in targets.columns if c.endswith(f'_t{t_b}')]
+    target_merge  = ['Patient'] + [c for c in targets.columns
+                                   if c != 'Patient' and c not in leaky_tp_cols]
 
     # ── MERGE into final datasets ─────────────────────────────────────────────
 
@@ -223,10 +228,12 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
         .merge(targets[target_merge], on='Patient', how='inner')
     )
 
+    baseline_cols = [c for c in target_merge if c.endswith(f'_t{t_a}')]
     print(f"\nModel datasets ready (T{t_a}–T{t_b} immunological differences only):")
     print(f"  Immunological diff features : {len(diff_cols)}  "
           f"(one T{t_a}−T{t_b} diff per original feature)")
     print(f"  Clinical baseline features  : {len(cl_feat_cols)}")
+    print(f"  Target baseline included    : {baseline_cols}")
     print(f"  df_immu_alone : shape={df_immu_alone.shape}, "
           f"patients={df_immu_alone['Patient'].nunique()}")
     print(f"  df_combined   : shape={df_combined.shape}, "
