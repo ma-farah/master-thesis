@@ -37,11 +37,7 @@ def load_data(data_path=None):
 # ── Raw dataset overview ──────────────────────────────────────────────────────
 
 def dataset_overview(df, name, patient_col='Patient', timepoint_col='Timepoint'):
-    """Print basic statistics for a dataset. Works for both immunological and clinical.
-
-    TableReport and NA heatmap are intentionally excluded — call them manually
-    in results.py where needed (they do not render inside function calls in the
-    interactive window).
+    """Print basic statistics for a dataset.
 
     Parameters
     ----------
@@ -75,20 +71,14 @@ def dataset_overview(df, name, patient_col='Patient', timepoint_col='Timepoint')
     for dtype, count in dtype_counts.items():
         print(f"    {dtype}: {count} columns")
 
-    # Top-10 columns with most missing values
-    top_nan = df.isna().sum().sort_values(ascending=False).head(10)
-    top_nan = top_nan[top_nan > 0]
-    if len(top_nan) > 0:
-        print(f"\n  Top columns with missing values (up to 10):")
-        for col, n in top_nan.items():
-            print(f"    {col}: {n} ({n / len(df) * 100:.1f}%)")
+    # ?
 
 
 # ── Patient timepoint coverage ────────────────────────────────────────────────
 
 def patient_timepoint_summary(df, name, patient_col='Patient', timepoint_col='Timepoint',
                                timepoints=None):
-    """Print cumulative patient coverage across timepoints and show a bar plot.
+    """Print cumulative patient coverage across timepoints and plot a bar plot.
 
     Parameters
     ----------
@@ -120,7 +110,7 @@ def patient_timepoint_summary(df, name, patient_col='Patient', timepoint_col='Ti
 
     # Patients with ONLY T1 (no follow-up)
     others = set().union(*(pt_sets[t] for t in timepoints[1:]))
-    print(f"  Patients at T{timepoints[0]} only (no follow-up): "
+    print(f"  Patients at only T{timepoints[0]} : "
           f"{len(pt_sets[timepoints[0]] - others)}")
 
     # Bar plot: unique patients per timepoint
@@ -130,7 +120,7 @@ def patient_timepoint_summary(df, name, patient_col='Patient', timepoint_col='Ti
     fig, ax = plt.subplots(figsize=(8, 5))
     sns.barplot(x=patient_counts.index, y=patient_counts.values,
                 palette=_bar_color, ax=ax)
-    ax.set_title(f"Unique Patients per Timepoint — {name} Dataset")
+    ax.set_title(f"Unique Patients per Timepoint in {name} Dataset")
     ax.set_xlabel("Timepoint")
     ax.set_ylabel("Number of unique patients")
     plt.tight_layout()
@@ -140,21 +130,21 @@ def patient_timepoint_summary(df, name, patient_col='Patient', timepoint_col='Ti
 # ── Pearson correlation ───────────────────────────────────────────────────────
 
 def pearson_correlation(df, id_cols, name, n_top=40):
-    """Compute pairwise Pearson r on numeric columns, print top pairs, and plot heatmaps.
+    """Compute pairwise Pearson r on only numeric columns, print top pairs, and plot heatmaps.
 
     Parameters
     ----------
-    df      : pd.DataFrame  NOT imputed; pandas corr() handles NaN pairwise
-    id_cols : list[str]     columns to exclude (Patient, Timepoint, dates, …)
+    df      : pd.DataFrame  dataframe (not imputed) 
+    id_cols : list[str]     columns to exclude
     name    : str           label used in titles and print headers
-    n_top   : int           number of top pairs to print (default 40)
+    n_top   : int           number of top pairs to print (default is set to 40)
 
     Returns
     -------
     pearson_matrix : pd.DataFrame  symmetric correlation matrix
     pearson_pairs  : pd.DataFrame  upper-triangle pairs sorted by |r| descending
     """
-    print(f"\nPearson Correlation — {name} dataset")
+    print(f"\nPearson Correlation ({name} dataset)")
 
     feat_cols      = [c for c in df.select_dtypes(include='number').columns
                       if c not in id_cols]
@@ -186,7 +176,7 @@ def pearson_correlation(df, id_cols, name, n_top=40):
           .reset_index(drop=True)
           .to_string(index=False))
 
-    # Full heatmap — lower triangle only
+    # Full heatmap plot sshowing lower triangle only:
     mask_full = np.triu(np.ones_like(pearson_matrix, dtype=bool))
     fig, ax   = plt.subplots(figsize=(18, 16))
     sns.heatmap(
@@ -195,36 +185,10 @@ def pearson_correlation(df, id_cols, name, n_top=40):
         square=True, linewidths=0.2,
         cbar_kws={'label': 'Pearson r', 'shrink': 0.8}, ax=ax,
     )
-    ax.set_title(f'Pearson Correlation — {name} Dataset (with NaN)',
+    ax.set_title(f'Pearson Correlation ({name} Dataset)',
                  fontsize=14, fontweight='bold')
     ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=7)
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=7)
-    plt.tight_layout()
-    plt.show()
-
-    # Focused heatmap — features in top 30 pairs by |r|
-    top_feats = set()
-    for _, row in pearson_pairs.head(30).iterrows():
-        top_feats.add(row['Feature_1'])
-        top_feats.add(row['Feature_2'])
-    top_feats = sorted(top_feats)
-
-    print(f"\nFeatures in top 30 Pearson pairs: {len(top_feats)}")
-    focused      = pearson_matrix.loc[top_feats, top_feats]
-    mask_focused = np.triu(np.ones_like(focused, dtype=bool))
-
-    fig, ax = plt.subplots(figsize=(14, 12))
-    sns.heatmap(
-        focused, mask=mask_focused,
-        annot=True, fmt='.2f',
-        cmap='mako', center=0, vmin=-1, vmax=1,
-        square=True, linewidths=0.3,
-        cbar_kws={'label': 'Pearson r'}, ax=ax,
-    )
-    ax.set_title(f'Pearson Correlation — Top {len(top_feats)} Features ({name})',
-                 fontsize=14, fontweight='bold')
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=9)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
     plt.tight_layout()
     plt.show()
 
@@ -234,27 +198,27 @@ def pearson_correlation(df, id_cols, name, n_top=40):
 # ── Phik correlation ──────────────────────────────────────────────────────────
 
 def phik_correlation(df, id_cols, num_cols, name, n_top=40):
-    """Compute phik correlation matrix (works with continuous, ordinal, categorical).
+    """Compute phik correlation matrix (can use on data with mixed feature types)
 
     Parameters
     ----------
-    df       : pd.DataFrame  NOT imputed
-    id_cols  : list[str]     columns to exclude (Patient, Timepoint, dates, …)
+    df       : pd.DataFrame  dataframe
+    id_cols  : list[str]     columns to exclude 
     num_cols : list[str]     continuous/numeric columns (needed for phik interval_cols)
     name     : str           label used in titles
-    n_top    : int           number of top pairs to print
+    n_top    : int           number of top pairs to print, standard is top 40.
 
     Returns
     -------
     phik_matrix : pd.DataFrame
     phik_pairs  : pd.DataFrame  sorted by phik descending
     """
-    print(f"\nPhik Correlation — {name} dataset (all feature types)")
+    print(f"\nPhik Correlation ({name} Dataset) ")
 
     feat_cols = [c for c in df.columns if c not in id_cols]
     df_phik   = df[feat_cols].copy()
 
-    # phik requires category columns to be string-typed, not pandas Categorical
+    # phik requires category columns to be string-typed:
     for c in df_phik.select_dtypes('category').columns:
         df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
 
@@ -271,7 +235,7 @@ def phik_correlation(df, id_cols, num_cols, name, n_top=40):
         .reset_index(drop=True)
     )
 
-    print(f"\nTop {n_top} Most Correlated Feature Pairs (phik — all feature types):")
+    print(f"\nTop {n_top} Most Correlated Feature Pairs (phik):")
     print("=" * 80)
     print(phik_pairs.head(n_top).to_string(index=False))
 
@@ -284,36 +248,10 @@ def phik_correlation(df, id_cols, num_cols, name, n_top=40):
         square=True, linewidths=0.2,
         cbar_kws={'label': 'phik', 'shrink': 0.8}, ax=ax,
     )
-    ax.set_title(f'Phik Correlation — {name} Dataset (all feature types)',
+    ax.set_title(f'Phik Correlation ({name} Dataset)',
                  fontsize=14, fontweight='bold')
     ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=8)
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=8)
-    plt.tight_layout()
-    plt.show()
-
-    # Focused heatmap — features in top 30 phik pairs
-    top_feats = set()
-    for _, row in phik_pairs.head(30).iterrows():
-        top_feats.add(row['Feature_1'])
-        top_feats.add(row['Feature_2'])
-    top_feats = sorted(top_feats)
-
-    print(f"\nFeatures in top 30 phik pairs: {len(top_feats)}")
-    focused      = phik_matrix.loc[top_feats, top_feats]
-    mask_focused = np.triu(np.ones_like(focused, dtype=bool))
-
-    fig, ax = plt.subplots(figsize=(13, 11))
-    sns.heatmap(
-        focused, mask=mask_focused,
-        annot=True, fmt='.2f',
-        cmap='mako', vmin=0, vmax=1,
-        square=True, linewidths=0.3,
-        cbar_kws={'label': 'phik'}, ax=ax,
-    )
-    ax.set_title(f'Phik Correlation — Top {len(top_feats)} Features ({name})',
-                 fontsize=14, fontweight='bold')
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=9)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
     plt.tight_layout()
     plt.show()
 
@@ -322,27 +260,24 @@ def phik_correlation(df, id_cols, num_cols, name, n_top=40):
 
 # ── RV2 matrix ────────────────────────────────────────────────────────────────
 
-def rv2_matrix(df, timepoints, id_cols, name, feat_cols=None):
-    """Compute pairwise RV2 similarity matrix across timepoints (NaN-native, missing-methods).
+def rv2_matrix(df, timepoints, rv2_exc, name):
+    """Compute pairwise RV2 similarity matrix across timepoints.
 
-    Uses NIPALS-based mm_rv2 which handles NaN natively — no imputation required.
-    Each matrix is standardised independently before RV2 computation.
+    Uses missing-methods and therefore handles NaN natively.
 
     Parameters
     ----------
-    df         : pd.DataFrame   NOT imputed
-    timepoints : list[int]      e.g. [1, 2, 3, 4, 5]
-    id_cols    : list[str]      columns to exclude when building feature matrix
+    df         : pd.DataFrame   dataframe
+    timepoints : list[int]      list of timepoints to include
+    rv2_exc    : list[str]      list of columns to exclude (for dataset with mixed types, exclude categorical columns)
     name       : str            label for titles and prints
-    feat_cols  : list[str] or None
-        Explicit feature column list. If None, all columns not in id_cols are used.
-        For datasets with categorical columns (e.g. clinical), pass numeric columns only.
-
+   
     Returns
     -------
     rv2_df : pd.DataFrame  symmetric RV2 matrix with T-labels
+
     """
-    print(f"\nRV2 Matrix — {name} dataset")
+    print(f"\nRV2 Matrix for {name} Dataset:")
 
     dfs_tp  = {t: df[df['Timepoint'] == t] for t in timepoints}
     pt_sets = {t: set(dfs_tp[t]['Patient']) for t in timepoints}
@@ -352,8 +287,7 @@ def rv2_matrix(df, timepoints, id_cols, name, feat_cols=None):
 
     def _get_feat_vals(df_t, patients):
         df_f = df_t[df_t['Patient'].isin(patients)].sort_values('Patient')
-        cols = feat_cols if feat_cols is not None else [c for c in df_f.columns
-                                                        if c not in id_cols]
+        cols = [c for c in df_f.columns if c not in rv2_exc]
         return df_f[cols].values.astype(float)
 
     for i, ti in enumerate(timepoints):
@@ -382,7 +316,7 @@ def rv2_matrix(df, timepoints, id_cols, name, feat_cols=None):
     fig, ax = plt.subplots(figsize=(7, 6))
     sns.heatmap(rv2_df, annot=annot, fmt="", cmap="crest",
                 vmin=0, vmax=1, square=True, ax=ax)
-    ax.set_title(f"RV2 Similarity — {name} Dataset\n(missing-methods, NaN-native)")
+    ax.set_title(f"RV2 Similarity for {name} Dataset")
     plt.tight_layout()
     plt.show()
 
@@ -392,25 +326,22 @@ def rv2_matrix(df, timepoints, id_cols, name, feat_cols=None):
 
 # ── PCA per timepoint ─────────────────────────────────────────────────────────
 
-def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
-    """Run NIPALS PCA per timepoint (NaN-native), plot scree + score plots, print loadings.
+def pca_per_timepoint(df, timepoints, pca_exc, name, ncomp=10):
+    """Run PCA per timepoint, plot scree + score plots, print loadings.
 
     Parameters
     ----------
-    df         : pd.DataFrame   NOT imputed (NIPALS handles NaN natively)
+    df         : pd.DataFrame   dataframe (not imputed)
     timepoints : list[int]
-    id_cols    : list[str]      columns excluded from feature matrix
+    pca_exc    : list[str]      columns excluded from feature matrix
     name       : str            label for titles
-    feat_cols  : list[str] or None
-        Explicit feature columns. If None, all non-id columns are used.
-        For datasets with categorical columns, pass numeric columns only.
     ncomp      : int            number of PCs to extract
 
     Returns
     -------
     pca_store : dict  {t: {scores, loadings, exp, df, patient_ids, feat_names}}
     """
-    print(f"\nPCA per Timepoint — {name} dataset")
+    print(f"\nPCA per Timepoint for {name} Dataset")
 
     mako_tp = sns.color_palette("mako", len(timepoints))
     cum_col = sns.color_palette("crest", 1)[0]
@@ -420,8 +351,7 @@ def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
         df_t        = df[df['Timepoint'] == t].reset_index(drop=True)
         n_t         = len(df_t)
         patient_ids = df_t['Patient'].values
-        cols        = feat_cols if feat_cols is not None else [c for c in df_t.columns
-                                                               if c not in id_cols]
+        cols        = [c for c in df_t.columns if c not in pca_exc]
         feat_names  = [c for c in cols if c in df_t.columns]
         print(f"\n  T{t}: {n_t} patients")
 
@@ -447,14 +377,14 @@ def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
         ax.plot(range(1, ncomp + 1), np.cumsum(exp),
                 marker="o", color=cum_col, linewidth=1.5, label="Cumulative %")
         ax.set_xticks(range(1, ncomp + 1))
-        ax.set_xlabel("Principal Components.")
+        ax.set_xlabel("Principal Components")
         ax.set_ylabel("Explained Variance (%)")
-        ax.set_title(f"Scree Plot — {name} Dataset T{t}")
+        ax.set_title(f"Scree Plot for {name} Dataset T{t}")
         ax.legend()
         plt.tight_layout()
         plt.show()
 
-        # Score plot — top 20 furthest from origin
+        # Score plot labeling top 20 furthest from origin
         dist  = np.sqrt(scores[:, 0]**2 + scores[:, 1]**2)
         top20 = np.argsort(dist)[::-1][:20]
 
@@ -472,13 +402,13 @@ def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
         ax.axvline(0, color='grey', lw=0.5, linestyle='--')
         ax.set_xlabel(f"PC1 ({exp[0]:.1f}% variance)")
         ax.set_ylabel(f"PC2 ({exp[1]:.1f}% variance)")
-        ax.set_title(f"PCA Score Plot — {name} Dataset T{t}\n"
-                     f"(top 20 patients furthest from pca-origin labelled)")
+        ax.set_title(f"PCA Score Plot for {name} Dataset T{t}\n"
+                     f"(top 20 patients furthest from pca-origin are labelled)")
         ax.legend(loc='best')
         plt.tight_layout()
         plt.show()
 
-        # Print top 20 furthest
+        # Print top 20 patients furthest from pca-origin
         print(f"  Top 20 patients furthest from pca-origin at T{t}:")
         print(f"  {'Patient':>10}  {'PC1':>8}  {'PC2':>8}  {'Distance':>10}")
         for i in top20:
@@ -490,7 +420,7 @@ def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
         for pc_i, pc_name in enumerate(['PC1', 'PC2']):
             abs_l  = np.abs(loadings[:, pc_i])
             top10l = np.argsort(abs_l)[::-1][:10]
-            print(f"\n  Top 10 loadings — {pc_name} (T{t}):")
+            print(f"\n  Top 10 loadings for {pc_name} (T{t}):")
             print(f"  {'Feature':>40}  {'Loading':>10}")
             for k in top10l:
                 print(f"  {feat_names[k]:>40}  {loadings[k, pc_i]:>10.4f}")
@@ -498,15 +428,16 @@ def pca_per_timepoint(df, timepoints, id_cols, name, feat_cols=None, ncomp=10):
     return pca_store
 
 
-# ── PCA colored by metadata ───────────────────────────────────────────────────
+# ── PCA colored by clinical adata ───────────────────────────────────────────────────
 
 def pca_colored(pca_store, timepoints, color_configs, name,
                 color_source_df=None, patient_col='Patient', timepoint_col='Timepoint'):
-    """Plot PCA score plots T1–T5 colored by metadata variables.
+    
+    """Plotting PCA score plots T1–T5, colored by clinical variables.
 
     Parameters
     ----------
-    pca_store       : dict  output of pca_per_timepoint
+    pca_store       : dict,  saved output of pca_per_timepoint          # fjerne farge del
     timepoints      : list[int]
     color_configs   : list of tuples (col_name, col_type, palette)
                       col_type ∈ {'categorical', 'continuous'}
@@ -624,7 +555,7 @@ def pca_colored(pca_store, timepoints, color_configs, name,
 
 def run_pyod_zryan(df_imputed, feature_cols, patient_col='Patient',
                    timepoint_col='Timepoint', contamination=0.1, name='', random_state=42):
-    """Ensemble outlier detection using the Zryan GEC + visualiser_OD approach.
+    """Ensemble outlier detection using Zryan approach. Code is adapted from Zryan´s original github repo:
 
     Pipeline:
       1. Scale feature columns with StandardScaler.
@@ -637,8 +568,8 @@ def run_pyod_zryan(df_imputed, feature_cols, patient_col='Patient',
 
     Parameters
     ----------
-    df_imputed   : pd.DataFrame  fully imputed, numeric features only
-    feature_cols : list[str]     feature columns (no NaN expected)
+    df_imputed   : pd.DataFrame  imputed dataset, with numeric features only
+    feature_cols : list[str]     feature columns
     patient_col  : str
     timepoint_col: str
     contamination: float
@@ -674,7 +605,7 @@ def run_pyod_zryan(df_imputed, feature_cols, patient_col='Patient',
     if not hasattr(np, 'bool'):
         np.bool = bool
 
-    print(f"\nPyOD Zryan Outlier Detection — {name} dataset")
+    print(f"\nPyOD Zryan Outlier Detection for {name} dataset")
 
     X_ens          = df_imputed[feature_cols].copy()
     patient_labels = (
@@ -739,14 +670,12 @@ def run_pyod_zryan(df_imputed, feature_cols, patient_col='Patient',
 # ── Trajectory PCA — immunological specific ───────────────────────────────────
 
 def trajectory_pca_im(df, pairs, id_cols, ncomp=10):
-    """Trajectory PCA for immunological dataset: stack two timepoints and draw arrows.
-
-    Uses missing-methods NIPALS — NaN natively handled, no imputation required.
+    """Trajectory PCA, stacking two timepoints together and drawing arrows for patient trajectories..
 
     Parameters
     ----------
-    df      : pd.DataFrame   df_im_vis (NOT imputed)
-    pairs   : list of tuples (tp_a, tp_b, arrow_color, label)
+    df      : pd.DataFrame   dataframe (not imputed)
+    pairs   : list of tuples  (tp_a, tp_b, arrow_color, label)
               e.g. [(1, 2, color, 'T1 → T2'), ...]
     id_cols : list[str]
     ncomp   : int
@@ -818,7 +747,7 @@ def trajectory_pca_im(df, pairs, id_cols, ncomp=10):
         for pc_i, pc_name in enumerate(['PC1', 'PC2']):
             abs_l  = np.abs(loadings[:, pc_i])
             top10l = np.argsort(abs_l)[::-1][:10]
-            print(f"\n  Top 10 loadings — {pc_name} ({label}):")
+            print(f"\n  Top 10 loadings for {pc_name} ({label}):")
             print(f"  {'Feature':>40}  {'Loading':>10}")
             for k in top10l:
                 print(f"  {feat_names[k]:>40}  {loadings[k, pc_i]:>10.4f}")
@@ -857,7 +786,7 @@ def trajectory_pca_im(df, pairs, id_cols, ncomp=10):
         ax.axvline(0, color='grey', lw=0.5, linestyle='--')
         ax.set_xlabel(f"PC1 ({exp_pct[0]:.1f}% variance)")
         ax.set_ylabel(f"PC2 ({exp_pct[1]:.1f}% variance)")
-        ax.set_title(f"Trajectory PCA — Immunological Dataset\n"
+        ax.set_title(f"Trajectory PCA for Immunological Dataset\n"
                      f"{label}  (top 20 longest trajectories labelled)")
         ax.legend(loc='best')
         plt.tight_layout()
@@ -867,10 +796,10 @@ def trajectory_pca_im(df, pairs, id_cols, ncomp=10):
 # ── MFA — immunological specific ─────────────────────────────────────────────
 
 def mfa_im(df, timepoints, id_cols, ncomp=5):
-    """Multiple Factor Analysis on immunological dataset (NaN-native NIPALS).
+    """Plotting Multiple Factor Analysis, 
 
     Each timepoint is a block, normalised by sqrt(first eigenvalue), then stacked
-    horizontally for a joint NIPALS PCA. No imputation required.
+    horizontally for a joint PCA. Uses missing-methods so no imputation is required.
 
     Parameters
     ----------
@@ -928,12 +857,12 @@ def mfa_im(df, timepoints, id_cols, ncomp=5):
     ax.set_xticks(range(1, ncomp + 1))
     ax.set_xlabel("Principal Components.")
     ax.set_ylabel("Explained Variance (%)")
-    ax.set_title(f"Scree Plot — MFA Immunological Dataset {tp_label}\n(missing-methods)")
+    ax.set_title(f"Scree Plot for MFA of Immunological Dataset {tp_label})")
     ax.legend()
     plt.tight_layout()
     plt.show()
 
-    # Score plot — top 20 furthest from origin
+    # Score plot of top 20 furthest from origin
     dist  = np.sqrt(scores[:, 0]**2 + scores[:, 1]**2)
     top20 = np.argsort(dist)[::-1][:20]
 
@@ -951,8 +880,8 @@ def mfa_im(df, timepoints, id_cols, ncomp=5):
     ax.axvline(0, color='grey', lw=0.5, linestyle='--')
     ax.set_xlabel(f"PC1 ({exp[0]:.1f}% variance)")
     ax.set_ylabel(f"PC2 ({exp[1]:.1f}% variance)")
-    ax.set_title(f"MFA Score Plot — Immunological Dataset {tp_label}\n"
-                 f"(missing-methods, top 20 furthest labelled)")
+    ax.set_title(f"MFA Score Plot For Immunological Dataset {tp_label}\n"
+                 f"top 20 furthest from origin labelled)")
     ax.legend(loc='best')
     plt.tight_layout()
     plt.show()
