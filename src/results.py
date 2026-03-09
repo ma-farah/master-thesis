@@ -16,6 +16,31 @@ import preprocess
 import explore
 import model
 
+#%%########## PREPROCESSING (run this block first) #############################
+
+# Load raw data
+df_im, df_cl = explore.load_data()
+
+# Clean datasets
+_im_id_cols = ['Patient', 'Timepoint', 'Date']
+df_im_vis   = preprocess.clean_im(df_im)
+df_cl_vis   = preprocess.clean_cl(df_cl)
+
+# Immunological: drop >25% NaN columns, remove confirmed outliers
+_im_nan_frac = df_im_vis.drop(columns=_im_id_cols).isna().mean()
+_im_high_nan = _im_nan_frac[_im_nan_frac > 0.25].index.tolist()
+df_im_mod    = df_im_vis.drop(columns=_im_high_nan)
+df_im_mod    = preprocess.remove_outlier_observations(df_im_mod)
+
+# Clinical: drop >25% NaN columns
+_cl_id_cols  = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+_cl_nan_frac = df_cl_vis.drop(columns=_cl_id_cols).isna().mean()
+_cl_high_nan = _cl_nan_frac[_cl_nan_frac > 0.25].index.tolist()
+df_cl_mod    = df_cl_vis.drop(columns=_cl_high_nan)
+
+print(f"df_im_mod : {df_im_mod.shape}")
+print(f"df_cl_mod : {df_cl_mod.shape}")
+
 
 #%%########## Step 1 — Load raw data ###########################################
 
@@ -552,7 +577,7 @@ print('#'*60)
 
 print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction_pct')
 
-cb_pct_results, cb_pct_params, cb_pct_model, cb_pct_X, cb_pct_ypred = \
+cb_pct_results, cb_pct_model, cb_pct_X, cb_pct_ypred, cb_pct_features, cb_pct_rent_params = \
     model.run_advanced_catboost_rent(
         model_datasets['pain_reduction_pct'],
         target_col='pain_reduction_pct',
@@ -569,7 +594,7 @@ cb_pct_shap = model.plot_shap_regressor(
 
 print('\nStep 12a: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_reduction')
 
-cb_ul_results, cb_ul_params, cb_ul_model, cb_ul_X, cb_ul_ypred = \
+cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_features, cb_ul_rent_params = \
     model.run_advanced_catboost_rent(
         model_datasets['pain_under_load_reduction'],
         target_col='pain_under_load_reduction',
@@ -579,6 +604,7 @@ cb_ul_results, cb_ul_params, cb_ul_model, cb_ul_X, cb_ul_ypred = \
 print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction)')
 cb_ul_shap = model.plot_shap_regressor(
     cb_ul_model, cb_ul_X, 'CatBoost — pain_under_load_reduction')
+
 
 
 

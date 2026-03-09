@@ -317,8 +317,6 @@ def run_catboost_regressor(df_model, target_col, name,
     exclude = ['Patient', 'Timepoint', target_col, 'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction', 'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
- 
-    print(feature_cols) # check features used
 
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
@@ -446,44 +444,44 @@ def print_regression_summary(results_dict, target_col):
 
 def run_advanced_catboost_rent(
     df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_1=0.7, tau_2=0.75, tau_3=0.95, target_transformer=None,
+    tau_3=0.90, target_transformer=None,
 ):
-    """CatBoostRegressor with RENT feature selection + nested CV + Optuna.
+    """CatBoostRegressor with Optuna-tuned RENT + nested CV (two sequential studies).
 
-    RENT applied on each outer fold on the training split, only 
-    trains K=100 ElasticNet  models 
-
-    Because RENT uses ElasticNet internally, a preprocessing step 
-    (OrdinalEncoder + SimpleImputer) is applied to X_train
-    before passing to RENT
+    Two Optuna studies per outer fold:
+      Study 1 — RENT HPs: tune C, l1_ratio, τ₁, τ₂ using a fixed probe CatBoost
+                          evaluated on inner CV.  τ₃ is fixed at tau_3.
+      Study 2 — Model HPs: tune depth, learning_rate, l2_leaf_reg, etc. on the
+                           features selected by Study 1.
 
     Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
-    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per trial. try with 25 repeats
-    Optuna   : 20 trials per outer fold, scoring = neg_root_mean_squared_error.
+    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per trial (both studies).
+    Study 1  : 50 Optuna trials for RENT HPs (K=100 internal RENT splits per trial).
+    Study 2  : 50 Optuna trials for CatBoost HPs.
 
     Parameters
     ----------
-    df_combined : pd.DataFrame  Combined T1 dataset (immunological + clinical).
-    target_col  : str           Regression target (default: 'pain_reduction_pct').
-    random_state: int           Random seed (default 42).
-    tau_1       : float         RENT τ₁ cutoff — selection frequency (default 0.7).
-    tau_2       : float         RENT τ₂ cutoff — sign consistency (default 0.75).
-    tau_3       : float         RENT τ₃ cutoff — t-test threshold (default 0.95).
+    df_combined        : pd.DataFrame  Combined dataset (immunological + clinical).
+    target_col         : str           Regression target (default: 'pain_reduction_pct').
+    random_state       : int           Random seed (default 42).
+    tau_3              : float         Fixed RENT τ₃ t-test threshold (default 0.90).
+    target_transformer : transformer   Optional sklearn-compatible power transformer.
 
     Returns
     -------
-    results_df              : pd.DataFrame       Per-fold metrics + Mean/Std rows.
-    best_params_df          : pd.DataFrame       Best hyperparameters per outer fold.
-    final_model             : CatBoostRegressor  Final model on full dataset.
-    X_final                 : pd.DataFrame       Feature matrix (RENT-selected features).
-    y_pred                  : pd.Series          Full-data predictions from final model.
-    selected_features_per_fold : list[list[str]] Selected feature names per outer fold.
+    results_df                 : pd.DataFrame       Per-fold metrics + Mean/Std rows.
+    final_model                : CatBoostRegressor  Final model trained on full dataset.
+    X_final                    : pd.DataFrame       Features used by final model.
+    y_pred                     : pd.Series          Full-data predictions (original scale).
+    selected_features_per_fold : list[list[str]]    Features selected per outer fold.
+    best_rent_params_list      : list[dict]         Best RENT HPs per outer fold.
     """
     import optuna
     try:
         from optuna.integration import OptunaSearchCV
     except ImportError:
         from optuna_integration import OptunaSearchCV
+    from sklearn.model_selection import cross_val_score
     import warnings
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import OrdinalEncoder
@@ -492,47 +490,51 @@ def run_advanced_catboost_rent(
     warnings.filterwarnings('ignore', category=FutureWarning, module='RENT')
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    N_RENT_TRIALS  = 50
+    N_MODEL_TRIALS = 50
 
     y = df_combined[target_col].copy()
-    
-    exclude = ['Patient', 'Timepoint', target_col, 'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction', 'pain_under_load_reduction_pct']
+    exclude = ['Patient', 'Timepoint', target_col,
+               'pain_reduction', 'pain_reduction_pct',
+               'pain_under_load_reduction', 'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_combined.columns if c not in exclude]
     X = df_combined[feature_cols].copy()
 
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    # Convert category/object dtypes to str for CatBoost categorical handling
     for col in X.select_dtypes(include=['category', 'object']).columns:
         X[col] = X[col].astype(str)
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
 
     print(f"\n{'='*65}")
-    print(f"  CatBoost + RENT — {target_col}")
+    print(f"  CatBoost + RENT (Optuna-tuned) — {target_col}")
     print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
-    print(f"  RENT: K=100, τ₁={tau_1}, τ₂={tau_2}, τ₃={tau_3}")
-    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits/trial  |  Trials: 20")
+    print(f"  τ₃={tau_3} (fixed)  |  τ₁, τ₂, C, l1_ratio tuned via Optuna")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits")
+    print(f"  Study 1 (RENT HPs):  {N_RENT_TRIALS} trials × K=100 RENT splits")
+    print(f"  Study 2 (model HPs): {N_MODEL_TRIALS} trials")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
 
-    param_distributions = {
+    model_param_distributions = {
         'depth':               optuna.distributions.IntDistribution(3, 10),
         'learning_rate':       optuna.distributions.FloatDistribution(1e-3, 0.3, log=True),
         'l2_leaf_reg':         optuna.distributions.FloatDistribution(1, 10.0, log=True),
-        'bagging_temperature': optuna.distributions.FloatDistribution(0.0, 1.0),
-        'random_strength':     optuna.distributions.FloatDistribution(0.0, 10.0),
-    }
+        'bagging_temperature': optuna.distributions.FloatDistribution(0.0, 1.0)}
 
-    fold_results           = []
-    best_params_list       = []
+    fold_results               = []
+    best_rent_params_list      = []
+    best_model_params_list     = []
     selected_features_per_fold = []
-    optuna.logging.set_verbosity(optuna.logging.INFO)
     start = time.time()
 
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
-        print(f"\n  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
+        print(f"\n  ── Outer fold {outer_fold}/{outer_cv.get_n_splits()} ──")
 
         X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
@@ -547,53 +549,85 @@ def run_advanced_catboost_rent(
             pt_fold     = None
             y_train_fit = y_train
 
-        # ── RENT feature selection on training split only ─────────────────────
-        # Step 1: OrdinalEncode categorical (str) columns - need to encode first
-        X_train_enc = X_train.copy()
+        # ── Prepare X_train_rent: encode categoricals + impute NaN ───────────
+        X_train_enc   = X_train.copy()
         cat_mask_cols = [c for c in X_train.columns if X_train[c].dtype == object]
         if cat_mask_cols:
             oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
             X_train_enc[cat_mask_cols] = oe.fit_transform(X_train[cat_mask_cols])
-
-        # Step 2: Impute NaN with column median****
-        imputer = SimpleImputer(strategy='median')
+        imputer          = SimpleImputer(strategy='median') 
         X_train_rent_arr = imputer.fit_transform(X_train_enc.astype(float))
-        X_train_rent = pd.DataFrame(X_train_rent_arr, columns=feature_cols)
+        X_train_rent     = pd.DataFrame(X_train_rent_arr, columns=feature_cols)
 
-        # Step 3: Run RENT (uses transformed y if transformer provided)
-        rent_model = RENT.RENT_Regression(
-            data=X_train_rent,
-            target=y_train_fit.values,
+        # ── Study 1: Optuna for RENT HPs ──────────────────────────────────────
+        # Captures X_train_rent, X_train, y_train_fit, inner_cv, feature_cols from scope.
+        def rent_objective(trial):
+            c_val    = trial.suggest_float('C',        1e-3, 1e2, log=True)
+            l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
+            tau_1    = trial.suggest_float('tau_1',    0.6,  0.9)
+            tau_2    = trial.suggest_float('tau_2',    0.6,  0.9)
+
+            rent_trial = RENT.RENT_Regression(
+                data=X_train_rent, target=y_train_fit.values,
+                feat_names=feature_cols,
+                C=[c_val], l1_ratios=[l1_ratio],
+                autoEnetParSel=False,
+                poly='OFF', testsize_range=(0.25, 0.25),
+                K=100, random_state=random_state, verbose=0,
+            )
+            rent_trial.train()
+            sel_idx = rent_trial.select_features(
+                tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+
+            if len(sel_idx) == 0:
+                return 1e6  # penalise: no features selected
+
+            sel_cols = [feature_cols[i] for i in sel_idx]
+            probe = CatBoostRegressor(
+                iterations=200, depth=5, random_seed=random_state, verbose=0)
+            scores = cross_val_score(
+                probe, X_train[sel_cols], y_train_fit,
+                cv=inner_cv, scoring='neg_root_mean_squared_error')
+            return -scores.mean()
+
+        rent_study = optuna.create_study(direction='minimize')
+        rent_study.optimize(rent_objective, n_trials=N_RENT_TRIALS, show_progress_bar=False)
+        best_rent = rent_study.best_params
+        best_rent_params_list.append(best_rent)
+        print(f"    Study 1 best RENT: C={best_rent['C']:.4f}  l1={best_rent['l1_ratio']:.2f}"
+              f"  τ₁={best_rent['tau_1']:.2f}  τ₂={best_rent['tau_2']:.2f}"
+              f"  (score={rent_study.best_value:.4f})")
+
+        # ── Re-run RENT with best HPs to obtain selected features ────────────
+        rent_best = RENT.RENT_Regression(
+            data=X_train_rent, target=y_train_fit.values,
             feat_names=feature_cols,
-            C=[0.001, 0.01, 0.1, 1, 10, 100],
-            l1_ratios=[0.1, 0.25, 0.5, 0.75, 0.9, 1],
-            autoEnetParSel=True,
-            poly='OFF',
-            testsize_range=(0.25, 0.25),
-            K=100,
-            random_state=random_state,
-            verbose=0,
+            C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
+            autoEnetParSel=False,
+            poly='OFF', testsize_range=(0.25, 0.25),
+            K=100, random_state=random_state, verbose=0,
         )
-        rent_model.train()
-        selected_idx = rent_model.select_features(
-            tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+        rent_best.train()
+        selected_idx = rent_best.select_features(
+            tau_1_cutoff=best_rent['tau_1'],
+            tau_2_cutoff=best_rent['tau_2'],
+            tau_3_cutoff=tau_3,
+        )
 
         if len(selected_idx) == 0:
-            print(f"    RENT: 0 features selected — using all {len(feature_cols)}")
+            print(f"    RENT: 0 features after best HPs — using all {len(feature_cols)}")
             selected_cols = feature_cols
         else:
             selected_cols = [feature_cols[i] for i in selected_idx]
-            preview = selected_cols[:8]
-            suffix  = '...' if len(selected_cols) > 8 else ''
-            print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — {preview}{suffix}")
+            suffix = '...' if len(selected_cols) > 8 else ''
+            print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — "
+                  f"{selected_cols[:8]}{suffix}")
 
         selected_features_per_fold.append(selected_cols)
 
-        # ── Inner CV + Optuna on RENT-selected features ───────────────────────
-        X_train_sel = X_train[selected_cols]
-        X_test_sel  = X_test[selected_cols]
-
-        # CatBoost categorical features restricted to selected columns
+        # ── Study 2: Optuna for CatBoost HPs on RENT-selected features ───────
+        X_train_sel  = X_train[selected_cols]
+        X_test_sel   = X_test[selected_cols]
         cat_cols_sel = [c for c in cat_cols if c in selected_cols]
 
         base_model = CatBoostRegressor(
@@ -602,36 +636,34 @@ def run_advanced_catboost_rent(
             random_seed=random_state,
             verbose=0,
         )
-
         optuna_search = OptunaSearchCV(
             estimator=base_model,
-            param_distributions=param_distributions,
+            param_distributions=model_param_distributions,
             cv=inner_cv,
             scoring='neg_root_mean_squared_error',
-            n_trials=50,
+            n_trials=N_MODEL_TRIALS,
             n_jobs=-1,
             verbose=0,
         )
-
         optuna_search.fit(X_train_sel, y_train_fit)
-        best_params_list.append(optuna_search.best_params_)
+        best_model_params_list.append(optuna_search.best_params_)
 
         preds_raw = optuna_search.predict(X_test_sel)
         preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                  if pt_fold is not None else preds_raw)
-        rmse  = np.sqrt(mean_squared_error(y_test, preds))
-        mae   = mean_absolute_error(y_test, preds)
-        r2    = r2_score(y_test, preds)
-        mse   = rmse ** 2
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        mae  = mean_absolute_error(y_test, preds)
+        r2   = r2_score(y_test, preds)
+        mse  = rmse ** 2
 
         fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
-        print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
-        print(f"    Best params: {optuna_search.best_params_}")
+        print(f"    Study 2 best model: {optuna_search.best_params_}")
+        print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     elapsed = time.time() - start
     print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
 
-    # Results DataFrame + summary
+    # ── Results summary ───────────────────────────────────────────────────────
     results_df  = pd.DataFrame(fold_results)
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
     mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
@@ -641,56 +673,34 @@ def run_advanced_catboost_rent(
 
     n_outer = len(fold_results)
     t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
-    print(f"\n  Summary (4×5 outer CV + RENT, 20 Optuna trials, 95% CI):")
+    print(f"\n  Summary (4×5 outer CV, 95% CI):")
     for m in metric_cols:
         mv = mean_row[m]; sv = std_row[m]
         ci = t_crit * sv / np.sqrt(n_outer)
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
 
-
-    # Print feature selection summary across folds
+    # ── Feature selection frequency ───────────────────────────────────────────
     from collections import Counter
     all_selected = [f for fold_feats in selected_features_per_fold for f in fold_feats]
     freq = Counter(all_selected)
-    print(f"\n  RENT feature selection frequency (top 20 across {n_outer} folds):")
-    for feat, cnt in freq.most_common(20):
-        print(f"    {cnt:>3}/{n_outer}  {feat}")
+    print(f"\n  RENT feature selection frequency ({n_outer} outer folds):")
+    for feat, cnt in freq.most_common():
+        marker = ' ◀' if cnt / n_outer >= 0.5 else ''
+        print(f"    {cnt:>3}/{n_outer}  {feat}{marker}")
 
 
-    # Final model on full dataset using RENT on full X, last fold's best params
-    X_enc_full = X.copy()
-    cat_mask_cols_full = [c for c in X.columns if X[c].dtype == object]
-    if cat_mask_cols_full:
-        oe_full = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        X_enc_full[cat_mask_cols_full] = oe_full.fit_transform(X[cat_mask_cols_full])
-    imputer_full = SimpleImputer(strategy='median')
-    X_rent_full = pd.DataFrame(
-        imputer_full.fit_transform(X_enc_full.astype(float)), columns=feature_cols)
+    # ── Final model: features selected in ≥50% of outer folds ────────────────
+    final_cols = [f for f, cnt in freq.items() if cnt / n_outer >= 0.5]
+    if not final_cols:
+        print(f"\n  Warning: no feature met ≥50% threshold — falling back to top 10 by frequency")
+        final_cols = [f for f, _ in freq.most_common(10)]
+    print(f"\n  Final model: {len(final_cols)} features selected (≥50% frequency)")
 
-    rent_final = RENT.RENT_Regression(
-        data=X_rent_full,
-        target=y.values,
-        feat_names=feature_cols,
-        C=[0.001, 0.01, 0.1, 1, 10, 100],
-        l1_ratios=[0.1, 0.25, 0.5, 0.75, 0.9, 1],
-        autoEnetParSel=True,
-        poly='OFF',
-        testsize_range=(0.25, 0.25),
-        K=100,
-        random_state=random_state,
-        verbose=0,
-    )
-    rent_final.train()
-    final_idx  = rent_final.select_features(
-        tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
-    final_cols = [feature_cols[i] for i in final_idx] if len(final_idx) > 0 else feature_cols
-    print(f"\n  Final model RENT selected {len(final_cols)}/{len(feature_cols)} features.")
-
-    X_final = X[final_cols]
+    X_final        = X[final_cols]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
 
     if target_transformer is not None:
-        pt_final = clone(target_transformer)
+        pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
             pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
     else:
@@ -712,7 +722,7 @@ def run_advanced_catboost_rent(
                         index=y_pred_raw.index, dtype='float64')
               if pt_final is not None else y_pred_raw)
 
-    return results_df, final_model, X_final, y_pred, selected_features_per_fold
+    return results_df, final_model, X_final, y_pred, selected_features_per_fold, best_rent_params_list
 
 
 
