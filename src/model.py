@@ -368,6 +368,7 @@ def run_catboost_regressor(df_model, target_col, name,
             iterations=1000,
             loss_function='RMSE',
             random_seed=random_state,
+            thread_count=-1,
             verbose=0,
         )
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
@@ -598,10 +599,11 @@ def run_advanced_catboost_rent(
             probe = CatBoostRegressor(
                 iterations=200, depth=5,
                 cat_features=cat_cols_sel,
-                random_seed=random_state, verbose=0)
+                random_seed=random_state, thread_count=-1, verbose=0)
             scores = cross_val_score(
                 probe, X_train[sel_cols], y_train_fit,
-                cv=inner_cv, scoring='neg_root_mean_squared_error')
+                cv=inner_cv, scoring='neg_root_mean_squared_error',
+                n_jobs=1)
             return -scores.mean()
 
         rent_study = optuna.create_study(direction='minimize')
@@ -649,6 +651,7 @@ def run_advanced_catboost_rent(
             iterations=300,
             cat_features=cat_cols_sel,
             random_seed=random_state,
+            thread_count=-1,
             verbose=0,
         )
         optuna_search = OptunaSearchCV(
@@ -657,7 +660,7 @@ def run_advanced_catboost_rent(
             cv=inner_cv,
             scoring='neg_root_mean_squared_error',
             n_trials=N_MODEL_TRIALS,
-            n_jobs=-1,
+            n_jobs=1,
             verbose=0,
         )
         optuna_search.fit(X_train_sel, y_train_fit)
@@ -729,6 +732,7 @@ def run_advanced_catboost_rent(
         custom_metric=['MAE', 'R2'],
         cat_features=cat_cols_final,
         random_seed=random_state,
+        thread_count=-1,
         verbose=0,
         **optuna_search.best_params_,
     )
