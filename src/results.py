@@ -480,6 +480,127 @@ plt.tight_layout()
 plt.show()
 
 
+#%%---------- Step 8c — T1→T3 targets: distributions before/after power transform
+
+pain_targets_t13       = model.construct_datasets_targets(df_cl_mod, 'pain_scale',      [1, 3])
+targets_under_load_t13 = model.construct_datasets_targets(df_cl_mod, 'pain_under_load', [1, 3])
+
+_t13_frames = {
+    'pain_scale':      pain_targets_t13,
+    'pain_under_load': targets_under_load_t13,
+}
+_colors = sns.color_palette('mako', len(_t13_frames))
+
+# Raw distributions
+fig, axes = plt.subplots(2, len(_t13_frames), figsize=(5 * len(_t13_frames), 8))
+for col_idx, (name, tdf) in enumerate(_t13_frames.items()):
+    prefix  = name.replace('_scale', '')
+    red_col = f'{prefix}_reduction'
+    pct_col = f'{prefix}_reduction_pct'
+    sns.histplot(tdf[red_col].dropna(), kde=True, ax=axes[0, col_idx], color=_colors[col_idx], bins=20)
+    axes[0, col_idx].set_title(f'{name}\nAbsolute reduction (T1−T3)')
+    axes[0, col_idx].set_xlabel('Reduction')
+    sns.histplot(tdf[pct_col].dropna(), kde=True, ax=axes[1, col_idx], color=_colors[col_idx], bins=20)
+    axes[1, col_idx].set_title(f'{name}\nPercent reduction (%)')
+    axes[1, col_idx].set_xlabel('Reduction (%)')
+plt.suptitle('Target Distributions (T1 → T3)', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
+
+# Power-transformed distributions (on copies)
+fig, axes = plt.subplots(2, len(_t13_frames), figsize=(5 * len(_t13_frames), 8))
+for col_idx, (name, tdf) in enumerate(_t13_frames.items()):
+    prefix  = name.replace('_scale', '')
+    red_col = f'{prefix}_reduction'
+    pct_col = f'{prefix}_reduction_pct'
+    tdf_viz = tdf[[red_col, pct_col]].copy()
+    tdf_viz[[red_col, pct_col]] = PowerTransformer(method='yeo-johnson', standardize=True).fit_transform(tdf_viz)
+    sns.histplot(tdf_viz[red_col].dropna(), kde=True, ax=axes[0, col_idx], color=_colors[col_idx], bins=20)
+    axes[0, col_idx].set_title(f'{name}\nAbsolute reduction (T1−T3) — transformed')
+    axes[0, col_idx].set_xlabel('Reduction (transformed)')
+    sns.histplot(tdf_viz[pct_col].dropna(), kde=True, ax=axes[1, col_idx], color=_colors[col_idx], bins=20)
+    axes[1, col_idx].set_title(f'{name}\nPercent reduction (%) — transformed')
+    axes[1, col_idx].set_xlabel('Reduction (%) (transformed)')
+plt.suptitle('Target Distributions after Power Transform (T1 → T3)', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
+
+
+#%%########## T1→T3 MODELING PIPELINE #########################################
+
+print('\n' + '#'*60)
+print('  T1→T3 MODELING PIPELINE')
+print('#'*60)
+
+#%%---------- Step T13-1 — Model datasets (T1→T3 immunological diffs) ---------
+
+print('\nStep T13-1: Creating T1→T3 model datasets')
+
+_unique_targets_t13 = {
+    'pain_reduction':            pain_targets_t13,
+    'pain_under_load_reduction': targets_under_load_t13,
+}
+
+model_datasets_t13 = {}
+for tgt, tdf in _unique_targets_t13.items():
+    model_datasets_t13[tgt] = model.create_model_datasets(
+        df_cl_mod, df_im_mod, tdf, timepoints=[1, 3]
+    )
+
+model_datasets_t13['pain_reduction_pct'] = model_datasets_t13['pain_reduction']
+
+TableReport(model_datasets_t13['pain_reduction_pct'], max_plot_columns=180)
+TableReport(model_datasets_t13['pain_under_load_reduction'], max_plot_columns=180)
+
+
+#%%---------- Step T13-2 — Baseline CatBoost (T1→T3) -------------------------
+
+print('\nStep T13-2: Baseline CatBoost — T1→T3 targets')
+
+_pt_t13 = PowerTransformer(method='yeo-johnson', standardize=True)
+
+baseline_results_t13 = {}
+for tgt, df_comb in model_datasets_t13.items():
+    res, mdl, X, ypred = model.run_catboost_regressor(
+        df_comb, tgt, 'Combined T1−T3 diff', target_transformer=_pt_t13)
+    baseline_results_t13[tgt] = (res, mdl, X, ypred)
+
+for tgt, (res, *_) in baseline_results_t13.items():
+    model.print_regression_summary({'Combined': res}, tgt)
+
+
+#%%---------- Step T13-3a — CatBoost + RENT: pain_reduction_pct (T1→T3) ------
+
+print('\nStep T13-3a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction (T1→T3)')
+
+cb_t13_pct_results, cb_t13_pct_model, cb_t13_pct_X, cb_t13_pct_ypred, cb_t13_pct_features, cb_t13_pct_rent_params = \
+    model.run_advanced_catboost_rent(
+        model_datasets_t13['pain_reduction_pct'],
+        target_col='pain_reduction',
+        target_transformer=_pt_t13,
+    )
+
+print('\nStep T13-3b: SHAP — CatBoost (pain_reduction_pct, T1→T3)')
+cb_t13_pct_shap = model.plot_shap_regressor(
+    cb_t13_pct_model, cb_t13_pct_X, 'CatBoost — pain_reduction_pct (T1→T3)')
+
+
+#%%---------- Step T13-4a — CatBoost + RENT: pain_under_load_reduction (T1→T3)
+
+print('\nStep T13-4a: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_reduction (T1→T3)')
+
+cb_t13_ul_results, cb_t13_ul_model, cb_t13_ul_X, cb_t13_ul_ypred, cb_t13_ul_features, cb_t13_ul_rent_params = \
+    model.run_advanced_catboost_rent(
+        model_datasets_t13['pain_under_load_reduction'],
+        target_col='pain_under_load_reduction',
+        target_transformer=_pt_t13,
+    )
+
+print('\nStep T13-4b: SHAP — CatBoost (pain_under_load_reduction, T1→T3)')
+cb_t13_ul_shap = model.plot_shap_regressor(
+    cb_t13_ul_model, cb_t13_ul_X, 'CatBoost — pain_under_load_reduction (T1→T3)')
+
+
 #%%---------- Step 9 — Prepare modeling datasets (immunological T1-T2 diffs) --
 
 print('\nStep 9: Creating model datasets:')
@@ -583,10 +704,6 @@ cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_features, cb_ul_rent_par
 print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction)')
 cb_ul_shap = model.plot_shap_regressor(
     cb_ul_model, cb_ul_X, 'CatBoost — pain_under_load_reduction')
-
-
-
-
 
 
 
