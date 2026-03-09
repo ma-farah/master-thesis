@@ -1,6 +1,7 @@
 # Full analysis pipeline — calls functions from preprocess, explore, and model
 # run_script.py is kept as an old reference copy
 
+#%%
 #%% Imports
 import pandas as pd
 import numpy as np
@@ -683,6 +684,9 @@ print('#'*60)
 
 
 #%%---------- Step 11a — CatBoost: pain_reduction (T1→T2) --------------------
+import joblib, os
+
+MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 
 print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction (T1→T2)')
 
@@ -693,6 +697,21 @@ cb_red_results, cb_red_model, cb_red_X, cb_red_ypred, cb_red_features, cb_red_re
         target_transformer=_pt,
     )
 
+# — Save model and feature matrix so SHAP can be run later without retraining —
+cb_red_model.save_model(os.path.join(MODEL_DIR, 'cb_red_model.cbm'))
+joblib.dump(cb_red_X, os.path.join(MODEL_DIR, 'cb_red_X.pkl'))
+print('  ✓ Saved cb_red_model.cbm and cb_red_X.pkl to', os.path.abspath(_MODEL_DIR))
+
+
+#%%---------- Step 11b — SHAP: pain_reduction (load saved model) -------------
+import joblib, os
+from catboost import CatBoostRegressor
+
+MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
+
+cb_red_model = CatBoostRegressor()
+cb_red_model.load_model(os.path.join(MODEL_DIR, 'cb_red_model.cbm'))
+cb_red_X = joblib.load(os.path.join(MODEL_DIR, 'cb_red_X.pkl'))
 
 print('\nStep 11b: SHAP — CatBoost (pain_reduction, T1→T2)')
 cb_red_shap = model.plot_shap_regressor(
@@ -709,6 +728,22 @@ cb_pct_results, cb_pct_model, cb_pct_X, cb_pct_ypred, cb_pct_features, cb_pct_re
         target_col='pain_reduction_pct',
         target_transformer=_pt,
     )
+
+# — Save model and feature matrix so SHAP can be run later without retraining —
+cb_pct_model.save_model(os.path.join(_MODEL_DIR, 'cb_pct_model.cbm'))
+joblib.dump(cb_pct_X, os.path.join(_MODEL_DIR, 'cb_pct_X.pkl'))
+print('  ✓ Saved cb_pct_model.cbm and cb_pct_X.pkl to', os.path.abspath(_MODEL_DIR))
+
+
+#%%---------- Step 11d — SHAP: pain_reduction_pct (load saved model) ---------
+import joblib, os
+from catboost import CatBoostRegressor
+
+_MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
+
+cb_pct_model = CatBoostRegressor()
+cb_pct_model.load_model(os.path.join(_MODEL_DIR, 'cb_pct_model.cbm'))
+cb_pct_X = joblib.load(os.path.join(_MODEL_DIR, 'cb_pct_X.pkl'))
 
 print('\nStep 11d: SHAP — CatBoost (pain_reduction_pct, T1→T2)')
 cb_pct_shap = model.plot_shap_regressor(

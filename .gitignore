@@ -9,6 +9,9 @@ __pycache__/
 
 # Data (ignore dataset)
 data/*
+
+# Saved models (large binary files, transfer manually)
+models/
 *.csv
 *.xlsx
 *.xls

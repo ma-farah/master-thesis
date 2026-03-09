@@ -10,8 +10,9 @@ from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from sklearn.ensemble import HistGradientBoostingRegressor
 from catboost import CatBoostRegressor, Pool
-import shap
-
+# shap is imported lazily inside plot_shap_regressor / plot_shap_pipeline
+# to avoid kernel crashes on Windows with restricted execution policies.
+import joblib, os
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,10 @@ CL_QUESTIONNAIRE_COLS = [
     'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness',
     'pain_points',   # high correlation with target_volume  
 ]
+
+# path to save models
+MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
+
 
 
 def prepare_model_input(df, target_col):
@@ -406,6 +411,7 @@ def run_catboost_regressor(df_model, target_col, name,
 
 def plot_shap_regressor(model, X, name):
     """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
+    import shap
     print(f"\n=== SHAP Analysis: {name} ===")
     explainer   = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
@@ -1273,6 +1279,7 @@ def plot_shap_pipeline(pipeline, X_final, name, top_n=20):
     name     : str               Label shown in plot titles.
     top_n    : int               Maximum features to display (default 20).
     """
+    import shap
     from sklearn.linear_model import ElasticNet
 
     feature_names  = list(X_final.columns)
