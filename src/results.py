@@ -506,27 +506,6 @@ TableReport(model_datasets['pain_under_load_reduction'], max_plot_columns=180)
 #%%
 print('\nStep 10b: Model dataset diagnostics — target distributions and sample sizes')
 
-for tgt, df_comb in model_datasets.items():
-    y = df_comb[tgt].dropna()
-    print(f"\n{'─'*55}")
-    print(f"  Target : {tgt}")
-    print(f"  n (combined, non-NaN target) : {len(y)}")
-    print(f"  Features in combined dataset : {df_comb.shape[1]}")
-    print(f"  mean={y.mean():.2f}  std={y.std():.2f}  "
-          f"min={y.min():.2f}  max={y.max():.2f}")
-    print(f"  skew={y.skew():.2f}  kurt={y.kurt():.2f}")
-    print(f"  % zeros (no change) : {(y == 0).mean()*100:.1f}%")
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3))
-    sns.histplot(y, kde=True, ax=axes[0], color=sns.color_palette('mako', 1)[0], bins=20)
-    axes[0].set_title(f'{tgt} — distribution')
-    axes[0].set_xlabel(tgt)
-    axes[1].boxplot(y.dropna(), vert=False)
-    axes[1].set_title(f'{tgt} — boxplot (outliers)')
-    axes[1].set_xlabel(tgt)
-    plt.tight_layout()
-    plt.show()
-
 print(f"\n{'─'*55}")
 print("  Feature–target Pearson correlations (top 10, combined dataset):")
 for tgt, df_comb in model_datasets.items():
