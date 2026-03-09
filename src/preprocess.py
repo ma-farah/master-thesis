@@ -292,18 +292,9 @@ CL_PAIN_QUESTIONNAIRE_COLS = [
     'pain_under_load', 'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness',
 ]
 
-# Radiation equipment columns — excluded from modeling (not clinically predictive)
-# Note: fha, ma, kv are already dropped in exclude_predetermined (step 2);
-# only single_fraction reaches df_cl_vis and is dropped here via results.py.
-CL_RADIATION_EQUIPMENT_COLS = ['fha', 'ma', 'kv', 'single_fraction']
-
-# Additional columns excluded from modeling:
-CL_EXTRA_MODEL_DROP_COLS = ['pain_scale', 'pain_points', 'complaints_since']
-
 # Column name patterns that identify leaky  columns (must not be in model features)
 CL_LEAKY_PATTERNS = [
-    'response', 'improvement_percent', 'pain_reduction_pct',
-    'response_pct', 'response_category',
+    'response', 'improvement_percent', 'pain_reduction_pct', 'response_category'
 ]
 
 
@@ -895,7 +886,7 @@ def exclude_predetermined(df_cl_clean, multi_body_patients=None, verbose=True):
 
     # 4 — Drop other predetermined columns 
     admin_cols = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire',
-                  'Filter', 'kV', 'mA', 'FHA']
+                  'Filter', 'kV', 'mA', 'FHA', 'single fraction']
     dropped = [c for c in admin_cols if c in df.columns]
     df = df.drop(columns=dropped)
     if verbose:
@@ -1286,15 +1277,13 @@ def clean_cl(df_cl, verbose=True):
     -----
     1.  Forward-fill patient-level columns + extract Timepoint  (forward_fill_clinical)
     2.  Exclude predetermined patients + drop predetermined columns  (exclude_predetermined)
-    3.  Rename columns German → English  (rename_columns_cl)
+    3.  Rename columns German to English  (rename_columns_cl)
     4.  Apply manual data corrections  (manual_corrections_cl)
-    5.  Parse/transform all columns  (parse_transform_cl)
-    6.  Replace German NaN markers in-place  (replace_missing_markers)
-    7.  Drop empty rows: no date or empty questionnaire  (drop_rows_cl)
+    5.  Parse/transform columns  (parse_transform_cl)
+    6.  Replace German NaN markers  (replace_missing_markers)
+    7.  Drop empty rows, no date or empty questionnaire  (drop_rows_cl)
     8.  Fix dtypes  (fix_dtypes_cl)
-    9.  Return df_cl_vis with ALL columns (no >25% NaN drop).
-        Modeling-specific reductions (>25% NaN drop, pain cols, leaky cols)
-        are applied in results.py when creating df_cl_mod.
+    9.  Return df_cl_vis with all columns
 
     Parameters
     ----------
@@ -1303,42 +1292,42 @@ def clean_cl(df_cl, verbose=True):
 
     Returns
     -------
-    df_cl_vis : fully cleaned dataset, all columns, for EDA and visualization.
+    df_cl_vis : full cleaned dataset
     """
+
+    df_cl_vis = df_cl.copy()   # keep the raw input untouched
+
     if verbose:
         print("\n  [1] Forward-filling patient-level columns + extracting Timepoint")
-    df_cl_clean = forward_fill_clinical(df_cl, verbose=verbose)
+    df_cl_vis = forward_fill_clinical(df_cl_vis, verbose=verbose)
 
     if verbose:
         print("\n  [2] Excluding predetermined patients and columns")
-    df_cl_clean = exclude_predetermined(df_cl_clean, verbose=verbose)
+    df_cl_vis = exclude_predetermined(df_cl_vis, verbose=verbose)
 
     if verbose:
-        print("\n  [3] Renaming columns German to English")
-    df_cl_clean = rename_columns_cl(df_cl_clean, verbose=verbose)
+        print("\n  [3] Renaming columns from German to English")
+    df_cl_vis = rename_columns_cl(df_cl_vis, verbose=verbose)
 
     if verbose:
-        print("\n  [4] Applying manual corrections (typos)")
-    df_cl_clean = manual_corrections_cl(df_cl_clean, verbose=verbose)
+        print("\n  [4] Applying manual corrections")
+    df_cl_vis = manual_corrections_cl(df_cl_vis, verbose=verbose)
 
     if verbose:
         print("\n  [5] Parsing and transforming columns")
-    df_cl_clean = parse_transform_cl(df_cl_clean, verbose=verbose)
+    df_cl_vis = parse_transform_cl(df_cl_vis, verbose=verbose)
 
     if verbose:
         print("\n  [6] Replacing NaN markers")
-    replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=verbose)
+    replace_missing_markers(df_cl_vis, skip_cols=["Patient", "Timepoint"], verbose=verbose)
 
     if verbose:
         print("\n  [7] Dropping empty rows")
-    df_cl_clean = drop_rows_cl(df_cl_clean, verbose=verbose)
+    df_cl_vis = drop_rows_cl(df_cl_vis, verbose=verbose)
 
     if verbose:
         print("\n  [8] Fixing dtypes")
-    df_cl_clean = fix_dtypes_cl(df_cl_clean, verbose=verbose)
-
-    # 9 — visualization copy: all columns, no >25% NaN drop yet.
-    df_cl_vis = df_cl_clean.copy()
+    df_cl_vis = fix_dtypes_cl(df_cl_vis, verbose=verbose)
 
     if verbose:
         print(f"\n  df_cl_vis : {df_cl_vis.shape}  (all columns, ready for EDA)")
@@ -1348,7 +1337,7 @@ def clean_cl(df_cl, verbose=True):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# IMPUTATION  (produces df_*_imputed for PyOD; both immunological and clinical)
+# IMPUTATION 
 # ══════════════════════════════════════════════════════════════════════════════
 
 def impute_miceforest(df, id_cols, name, num_datasets=5, iterations=10,

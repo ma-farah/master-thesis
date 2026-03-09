@@ -15,8 +15,46 @@ import shap
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Substrings that flag a column as a leaky outcome variable.
-CL_MODEL_LEAKY_PATTERNS = ['response', 'improvement_percent', '_reduction']
+
+# Metadata / date columns never used as model features.
+CL_MODEL_DROP_COLS = ['Date', 'date', 'response', 'response_category', 'improvement_percent', 'measurement_timepoint', 'pain_scale', 'pain_under_load']
+
+# Pain questionnaire / non-feature clinical columns — excluded from modeling.
+CL_QUESTIONNAIRE_COLS = [
+    'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness',
+    'pain_points',   # high correlation with target_volume  
+]
+
+
+def prepare_model_input(df, target_col):
+    """Strip non-feature columns, keeping Patient, Timepoint, model features, and target_col.
+
+    Call this once on df_immu_alone / df_combined before any model function.
+
+    Removes
+    -------
+    - Metadata/date columns  (Date, date, measurement_timepoint)
+    - Pain questionnaire / non-feature cols (pain_under_load, pain_night,
+                               pain_daytime, pain_at_rest, morning_stiffness, pain_points)
+    - Leaky outcome columns   (anything matching CL_MODEL_LEAKY_PATTERNS —
+                               response*, improvement_percent, *_reduction*)
+      → target_col is always preserved even if it matches a leaky pattern.
+
+    Parameters
+    ----------
+    df         : pd.DataFrame  Modeling dataset (df_immu_alone or df_combined).
+    target_col : str           The single regression target to keep.
+
+    Returns
+    -------
+    pd.DataFrame — Patient, Timepoint, feature columns, and target_col only.
+    """
+    to_drop = set(CL_MODEL_DROP_COLS + CL_QUESTIONNAIRE_COLS)
+    # remove columns that specifically match to_drop:
+    drop = {c for c in df.columns if c in to_drop}
+    if drop:
+        print(f"  prepare_model_input: dropping {len(drop)} cols — {sorted(drop)}")
+    return df.drop(columns=list(drop))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -62,7 +100,6 @@ def construct_datasets_targets(df1, column_name, timepoints):
 
     # Strip '_scale' from the prefix so 'pain_scale' becomes 'pain_reduction'
     # and 'pain_reduction_pct' rather than 'pain_scale_reduction[_pct]'.
-    # Other columns (pain_daytime, pain_under_load, …) are unaffected.
     prefix  = column_name.replace('_scale', '')
     col_red = f'{prefix}_reduction'
     col_pct = f'{prefix}_reduction_pct'
@@ -125,9 +162,9 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
     Parameters
     ----------
-    df_cl      : pd.DataFrame  Cleaned clinical dataset (df_cl_vis or df_cl_mod).
+    df_cl      : pd.DataFrame  Cleaned clinical dataset 
                                Must contain 'Patient', 'Timepoint', and clinical features.
-    df_im      : pd.DataFrame  Immunological dataset (df_im_vis or df_im_mod).
+    df_im      : pd.DataFrame  Cleaned Immunological dataset 
                                Must contain 'Patient', 'Timepoint', and immu features.
     targets    : pd.DataFrame  Output from construct_datasets_targets().
                                Must contain 'Patient' + target columns.
@@ -182,8 +219,8 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
 
     # ── CLINICAL: T_a baseline rows only ─────────────────────────────────────────
-    # df_cl (df_cl_mod) is pre-filtered: pain questionnaire cols and leaky metadata
-    # cols were already removed in results.py Step 7. Only exclude ID cols here.
+    # df_cl contains all modeling columns at this point; prepare_model_input()
+    # is called downstream (before model functions) to strip non-feature columns.
 
     cl_feat_cols = [c for c in df_cl.columns if c not in id_cols]
 
@@ -213,6 +250,18 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     )
 
     baseline_cols = [c for c in target_merge if c.endswith(f'_t{t_a}')]
+    
+    # Dropping leaky columns
+    drop_cols = set(CL_MODEL_DROP_COLS + CL_QUESTIONNAIRE_COLS)
+    all_cols = set(df_immu_alone.columns) | set(df_combined.columns)
+    drop = {c for c in all_cols if c in drop_cols}
+
+    if drop:
+        print(f"  prepare_model_input: dropping {len(drop)} cols — {sorted(drop)}")
+        df_immu_alone = df_immu_alone.drop(columns=list(drop), errors='ignore')
+        df_combined   = df_combined.drop(columns=list(drop), errors='ignore')
+
+
     print(f"\nModel datasets ready (T{t_a}–T{t_b} immunological differences only):")
     print(f"  Immunological diff features : {len(diff_cols)}  "
           f"(one T{t_a}−T{t_b} diff per original feature)")
@@ -271,18 +320,14 @@ def run_catboost_regressor(df_model, target_col, name,
     X          : pd.DataFrame       Feature matrix used (rows with non-NaN target).
     y_pred     : pd.Series          Out-of-fold predictions aligned to X's index.
     """
-    # Build the exclusion set: ID columns + target_col + pattern-matched leaky cols.
-   
-    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_patterns = CL_MODEL_LEAKY_PATTERNS  # ['response', 'improvement_percent', 'pain_reduction']
-    leaky_cols = [c for c in df_model.columns
-                  if any(pat in c for pat in leaky_patterns)]
-    exclude = set(id_cols) | set(leaky_cols) | {target_col}
+    # Build the exclusion set: ID columns + target_col.
 
-    # Subset to feature columns and extract target; drop rows where target is NaN
+    y = df_model[target_col].copy() # target
+    # exlude id features and other targets
+    exclude = ['Patient', 'Timepoint', target_col, 'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction', 'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
-    y = df_model[target_col].copy()
+ 
 
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
@@ -353,51 +398,6 @@ def run_catboost_regressor(df_model, target_col, name,
 
     return results_df, model, X, y_pred
 
-
-def plot_prediction_heatmap(y_true, y_pred, name, bins=10):
-    """2D density heatmap of predicted vs actual regression values.
-
-    Each cell shows how many patients had a given (predicted, actual) combination.
-    A perfect model clusters along the diagonal. Off-diagonal density reveals
-    systematic over- or under-prediction in specific ranges.
-
-    With small samples (~100 patients), bins=10 gives a reasonable resolution
-    without too many empty cells. Adjust bins downward if the plot looks too sparse.
-
-    Parameters
-    ----------
-    y_true : array-like   True target values.
-    y_pred : array-like   Regression predictions from model.predict().
-    name   : str          Label shown in the plot title.
-    bins   : int          Number of bins along each axis (default 10).
-    """
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-
-    # 2D histogram heatmap: x = predicted, y = actual
-    # cbar_kws label is 'Patient count' since each cell is a count of patients
-    sns.histplot(
-        x=y_pred, y=y_true,
-        bins=bins,
-        cmap='mako',
-        cbar=True,
-        cbar_kws={'label': 'Patient count'},
-        ax=ax,
-    )
-
-    # Diagonal reference line = perfect prediction
-    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
-    ax.plot(lims, lims, linestyle='--', color='red', linewidth=1.2,
-            alpha=0.7, label='Perfect prediction')
-
-    ax.set_xlabel('Predicted pain reduction (%)', fontsize=11)
-    ax.set_ylabel('Actual pain reduction (%)',    fontsize=11)
-    ax.set_title(f'Predicted vs Actual — {name}', fontsize=12)
-    ax.legend(fontsize=9)
-    plt.tight_layout()
-    plt.show()
 
 
 def plot_shap_regressor(model, X, name):
@@ -492,15 +492,11 @@ def run_advanced_catboost_rent(
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
 
-    # Same exclusion logic as run_advanced_catboost
-    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_cols = [c for c in df_combined.columns
-                  if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
-    exclude = set(id_cols) | set(leaky_cols) | {target_col}
-
+    y = df_combined[target_col].copy()
+    
+    exclude = ['Patient', 'Timepoint', target_col, 'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction', 'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_combined.columns if c not in exclude]
     X = df_combined[feature_cols].copy()
-    y = df_combined[target_col].copy()
 
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
@@ -745,11 +741,9 @@ def run_advanced_hgb_rent(
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
 
-    # Same exclusion logic as other functions
-    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_cols = [c for c in df_combined.columns
-                  if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
-    exclude = set(id_cols) | set(leaky_cols) | {target_col}
+    # Non-feature columns are already removed by prepare_model_input().
+    id_cols = ['Patient', 'Timepoint']
+    exclude = set(id_cols) | {target_col}
 
     feature_cols = [c for c in df_combined.columns if c not in exclude]
     X_raw = df_combined[feature_cols].copy()
@@ -1011,11 +1005,9 @@ def run_advanced_elasticnet_rent(
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
 
-    # Same exclusion logic as other advanced functions
-    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_cols = [c for c in df_combined.columns
-                  if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
-    exclude = set(id_cols) | set(leaky_cols) | {target_col}
+    # Non-feature columns are already removed by prepare_model_input().
+    id_cols = ['Patient', 'Timepoint']
+    exclude = set(id_cols) | {target_col}
 
     feature_cols = [c for c in df_combined.columns if c not in exclude]
     X_raw = df_combined[feature_cols].copy()
@@ -1225,8 +1217,7 @@ def plot_shap_pipeline(pipeline, X_final, name, top_n=20):
     Selects the appropriate SHAP explainer based on the model type:
       - ElasticNet  → shap.LinearExplainer  (exact, fast)
       - HGB         → shap.TreeExplainer    (exact, fast)
-      - PLS / other → shap.Explainer        (permutation-based, model-agnostic)
-
+    
     For pipelines with preprocessing steps (Imputer → Scaler → model), X is
     transformed through those steps before SHAP is applied to the model directly,
     so SHAP values are in the standardised feature space.
@@ -1277,278 +1268,4 @@ def plot_shap_pipeline(pipeline, X_final, name, top_n=20):
     plt.show()
 
     return shap_values
-
-
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ADVANCED PLS + RENT  (Nested CV + Optuna)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class _PLSWrapper(BaseEstimator, RegressorMixin):
-    """Thin sklearn-compatible wrapper around PLSRegression.
-
-    PLSRegression.predict() returns shape (n_samples, 1).  This wrapper
-    squeezes the output to 1D so sklearn scorers and OptunaSearchCV work
-    without modification.  Only `n_components` is exposed as a hyperparameter.
-    """
-    def __init__(self, n_components=2):
-        self.n_components = n_components
-
-    def fit(self, X, y):
-        from sklearn.cross_decomposition import PLSRegression
-        self._pls = PLSRegression(n_components=self.n_components, scale=False)
-        self._pls.fit(X, np.asarray(y).ravel())
-        return self
-
-    def predict(self, X):
-        return self._pls.predict(X).ravel()
-
-
-def run_advanced_pls_rent(
-    df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_1=0.7, tau_2=0.75, tau_3=0.95,
-):
-    """PLS regression with RENT feature selection + nested CV + Optuna.
-
-    Preprocessing (same as ElasticNet RENT):
-      1. OrdinalEncoder applied once before outer CV (fixed mapping).
-      2. SimpleImputer (median) + StandardScaler fitted on X_train per outer
-         fold for RENT; re-fitted per inner split inside the sklearn Pipeline.
-
-    One hyperparameter is tuned: n_components (1 – 15). 
-
-    Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
-    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per trial.
-    Optuna   : 20 trials per outer fold, scoring = neg_root_mean_squared_error.
-
-    Parameters
-    ----------
-    df_combined : pd.DataFrame  Combined T1 dataset (immunological + clinical).
-    target_col  : str           Regression target (default: 'pain_reduction_pct').
-    random_state: int           Random seed (default 42).
-    tau_1       : float         RENT τ₁ cutoff (default 0.7).
-    tau_2       : float         RENT τ₂ cutoff (default 0.75).
-    tau_3       : float         RENT τ₃ cutoff (default 0.95).
-
-    Returns
-    -------
-    results_df              : pd.DataFrame  Per-fold metrics + Mean/Std rows.
-    best_params_df          : pd.DataFrame  Best n_components per outer fold.
-    final_pipeline          : Pipeline      Fitted (Imputer→Scaler→PLS) on full data.
-    X_final                 : pd.DataFrame  OrdinalEncoded feature matrix (RENT-selected).
-    y_pred                  : pd.Series     Full-data predictions from final_pipeline.
-    selected_features_per_fold : list[list[str]]  Selected feature names per outer fold.
-    """
-    import optuna
-    import warnings
-    try:
-        from optuna.integration import OptunaSearchCV
-    except ImportError:
-        from optuna_integration import OptunaSearchCV
-    from sklearn.impute import SimpleImputer
-    from sklearn.preprocessing import OrdinalEncoder, StandardScaler
-    from sklearn.pipeline import Pipeline
-    from RENT import RENT
-
-    warnings.filterwarnings('ignore', category=FutureWarning, module='RENT')
-    warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
-    warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
-
-    # Exclusion logic
-    id_cols = ['Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint']
-    leaky_cols = [c for c in df_combined.columns
-                  if any(pat in c for pat in CL_MODEL_LEAKY_PATTERNS)]
-    exclude = set(id_cols) | set(leaky_cols) | {target_col}
-
-    feature_cols = [c for c in df_combined.columns if c not in exclude]
-    X_raw = df_combined[feature_cols].copy()
-    y = df_combined[target_col].copy()
-
-    valid = y.notna()
-    X_raw, y = X_raw[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-
-    # OrdinalEncode str/category columns once upfront
-    X_oe = X_raw.copy()
-    cat_cols_list = [c for c in X_oe.columns
-                     if X_oe[c].dtype == object or str(X_oe[c].dtype) == 'category']
-    if cat_cols_list:
-        oe_global = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        X_oe[cat_cols_list] = oe_global.fit_transform(X_oe[cat_cols_list].astype(str))
-
-    print(f"\n{'='*65}")
-    print(f"  PLS + RENT — {target_col}")
-    print(f"  Samples: {len(X_oe)},  Features: {len(feature_cols)}")
-    print(f"  RENT: K=100, τ₁={tau_1}, τ₂={tau_2}, τ₃={tau_3}")
-    print(f"  Preprocessing: OrdinalEncode → Impute (median) → StandardScale")
-    print(f"  Optuna: n_components ∈ [1, min(15, n_features_selected, 0.75×n_train)]")
-    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits/trial  |  Trials: 20")
-    print(f"{'='*65}")
-
-    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-
-    fold_results           = []
-    best_params_list       = []
-    selected_features_per_fold = []
-    optuna.logging.set_verbosity(optuna.logging.INFO)
-    start = time.time()
-
-    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_oe), start=1):
-        print(f"\n  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
-
-        X_oe_train = X_oe.iloc[train_idx].copy()
-        X_oe_test  = X_oe.iloc[test_idx].copy()
-        y_train    = y.iloc[train_idx]
-        y_test     = y.iloc[test_idx]
-
-        # ── Preprocess X_train for RENT ───────────────────────────────────────
-        imputer_rent = SimpleImputer(strategy='median').fit(X_oe_train)
-        X_imp_train  = imputer_rent.transform(X_oe_train)
-        scaler_rent  = StandardScaler().fit(X_imp_train)
-        X_rent_train = pd.DataFrame(
-            scaler_rent.transform(X_imp_train), columns=feature_cols)
-
-        # ── RENT feature selection ────────────────────────────────────────────
-        rent_model = RENT.RENT_Regression(
-            data=X_rent_train,
-            target=y_train.values,
-            feat_names=feature_cols,
-            C=[0.1, 1, 10],
-            l1_ratios=[0.1, 0.5, 0.9],
-            autoEnetParSel=True,
-            poly='OFF',
-            testsize_range=(0.25, 0.25),
-            K=100,
-            random_state=random_state,
-            verbose=0,
-        )
-        rent_model.train()
-        selected_idx = rent_model.select_features(
-            tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
-
-        if len(selected_idx) == 0:
-            print(f"    RENT: 0 features selected — using all {len(feature_cols)}")
-            selected_cols = feature_cols
-        else:
-            selected_cols = [feature_cols[i] for i in selected_idx]
-            preview = selected_cols[:8]
-            suffix  = '...' if len(selected_cols) > 8 else ''
-            print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — {preview}{suffix}")
-
-        selected_features_per_fold.append(selected_cols)
-
-        # ── Inner CV + Optuna: Pipeline(Imputer → Scaler → PLS) ──────────────
-        # n_components must be ≤ min(n_features, n_inner_train_samples)
-        # Use n_inner_train_samples ≈ 0.75 * len(X_oe_train) (inner split size)
-        max_components = max(1, min(
-            15,
-            len(selected_cols),
-            int(0.75 * len(X_oe_train)) - 1,
-        ))
-        param_distributions = {
-            'model__n_components': optuna.distributions.IntDistribution(1, max_components),
-        }
-        print(f"    n_components ∈ [1, {max_components}]")
-
-        inner_pipe = Pipeline([
-            ('imputer', SimpleImputer(strategy='median')),
-            ('scaler',  StandardScaler()),
-            ('model',   _PLSWrapper()),
-        ])
-
-        optuna_search = OptunaSearchCV(
-            estimator=inner_pipe,
-            param_distributions=param_distributions,
-            cv=inner_cv,
-            scoring='neg_root_mean_squared_error',
-            n_trials=50,
-            n_jobs=-1,
-            verbose=0,
-        )
-
-        optuna_search.fit(X_oe_train[selected_cols], y_train)
-        best_params_list.append(optuna_search.best_params_)
-
-        preds = optuna_search.predict(X_oe_test[selected_cols])
-        rmse  = np.sqrt(mean_squared_error(y_test, preds))
-        mae   = mean_absolute_error(y_test, preds)
-        r2    = r2_score(y_test, preds)
-        mse   = rmse ** 2
-
-        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
-        print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
-        print(f"    Best params: {optuna_search.best_params_}")
-
-    elapsed = time.time() - start
-    print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
-
-    # Results DataFrame + summary
-    results_df  = pd.DataFrame(fold_results)
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
-    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
-    results_df = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
-    n_outer = len(fold_results)
-    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
-    print(f"\n  Summary (4×5 outer CV + RENT, 20 Optuna trials, 95% CI):")
-    for m in metric_cols:
-        mv = mean_row[m]; sv = std_row[m]
-        ci = t_crit * sv / np.sqrt(n_outer)
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
-
-    best_params_df = pd.DataFrame(best_params_list)
-    best_params_df.index = [f"Fold {i+1}" for i in range(len(best_params_list))]
-    print(f"\n  Best hyperparameters per outer fold:")
-    print(best_params_df.to_string())
-
-    # Feature selection frequency
-    from collections import Counter
-    all_selected = [f for fold_feats in selected_features_per_fold for f in fold_feats]
-    freq = Counter(all_selected)
-    print(f"\n  RENT feature selection frequency (top 20 across {n_outer} folds):")
-    for feat, cnt in freq.most_common(20):
-        print(f"    {cnt:>3}/{n_outer}  {feat}")
-
-    # ── Final model on full dataset ───────────────────────────────────────────
-    imp_full = SimpleImputer(strategy='median').fit(X_oe)
-    sca_full = StandardScaler().fit(imp_full.transform(X_oe))
-    X_rent_full = pd.DataFrame(
-        sca_full.transform(imp_full.transform(X_oe)), columns=feature_cols)
-
-    rent_final = RENT.RENT_Regression(
-        data=X_rent_full,
-        target=y.values,
-        feat_names=feature_cols,
-        C=[0.1, 1, 10],
-        l1_ratios=[0.1, 0.5, 0.9],
-        autoEnetParSel=True,
-        poly='OFF',
-        testsize_range=(0.25, 0.25),
-        K=100,
-        random_state=random_state,
-        verbose=0,
-    )
-    rent_final.train()
-    final_idx  = rent_final.select_features(
-        tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
-    final_cols = [feature_cols[i] for i in final_idx] if len(final_idx) > 0 else feature_cols
-    print(f"\n  Final model RENT selected {len(final_cols)}/{len(feature_cols)} features.")
-
-    X_final = X_oe[final_cols]
-    best_nc = optuna_search.best_params_['model__n_components']
-
-    final_pipeline = Pipeline([
-        ('imputer', SimpleImputer(strategy='median')),
-        ('scaler',  StandardScaler()),
-        ('model',   _PLSWrapper(n_components=best_nc)),
-    ])
-    final_pipeline.fit(X_final, y)
-    y_pred = pd.Series(final_pipeline.predict(X_final), index=range(len(X_final)), dtype='float64')
-
-    return results_df, best_params_df, final_pipeline, X_final, y_pred, selected_features_per_fold
-
 
