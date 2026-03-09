@@ -629,6 +629,7 @@ def run_advanced_catboost_rent(
         selected_features_per_fold.append(selected_cols)
 
         # ── Study 2: Optuna for CatBoost HPs on RENT-selected features ───────
+        optuna.logging.set_verbosity(optuna.logging.INFO)   # show trial progress
         X_train_sel  = X_train[selected_cols]
         X_test_sel   = X_test[selected_cols]
         cat_cols_sel = [c for c in cat_cols if c in selected_cols]
@@ -659,6 +660,7 @@ def run_advanced_catboost_rent(
         r2   = r2_score(y_test, preds)
         mse  = rmse ** 2
 
+        optuna.logging.set_verbosity(optuna.logging.WARNING)  # suppress Study 1 next fold
         fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
         print(f"    Study 2 best model: {optuna_search.best_params_}")
         print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
