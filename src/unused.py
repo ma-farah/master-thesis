@@ -873,3 +873,61 @@ def prepare_advanced_dataset(df_im_vis, df_cl_mod, pain_targets):
         })
     )
     return df_combined
+
+
+#%%
+# creates a respon se category column based on response column
+
+def standardize_response(df, response_col='response', verbose=True):
+    """Parse raw response column into response_category (CR/PR/NI). 
+
+    Multiple categories in one entry are kept as comma-separated ('CR, NI', 'PR, CR').
+    Unrecognized entries are kept as-is
+    """
+    df = df.copy()
+    raw = df[response_col].astype(str).str.strip()
+
+    phrase_map = {
+        'no improvement':                  'ni',
+        'no imrovement':                   'ni',
+        'no imrpvovemnet':                 'ni', 
+        'recovery only on the right side': 'pr',
+        'initial improvement':             'pr',
+        'subtotal remission':              'pr',
+        'improvement':                     'pr',
+        'pd':                              'pr', 
+    }
+
+    categories = pd.Series(pd.NA, index=df.index, dtype=object)
+    _null_marker_pat = re.compile(r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$')
+
+    for idx, val in raw.items():
+        if val in ('nan', '', 'None', 'NaN'):
+            continue
+        if _null_marker_pat.match(val.strip()):
+            continue
+
+        s = val.lower().strip()
+        for phrase, replacement in phrase_map.items():
+            s = s.replace(phrase.lower(), replacement)
+
+        s = re.sub(r'\b([lr])\s*[>~=]\s*(\d+)', r'pr > \2', s)
+
+        found = []
+        if re.search(r'\bni\b', s):
+            found.append('NI')
+        if re.search(r'\bcr\b', s):
+            found.append('CR')
+        if re.search(r'\bpr\b', s):
+            found.append('PR')
+
+        categories[idx] = ', '.join(found) if found else val.strip()
+
+    df['response_category'] = categories.astype('category')
+
+    if verbose:
+        print(f"\nResponse categories:\n"
+              f"{df['response_category'].value_counts(dropna=False).to_string()}")
+
+    return df
+

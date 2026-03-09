@@ -41,18 +41,14 @@ explore.patient_timepoint_summary(df_im, name='Immunological')
 #%%---------- Step 2 — Clean immunological dataset ----------------------------
 
 print('\nStep 2: Cleaning immunological dataset')
-df_im, df_im_bcat, df_im_vis = preprocess.clean_im(df_im)
+df_im_vis = preprocess.clean_im(df_im)
 
-# TableReport after cleaning (before >25% NaN drop — matches run_script.py line 220)
-print('\nTableReport of cleaned immunological dataset (before >25% NaN drop):')
-TableReport(df_im_bcat, max_plot_columns=180)
-
+# TableReport after cleaning 
 print('\nTableReport of cleaned immunological dataset (after >25% NaN drop):')
 TableReport(df_im_vis, max_plot_columns=180)
 
 
 #%%---------- Step 2a — Pearson correlation ------------------------------------
-# should use df_im_bcat ? since it has all columns?
 print('\nStep 2a: EDA — Pearson correlation (immunological)')
 _im_id_cols = ['Patient', 'Timepoint', 'Date']
 
@@ -106,7 +102,7 @@ explore.trajectory_pca_im(
 )
 
 
-#%%---------- Step 2e — MFA T1-T3 (NaN-native, no imputation) ----------------
+#%%---------- Step 2e — MFA T1-T3  ----------------
 
 print('\nStep 2e: MFA T1-T3 (immunological)')
 explore.mfa_im(
@@ -119,9 +115,16 @@ explore.mfa_im(
 
 #%%---------- Step 3 — Imputation (for PyOD) ----------------------------------
 
+# Drop columns with >25% NaN before imputation
+nan_frac = df_im_vis.drop(columns=_im_id_cols).isna().mean()
+high_nan_cols = nan_frac[nan_frac > 0.25].index.tolist()
+df_im_mod = df_im_vis.drop(columns=high_nan_cols)    # copy for modeling
+print(f"  Dropped {len(high_nan_cols)} columns with >25% NaN: {sorted(high_nan_cols)}")
+
+
 print('\nStep 3: Imputing immunological dataset (miceforest + median)')
 df_im_imputed = preprocess.impute_miceforest(
-    df_im_vis,
+    df_im_mod,
     id_cols=_im_id_cols,
     name='Immunological',
     num_datasets=5,
@@ -130,7 +133,7 @@ df_im_imputed = preprocess.impute_miceforest(
 )
 
 df_im_median = preprocess.impute_median(
-    df_im_vis,
+    df_im_mod,
     id_cols=_im_id_cols,
     name='Immunological',
 )
@@ -138,11 +141,11 @@ df_im_median = preprocess.impute_median(
 
 #%%
 # Compare imputed datasets:
-# feature_cols = df_im[∼id_cols] 
+# feature_cols = df_im[∼id_cols]
 # Compare column statistics between the two imputed datasets
 
-feature_cols = [c for c in df_im_vis.columns if c not in _im_id_cols]
-n_missing = df_im_vis[feature_cols].isna().sum()
+feature_cols = [c for c in df_im_mod.columns if c not in _im_id_cols]
+n_missing = df_im_mod[feature_cols].isna().sum()
 
 stats_cmp = pd.DataFrame({
     'n_missing':   n_missing,
@@ -167,7 +170,7 @@ print(stats_cmp.sort_values('mean_diff', ascending=False).head(10)
 #%%---------- Step 4 — PyOD outlier detection (immunological) -----------------
 
 print('\nStep 4: PyOD outlier detection — immunological dataset (Zryan approach)')
-_im_feat_cols = [c for c in df_im_vis.columns if c not in _im_id_cols]
+_im_feat_cols = [c for c in df_im_mod.columns if c not in _im_id_cols]
 
 no_od_df_im, outlier_candidates_im = explore.run_pyod_zryan(
     df_im_imputed,
@@ -193,9 +196,9 @@ no_od_df_im_med, outlier_candidates_im_med = explore.run_pyod_zryan(
 
 print('\nStep 5: Removing confirmed outlier observations (immunological)')
 # Confirmed outliers stored in preprocess.IM_CONFIRMED_OUTLIERS
-# = [(221,2), (163,1), (150,1), (159,2), (109,5), (266,4)]
-df_im_vis = preprocess.remove_outlier_observations(df_im_vis)
-print(f"  df_im_vis : {df_im_vis.shape}")
+
+df_im_mod = preprocess.remove_outlier_observations(df_im_mod)
+print(f"  df_im_mod : {df_im_mod.shape}")
 
 
 #%%########## CLINICAL DATASET #################################################
@@ -356,29 +359,26 @@ explore.pca_colored(
 
 #%%---------- Step 7 — df_cl_mod: modeling-only copy -------------------------
 
-print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, radiation cols, leaky cols)')
+print('\nStep 7: Creating df_cl_mod (modeling copy: >25% NaN drop, pain cols, leaky cols)')
 
 # Take copy of df_cl_vis (contains all columns) 
 df_cl_mod = df_cl_vis.copy()
 
+
 # Drop columns with >25% NaN (reduce features before modeling)
-mod_protect = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
-df_cl_mod = preprocess.drop_high_nan_columns(
-    df_cl_mod, threshold=0.25, exclude_cols=mod_protect,
-    check_per_timepoint=True,
-)
+_mod_protect = ['Patient', 'Timepoint', 'date', 'measurement_timepoint']
+_cl_nan_frac = df_cl_mod.drop(columns=_mod_protect).isna().mean()
+_cl_high_nan = _cl_nan_frac[_cl_nan_frac > 0.25].index.tolist()
+df_cl_mod = df_cl_mod.drop(columns=_cl_high_nan)
+print(f"  Dropped {len(_cl_high_nan)} columns with >25% NaN: {sorted(_cl_high_nan)}")
 
 # Drop pain questionnaire columns (not model features — targets are built separately)
 pain_cols = [c for c in df_cl_mod.columns
               if c in set(preprocess.CL_PAIN_QUESTIONNAIRE_COLS)]
 df_cl_mod = df_cl_mod.drop(columns=pain_cols)
 
-# Drop radiation equipment columns (not clinically predictive)
-rad_cols = [c for c in df_cl_mod.columns
-            if c in set(preprocess.CL_RADIATION_EQUIPMENT_COLS)]
-df_cl_mod = df_cl_mod.drop(columns=rad_cols)
 
-# Drop additional columns: baseline pain_scale, pain_points, months_last_visit
+# Drop additional columns: baseline pain_scale, pain_points, complaints_since
 extra_cols = [c for c in df_cl_mod.columns
               if c in set(preprocess.CL_EXTRA_MODEL_DROP_COLS)]
 df_cl_mod = df_cl_mod.drop(columns=extra_cols)
@@ -391,7 +391,6 @@ df_cl_mod = df_cl_mod.drop(columns=leaky_cols)
 print(f"  df_cl_vis : {df_cl_vis.shape}  (all columns, for EDA)")
 print(f"  df_cl_mod : {df_cl_mod.shape}  (modeling only)")
 print(f"  Dropped pain cols      : {pain_cols}")
-print(f"  Dropped radiation cols : {rad_cols}")
 print(f"  Dropped extra cols     : {extra_cols}")
 print(f"  Dropped leaky cols     : {leaky_cols}")
 
@@ -461,9 +460,9 @@ print('\nStep 9: Creating model datasets (immunological T1−T2 differences)')
 # Build one (df_immu_alone, df_combined) pair per unique target source.
 # pain_reduction_pct is computed from the same pain_targets as pain_reduction,
 # so we alias it rather than calling create_model_datasets a second time.
-# The leaky sibling column (e.g. pain_daytime_reduction_pct when running on
-# pain_daytime_reduction) is excluded inside run_catboost_regressor via the
-# '_reduction' pattern in CL_MODEL_LEAKY_PATTERNS.
+# leaky sibling column (e.g. pain_daytime_reduction_pct when running on
+# pain_daytime_reduction) is excluded inside run_catboost_regressor 
+
 _unique_targets = {
     'pain_reduction':            pain_targets,
     'pain_daytime_reduction':    targets_daytime,
@@ -473,7 +472,7 @@ _unique_targets = {
 model_datasets = {}
 for tgt, tdf in _unique_targets.items():
     df_immu, df_comb = model.create_model_datasets(
-        df_cl_mod, df_im_vis, tdf, timepoints=[1, 2]
+        df_cl_mod, df_im_mod, tdf, timepoints=[1, 2]
     )
     model_datasets[tgt] = (df_immu, df_comb)
 
@@ -667,7 +666,7 @@ t3_unique_targets = {
 model_datasets_t3 = {}
 for tgt, tdf in t3_unique_targets.items():
     df_immu_t3, df_comb_t3 = model.create_model_datasets(
-        df_cl_mod, df_im_vis, tdf, timepoints=[1, 3]
+        df_cl_mod, df_im_mod, tdf, timepoints=[1, 3]
     )
     model_datasets_t3[tgt] = (df_immu_t3, df_comb_t3)
 

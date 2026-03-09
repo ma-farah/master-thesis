@@ -39,87 +39,6 @@ def replace_missing_markers(df, skip_cols=None, verbose=False):
             df.loc[mask, col] = np.nan
 
 
-def drop_columns(df, columns, verbose=True):
-    """Drop a pre-specified list of columns, ignoring any that are absent.
-
-    Parameters
-    ----------
-    df       : pd.DataFrame
-    columns  : list of str  — columns to remove
-    verbose  : bool
-
-    Returns
-    -------
-    pd.DataFrame with columns removed (copy)
-    """
-    present = [c for c in columns if c in df.columns]
-    missing = [c for c in columns if c not in df.columns]
-    if verbose:
-        print(f"  Dropping {len(present)} columns.")
-        if missing:
-            print(f"  Not found (already absent): {missing}")
-    return df.drop(columns=present)
-
-
-def drop_rows_by_index(df, indices, verbose=True):
-    """Drop rows by explicit index labels, ignoring any that are absent.
-
-    Parameters
-    ----------
-    df      : pd.DataFrame
-    indices : list of int/label  — index values to drop
-    verbose : bool
-
-    Returns
-    -------
-    pd.DataFrame with rows removed (copy)
-    """
-    present = [i for i in indices if i in df.index]
-    if verbose:
-        print(f"  Dropping {len(present)} rows at index: {present}")
-    return df.drop(index=present)
-
-
-def drop_high_nan_columns(df, threshold=0.25, exclude_cols=None,
-                           timepoint_col='Timepoint', check_per_timepoint=True,
-                           verbose=True):
-    """Drop columns whose overall missing rate exceeds *threshold*.
-
-    Optionally prints a per-timepoint breakdown first so you can verify
-    the threshold is consistent across timepoints before dropping.
-
-    Parameters
-    ----------
-    df                  : pd.DataFrame
-    threshold           : float   fraction, default 0.25
-    exclude_cols        : list of str — never drop these (e.g. id columns)
-    timepoint_col       : str
-    check_per_timepoint : bool — print per-timepoint >threshold columns first
-    verbose             : bool
-
-    Returns
-    -------
-    pd.DataFrame with high-NaN columns removed (copy)
-    """
-    exclude_cols = list(exclude_cols or [])
-
-    if check_per_timepoint and timepoint_col in df.columns:
-        print(f"  Per-timepoint columns >{threshold*100:.0f}% NaN:")
-        for _tp in sorted(df[timepoint_col].dropna().unique()):
-            _df_tp   = df[df[timepoint_col] == _tp]
-            _na_tp   = _df_tp.drop(columns=[c for c in exclude_cols if c in _df_tp.columns]).isna().mean()
-            _high    = sorted(_na_tp[_na_tp > threshold].index.tolist())
-            print(f"    T{_tp} ({len(_high)} columns): {_high}")
-
-    na_frac      = df.isna().mean()
-    cols_to_drop = [c for c in na_frac[na_frac > threshold].index if c not in exclude_cols]
-
-    if verbose:
-        print(f"\n  Overall columns >{threshold*100:.0f}% NaN ({len(cols_to_drop)}): "
-              f"{sorted(cols_to_drop)}")
-        print(f"  Dropping {len(cols_to_drop)} columns.")
-
-    return df.drop(columns=cols_to_drop).copy()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -183,77 +102,62 @@ def clean_im(df_im, verbose=True):
 
     Steps
     -----
-    1. Drop pre-determined excluded columns + rename Messdatum → Date
+    1. Drop pre-determined excluded columns + rename Messdatum to Date
     2. Drop known empty rows (bottom of Excel + row 78)
     3. Replace German NaN markers (k.A. / n.D. variants)
     4. Fix dtypes: Date → datetime, Patient/Timepoint → Int64, features → float64
-    5. Make baseline CatBoost copy  (df_im_bcat)
-    6. Drop columns with >25% NaN overall
-    7. Make EDA/visualization copy  (df_im_vis)
 
     Parameters
     ----------
-    df_im   : pd.DataFrame   raw immunological data as loaded from Excel
+    df_im   : pd.DataFrame   raw immunological data
     verbose : bool
 
     Returns
     -------
-    df_im      : cleaned full dataset (after dtype fix, before NaN drop)
-    df_im_bcat : copy taken before >25% NaN drop (for baseline CatBoost)
-    df_im_vis  : copy taken after  >25% NaN drop (for EDA / visualization)
+    df_im_vis  : copy of cleaned dataset
     """
-    # 1 — drop excluded columns + rename date column
-    if verbose:
-        print("  [1] Dropping excluded columns and renaming Messdatum → Date")
-    df_im = drop_columns(df_im, IM_EXCLUDED_COLUMNS, verbose=verbose)
-    if 'Messdatum' in df_im.columns:
-        df_im = df_im.rename(columns={'Messdatum': 'Date'})
 
-    # 2 — drop known empty rows
+    df_im_vis = df_im.copy()
+    
+    # 1 — drop predetermined excluded columns + rename date column
+    if verbose:
+        print("  [1] Dropping excluded columns and renaming Messdatum to Date")
+    cols_present = [c for c in IM_EXCLUDED_COLUMNS if c in df_im_vis.columns]
+    df_im_vis = df_im_vis.drop(columns=cols_present)
+    if verbose:
+        print(f"  Dropped {len(cols_present)} columns")
+    if 'Messdatum' in df_im_vis.columns:
+        df_im_vis = df_im_vis.rename(columns={'Messdatum': 'Date'})
+
+    # 2 — drop known empty rows from excel file
     if verbose:
         print("  [2] Dropping known empty rows")
-    # Capture Patient IDs at the rows being dropped before they are removed
-    _to_drop_pts = df_im.loc[
-        [i for i in IM_EMPTY_ROW_INDICES if i in df_im.index], 'Patient'
-    ].dropna().unique().tolist() if 'Patient' in df_im.columns else []
-    df_im = drop_rows_by_index(df_im, IM_EMPTY_ROW_INDICES, verbose=verbose)
-    df_im = df_im.reset_index(drop=True)
-    if verbose and 'Patient' in df_im.columns:
+    _to_drop_pts = df_im_vis.loc[
+        [i for i in IM_EMPTY_ROW_INDICES if i in df_im_vis.index], 'Patient'
+    ].dropna().unique().tolist() if 'Patient' in df_im_vis.columns else []
+    rows_present = [i for i in IM_EMPTY_ROW_INDICES if i in df_im_vis.index]
+    if verbose:
+        print(f"  Dropping {len(rows_present)} rows at index: {rows_present}")
+    df_im_vis = df_im_vis.drop(index=rows_present).reset_index(drop=True)
+    if verbose and 'Patient' in df_im_vis.columns:
         if _to_drop_pts:
             print(f"  Patient IDs in dropped rows: {sorted(_to_drop_pts)}")
-        print(f"  Unique patients remaining: {df_im['Patient'].dropna().nunique()}")
+        print(f"  Unique patients remaining: {df_im_vis['Patient'].dropna().nunique()}")
 
     # 3 — replace German NaN markers
     if verbose:
         print("  [3] Replacing German NaN markers")
-    replace_missing_markers(df_im, skip_cols=["Patient", "Timepoint"], verbose=verbose)
+    replace_missing_markers(df_im_vis, skip_cols=["Patient", "Timepoint"], verbose=verbose)
 
     # 4 — fix dtypes
     if verbose:
         print("  [4] Fixing dtypes")
-    df_im = fix_dtypes_im(df_im)
-
-    # 5 — baseline CatBoost copy (before >25% NaN drop)
-    df_im_bcat = df_im.copy()
-
-    # 6 — drop high-NaN columns
-    if verbose:
-        print("  [6] Dropping columns with >25% NaN")
-    _exclude = ["Date", "Patient", "Timepoint"]
-    df_im = drop_high_nan_columns(
-        df_im, threshold=0.25, exclude_cols=_exclude,
-        check_per_timepoint=True, verbose=verbose
-    )
-
-    # 7 — EDA/visualization copy (after >25% NaN drop)
-    df_im_vis = df_im.copy()
+    df_im_vis = fix_dtypes_im(df_im_vis)
 
     if verbose:
-        print(f"\n  df_im      : {df_im.shape}")
-        print(f"  df_im_bcat : {df_im_bcat.shape}")
-        print(f"  df_im_vis  : {df_im_vis.shape}")
+        print(f"\n  df_im_vis  : {df_im_vis.shape}")
 
-    return df_im, df_im_bcat, df_im_vis
+    return df_im_vis
 
 
 def fix_dtypes_im(df_im):
@@ -284,9 +188,9 @@ def fix_dtypes_im(df_im):
     return df
 
 
-# ── Outlier removal (after PyOD + expert review) ─────────────────────────────
+# ── Outlier removal (after PyOD + review with dataset-owner) ─────────────────────────────
 
-# Confirmed outlier observations from PyOD ensemble + expert review.
+# Confirmed outlier observations from PyOD ensemble and discussion,
 # Each entry is a (Patient, Timepoint) pair — only that specific observation
 # is removed, not all timepoints for that patient.
 IM_CONFIRMED_OUTLIERS = [
@@ -306,14 +210,11 @@ def remove_outlier_observations(df, outliers=None,
                                  verbose=True):
     """Remove specific (patient, timepoint) observations confirmed as outliers.
 
-    Works for both immunological and clinical datasets — pass the appropriate
-    outlier list via *outliers*. Defaults to IM_CONFIRMED_OUTLIERS.
-
     Parameters
     ----------
-    df             : pd.DataFrame   source dataset (df_im_vis or df_cl_vis)
+    df             : pd.DataFrame  
     outliers       : list of (patient_id, timepoint) tuples, or None
-                     → defaults to IM_CONFIRMED_OUTLIERS
+                     defaults to IM_CONFIRMED_OUTLIERS
     patient_col    : str
     timepoint_col  : str
     verbose        : bool
@@ -358,17 +259,17 @@ CL_PATIENT_LEVEL_COLS = [
     'Filter', 'Response', 'further comments',
 ]
 
-# Patients irradiated at multiple different body parts — excluded from analysis
+# Patients irradiated at multiple different body parts — excluded from analysis 
 CL_MULTI_BODY_PATIENTS = [3, 45, 184, 162, 179, 156, 54, 47]
 
-# German → English column rename map
+# German to English column rename map
 CL_RENAME_MAP = {
     "Patient": "Patient", "Timepoint": "Timepoint",
     "Age at start": "age_at_start", "Gender": "gender",
     "Weight [kg]": "weight_kg", "Height [cm]": "height_cm",
     "Overweight? BMI": "overweight_bmi",
     "Erfassungszeitpunkt": "measurement_timepoint", "Datum": "date",
-    "Beschwerden seit": "months_last_visit", "vorherige Therapie": "previous_therapy",
+    "Beschwerden seit": "complaints_since", "vorherige Therapie": "previous_therapy",
     "unter Belastung": "pain_under_load", "bei Nacht": "pain_night",
     "tagsüber": "pain_daytime", "in Ruhe": "pain_at_rest",
     "bei ersten Schritten/Morgensteifigkeit": "morning_stiffness",
@@ -392,15 +293,14 @@ CL_PAIN_QUESTIONNAIRE_COLS = [
 ]
 
 # Radiation equipment columns — excluded from modeling (not clinically predictive)
+# Note: fha, ma, kv are already dropped in exclude_predetermined (step 2);
+# only single_fraction reaches df_cl_vis and is dropped here via results.py.
 CL_RADIATION_EQUIPMENT_COLS = ['fha', 'ma', 'kv', 'single_fraction']
 
 # Additional columns excluded from modeling:
-# pain_scale   — baseline pain value; no pain-related features as model inputs
-# pain_points  — body location; excluded per expert decision
-# months_last_visit — symptom duration; excluded per expert decision
-CL_EXTRA_MODEL_DROP_COLS = ['pain_scale', 'pain_points', 'months_last_visit']
+CL_EXTRA_MODEL_DROP_COLS = ['pain_scale', 'pain_points', 'complaints_since']
 
-# Column name patterns that identify leaky/metadata columns (must not be model features)
+# Column name patterns that identify leaky  columns (must not be in model features)
 CL_LEAKY_PATTERNS = [
     'response', 'improvement_percent', 'pain_reduction_pct',
     'response_pct', 'response_category',
@@ -417,13 +317,13 @@ def move_column_after(df, col_to_move, after_col):
 
 
 def extract_numeric(series):
-    """Extract numeric value from ordinal questionnaire entries (scale 1–4 or 1–5).
+    """Extract numeric value from ordinal questionnaire entries (scale 1–4).
 
     Handles:
-      - comma-separated multi-select  "1,2"               → average
-      - range                          "2-3"               → midpoint
-      - number with parenthetical text "3 (tag), 4 (nacht)"→ average of all numbers
-      - leading number with text       "3 left side"       → 3
+      - comma-separated multi-select  "1,2"               -> average
+      - range                          "2-3"               -> midpoint
+      - number with parenthetical text "3 (tag), 4 (nacht)" -> average of all numbers
+      - leading number with text       "3 left side"       -> 3
     """
     s = series.astype(str).str.strip()
 
@@ -446,11 +346,10 @@ def extract_numeric(series):
 
 
 def extract_continuous(series):
-    """Extract numeric value from continuous scale entries (e.g. pain_scale 0–10).
+    """Extract numeric value from continuous scale entries (pain_scale from 0–10).
 
-    Handles German decimal commas, ranges (→ midpoint), trailing text, and
-    "Ruhe" (at rest) entries where both load and rest values are present
-    (prefers the resting value).
+    Handles commas, ranges, trailing text, and spesific multiple value entries.
+
     """
     s = series.astype(str).str.strip()
 
@@ -480,17 +379,20 @@ def split_bmi_column(df, col_name='overweight_bmi'):
     col_idx = df.columns.get_loc(col_name)
     is_missing = df[col_name].str.contains(r'^n\.?D\.?$', case=False, na=True)
     overweight = df[col_name].str.extract(r'(ja|nein)', flags=re.IGNORECASE)[0].str.lower()
+
     bmi = df[col_name].str.extract(r'\((\d+[,.]?\d*)\)?')[0].str.replace(',', '.').astype(float)
     overweight = overweight.where(~is_missing, pd.NA)
     bmi = bmi.where(~is_missing, pd.NA)
+
     df = df.drop(columns=[col_name])
+
     df.insert(col_idx, 'overweight', overweight)
     df.insert(col_idx + 1, 'bmi', bmi)
     return df
 
 
 def parse_symptoms_duration(series, date_series=None):
-    """Convert German symptom duration strings to numeric months.
+    """Convert months since complaints/symtpoms to numeric value in months.
 
     Handles: "3 Monate", "2 Jahre", "6-12 Mo.", "1,5 J.", "1/2 J.",
     ranges → midpoint, German decimals, fractions, ~approx, >greater-than.
@@ -612,30 +514,15 @@ def standardize_target_volume(series):
     def extract_side(s):
         s_check = s.strip()
         lower = s_check.lower()
-        if 'both sides' in lower:
+        if 'both sides' in lower or re.search(r'[LR]\s*[+&]\s*[LR]|[LR]\s*,\s*[LR](?!\w)|\b[LR]{2}\b', s_check):
             return 'B'
-        if re.search(r'[LR]\s*[+&]\s*[LR]', s_check):
-            return 'B'
-        if re.search(r'[LR]\s*,\s*[LR](?!\w)', s_check):
-            return 'B'
-        if re.search(r'\b[LR][LR]\b', s_check):
-            return 'B'
-        if 'links' in lower:
+        if 'links' in lower or 'left' in lower:
             return 'L'
-        if 'recht' in lower:
+        if 'recht' in lower or 'right' in lower:
             return 'R'
-        if 'left' in lower:
-            return 'L'
-        if 'right' in lower:
-            return 'R'
-        if re.search(r'\bL\s*$', s_check):
-            return 'L'
-        if re.search(r'\bR\s*$', s_check):
-            return 'R'
-        if re.search(r'\bl\s*$', s_check):
-            return 'L'
-        if re.search(r'\br\s*$', s_check):
-            return 'R'
+        m = re.search(r'\b([LRlr])\s*$', s_check)
+        if m:
+            return m.group(1).upper()
         return pd.NA
 
     def match_body_part(s):
@@ -739,13 +626,7 @@ def standardize_pain_points(series):
 
     def find_side(seg):
         s = seg.lower().strip()
-        if re.search(r'beide|bds', s):
-            return 'B'
-        if re.search(r'li\s*[+&/]\s*re|re\s*[+&/]\s*li', s):
-            return 'B'
-        if re.search(r'li\s+u\.?\s+re|re\s+u\.?\s+li', s):
-            return 'B'
-        if re.search(r'li\s+und\s+re|re\s+und\s+li', s):
+        if re.search(r'beide|bds|li\s*[+&/]\s*re|re\s*[+&/]\s*li|li\s+u\.?\s+re|re\s+u\.?\s+li|li\s+und\s+re|re\s+und\s+li', s):
             return 'B'
         if re.search(r'\bli\b|\blinks\b|\blinke[rns]?\b', s):
             return 'L'
@@ -756,13 +637,8 @@ def standardize_pain_points(series):
     def find_body_part(seg):
         s = seg.lower().strip()
         for name, keywords in body_part_keywords:
-            for kw in keywords:
-                if kw.startswith(r'\b'):
-                    if re.search(kw, s):
-                        return name
-                else:
-                    if kw in s:
-                        return name
+            if any(re.search(kw, s) for kw in keywords):
+                return name
         return None
 
     def parse_entry(val):
@@ -824,40 +700,10 @@ def standardize_pain_points(series):
     return series.apply(parse_entry)
 
 
-def split_filter_column(df, col_name='filter'):
-    """Split filter column into filter_mm (float) and filter_material (Cu/Al).
-
-    Handles German decimal commas, duplicate entries, and various formats.
-    """
-    col_idx = df.columns.get_loc(col_name)
-
-    def parse_filter(val):
-        if pd.isna(val):
-            return pd.NA, pd.NA
-        s = str(val).strip()
-        s = s.split('\n')[0].strip()
-        material = pd.NA
-        if re.search(r'Cu', s, re.IGNORECASE):
-            material = 'Cu'
-        elif re.search(r'Al', s, re.IGNORECASE):
-            material = 'Al'
-        num_match = re.search(r'(\d+[,.]?\d*)', s)
-        if num_match:
-            num_str = num_match.group(1).replace(',', '.')
-            return float(num_str), material
-        return pd.NA, material
-
-    parsed = df[col_name].apply(parse_filter)
-    df.insert(col_idx, 'filter_mm', parsed.apply(lambda x: x[0]))
-    df.insert(col_idx + 1, 'filter_material', parsed.apply(lambda x: x[1]))
-    return df.drop(columns=[col_name])
-
-
 def parse_cumulative_dose(val):
-    """Parse total dose from mixed format strings.
+    """Parse total cumulative dose from mixed format strings.
 
-    Handles: "L: 3; R: 6" (sum both sides), "3(6)" (prefer parenthesized total),
-    "3\\n3" duplicates (take first line), standalone numbers.
+    Handles: standalone values, double values "L: 3; R: 6" (sum both sides), "3(6)" (takes the parenthesized total),
     """
     if pd.isna(val):
         return pd.NA
@@ -889,11 +735,10 @@ def encode_therapy_columns(df, col_name='previous_therapy'):
 
 
 def standardize_response(df, response_col='response', verbose=True):
-    """Parse raw response column into response_category (CR/PR/NI) and response_percent (float).
+    """Parse raw response column into response_category (CR/PR/NI). 
 
-    response_category is metadata only — NOT a modeling target.
     Multiple categories in one entry are kept as comma-separated ('CR, NI', 'PR, CR').
-    Unrecognized entries are kept as-is for manual review.
+    Unrecognized entries are kept as-is
     """
     df = df.copy()
     raw = df[response_col].astype(str).str.strip()
@@ -901,16 +746,15 @@ def standardize_response(df, response_col='response', verbose=True):
     phrase_map = {
         'no improvement':                  'ni',
         'no imrovement':                   'ni',
-        'no imrpvovemnet':                 'ni',
+        'no imrpvovemnet':                 'ni', 
         'recovery only on the right side': 'pr',
         'initial improvement':             'pr',
         'subtotal remission':              'pr',
         'improvement':                     'pr',
-        'pd':                              'pr',
+        'pd':                              'pr', 
     }
 
     categories = pd.Series(pd.NA, index=df.index, dtype=object)
-    percents   = pd.Series(np.nan, index=df.index, dtype='float64')
     _null_marker_pat = re.compile(r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$')
 
     for idx, val in raw.items():
@@ -925,13 +769,6 @@ def standardize_response(df, response_col='response', verbose=True):
 
         s = re.sub(r'\b([lr])\s*[>~=]\s*(\d+)', r'pr > \2', s)
 
-        range_m  = re.search(r'(\d+)\s*[-–]\s*(\d+)', s)
-        single_m = re.search(r'[>~<]?\s*(\d+)\s*%?', s)
-        if range_m:
-            percents[idx] = (float(range_m.group(1)) + float(range_m.group(2))) / 2
-        elif single_m:
-            percents[idx] = float(single_m.group(1))
-
         found = []
         if re.search(r'\bni\b', s):
             found.append('NI')
@@ -940,20 +777,13 @@ def standardize_response(df, response_col='response', verbose=True):
         if re.search(r'\bpr\b', s):
             found.append('PR')
 
-        if found:
-            categories[idx] = ', '.join(found)
-        else:
-            categories[idx] = val.strip()
+        categories[idx] = ', '.join(found) if found else val.strip()
 
     df['response_category'] = categories.astype('category')
-    df['response_percent']  = percents
 
     if verbose:
         print(f"\nResponse categories:\n"
               f"{df['response_category'].value_counts(dropna=False).to_string()}")
-        print(f"\nResponse percent — {df['response_percent'].notna().sum()} "
-              f"entries with a numeric value:")
-        print(df['response_percent'].describe())
 
     return df
 
@@ -961,11 +791,8 @@ def standardize_response(df, response_col='response', verbose=True):
 # ── Clinical pipeline functions ───────────────────────────────────────────────
 
 def forward_fill_clinical(df_cl, verbose=True):
-    """Create working copy: forward-fill patient-level columns and extract Timepoint.
-
-    Patient-level columns (demographics, treatment parameters) are only filled
-    in the first row per patient in the raw Excel format.  This step propagates
-    them to all timepoint rows.
+    """Forward-fill clinical patient columns and extract timepoint to make a Timepoint column.
+    Makes it so clinical and immunulogical dataset has the same format with one timepoint per row.
 
     Parameters
     ----------
@@ -996,14 +823,8 @@ def forward_fill_clinical(df_cl, verbose=True):
     return df
 
 
-def exclude_patients_cl(df_cl_clean, multi_body_patients=None, verbose=True):
-    """Exclude Ausschluss patients, multi-body-part patients, + EORTC columns.
-
-    Steps
-    -----
-    1. Remove rows flagged as 'Ausschluss' in the Unnamed: 0 column
-    2. Remove patients irradiated at multiple body parts (CL_MULTI_BODY_PATIENTS)
-    3. Drop the EORTC health/function questionnaire column range
+def exclude_predetermined(df_cl_clean, multi_body_patients=None, verbose=True):
+    """Exclude predetermined patients and columns.
 
     Parameters
     ----------
@@ -1013,7 +834,7 @@ def exclude_patients_cl(df_cl_clean, multi_body_patients=None, verbose=True):
 
     Returns
     -------
-    pd.DataFrame — copy with excluded patients and EORTC columns removed
+    pd.DataFrame — copy with excluded patients and predetermined columns removed
     """
     if multi_body_patients is None:
         multi_body_patients = CL_MULTI_BODY_PATIENTS
@@ -1044,7 +865,7 @@ def exclude_patients_cl(df_cl_clean, multi_body_patients=None, verbose=True):
     if verbose:
         print(f"  Removed {len(multi_body_patients)} multi-body-part patients")
 
-    # 3 — Drop EORTC questionnaire column range
+    # 3 — Drop predetermined questionnaire column range
     q_cols_to_drop = []
     try:
         col_list    = df.columns.tolist()
@@ -1056,21 +877,29 @@ def exclude_patients_cl(df_cl_clean, multi_body_patients=None, verbose=True):
         end_col = next((c for c in end_col_options if c in col_list), None)
         if start_col not in col_list:
             if verbose:
-                print(f"  Warning: EORTC start column '{start_col}' not found — no columns dropped")
+                print(f"  Warning: start column '{start_col}' not found — no EORTC columns dropped")
         elif end_col is None:
             if verbose:
-                print(f"  Warning: EORTC end column not found — no columns dropped")
+                print(f"  Warning: end column not found — no EORTC columns dropped")
         else:
             start_idx      = col_list.index(start_col)
             end_idx        = col_list.index(end_col)
             q_cols_to_drop = col_list[start_idx : end_idx + 1]
             df = df.drop(columns=q_cols_to_drop)
             if verbose:
-                print(f"\n  Dropped {len(q_cols_to_drop)} EORTC questionnaire columns "
+                print(f"\n  Dropped {len(q_cols_to_drop)} questionnaire columns "
                       f"('{start_col}' to '{end_col}')")
     except Exception as e:
         if verbose:
-            print(f"  Warning: Could not drop EORTC columns: {e}")
+            print(f"  Warning: Could not drop columns: {e}")
+
+    # 4 — Drop other predetermined columns 
+    admin_cols = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire',
+                  'Filter', 'kV', 'mA', 'FHA']
+    dropped = [c for c in admin_cols if c in df.columns]
+    df = df.drop(columns=dropped)
+    if verbose:
+        print(f"\n  Dropped {len(dropped)} predetermined columns: {dropped}")
 
     if verbose:
         print(f"\n  After exclusions: {df['Patient'].nunique()} patients, {len(df)} rows")
@@ -1079,9 +908,7 @@ def exclude_patients_cl(df_cl_clean, multi_body_patients=None, verbose=True):
 
 
 def rename_columns_cl(df_cl_clean, rename_map=None, verbose=True):
-    """Rename clinical columns from German to English using CL_RENAME_MAP.
-
-    Also moves the Timepoint column to immediately after Patient.
+    """Rename clinical columns from German to English using the CL_RENAME_MAP.
 
     Parameters
     ----------
@@ -1107,21 +934,14 @@ def rename_columns_cl(df_cl_clean, rename_map=None, verbose=True):
     return df
 
 
-def drop_unused_cl(df_cl_clean, verbose=True):
-    """Drop metadata columns and rows with no measurement date.
+def drop_rows_cl(df_cl_clean, verbose=True):
+    """Drop empty and invalid rows from the clinical dataset.
 
     Steps
     -----
-    1. Drop admin columns ('Unnamed: 0', 'Unnamed: 2', 'further comments',
-       'Comments questionnaire')
-    2. Drop rows with no date (completely empty measurement slots from Excel)
-
-    Note: The all-NaN clinical row check is intentionally NOT done here.
-    It is deferred to clean_cl step [7b], which runs AFTER NaN marker
-    replacement (step 7), so that rows whose entries consist entirely of
-    k.A./n.D. markers are also caught.
-
-    Requires columns already renamed via rename_columns_cl.
+    1. Drop rows with no measurement date (blank rows in raw dataset)
+    2. Drop rows where all questionnaire columns (complaints_since to
+       improvement_percent) are NaN (empty or fully-marker-filled visits)
 
     Parameters
     ----------
@@ -1130,29 +950,31 @@ def drop_unused_cl(df_cl_clean, verbose=True):
 
     Returns
     -------
-    pd.DataFrame — copy with unused columns and empty rows removed
+    pd.DataFrame — copy with invalid rows removed
     """
     df = df_cl_clean.copy()
 
-    # 1 — Drop metadata/admin columns
-    cols_to_drop = ['Unnamed: 0', 'Unnamed: 2', 'further comments', 'Comments questionnaire']
-    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+    drop_mask = pd.Series(False, index=df.index)
 
-    # 2 — Drop rows with no date (blank Excel rows)
+    # 1 — Rows with no date
     if 'date' in df.columns:
-        no_date = df[df['date'].isna()]
-        df = df[df['date'].notna()].copy()
-        if verbose:
-            if len(no_date) > 0:
-                dropped_pts = sorted(no_date['Patient'].dropna().unique().tolist())
-                print(f"  Dropped {len(no_date)} rows with no date "
-                      f"(Patient IDs in dropped rows: {dropped_pts})")
-            else:
-                print(f"  Dropped 0 rows with no date")
-            print(f"  Unique patients remaining: {df['Patient'].nunique()}")
+        drop_mask |= df['date'].isna()
+
+    # 2 — Rows where the entire questionnaire section is NaN
+    if {'complaints_since', 'improvement_percent'}.issubset(df.columns):
+        drop_mask |= df.loc[:, 'complaints_since':'improvement_percent'].isna().all(axis=1)
 
     if verbose:
-        print(f"\n  After drop_unused: {df['Patient'].nunique()} patients, {len(df)} rows")
+        if drop_mask.any():
+            print(f"  Dropping {drop_mask.sum()} empty rows:")
+            print(df.loc[drop_mask, ['Patient', 'Timepoint']].to_string())
+        else:
+            print(f"  No empty rows to drop")
+
+    df = df.loc[~drop_mask].copy()
+
+    if verbose:
+        print(f"\n  After drop_rows_cl: {df['Patient'].nunique()} patients, {len(df)} rows")
     return df
 
 
@@ -1165,8 +987,7 @@ def manual_corrections_cl(df_cl_clean, verbose=True):
     - Patient 219    : removed (used a different questionnaire)
     - Patient 89     : assign correct timepoints by date (T2 = 27.03.2019,
                        T5 = 05.07.2019); drop unmatched row (10.05.2019)
-    - Patient 113    : filter value corrected to '0.2mm'
-    - Patient 182    : filter value '32mm' (typo, true value unknown) → NaN
+    - Patient 21 - CHECK LATER, ASK
 
     Parameters
     ----------
@@ -1195,7 +1016,7 @@ def manual_corrections_cl(df_cl_clean, verbose=True):
         print(f"  Removed Patient 219 (different questionnaire): "
               f"{n_before - len(df)} rows dropped")
 
-    # Patient 89: assign correct timepoints by date, drop unmatched row
+    # Patient 89: assign correct timepoints by date, drop the unmatched row
     p89          = df['Patient'] == 89
     mask_89_t2   = p89 & (df['date'] == dt.datetime(2019, 3, 27))
     mask_89_t5   = p89 & (df['date'] == dt.datetime(2019, 7,  5))
@@ -1222,24 +1043,6 @@ def manual_corrections_cl(df_cl_clean, verbose=True):
     elif verbose:
         print("  Warning: Patient 89 row dated 10.05.2019 not found — removal skipped")
 
-    # Patient 113: filter value typo
-    mask_113 = df['Patient'] == 113
-    if mask_113.sum() > 0:
-        df.loc[mask_113, 'filter'] = '0.2mm'
-        if verbose:
-            print(f"  Patient 113 filter set to '0.2mm' ({mask_113.sum()} rows)")
-    elif verbose:
-        print("  Warning: Patient 113 not found — filter correction skipped")
-
-    # Patient 182: filter value '32mm' is a typo, true value unknown → NaN
-    mask_182 = df['Patient'] == 182
-    if mask_182.sum() > 0:
-        df.loc[mask_182, 'filter'] = pd.NA
-        if verbose:
-            print(f"  Patient 182 filter set to NaN (was '32mm', {mask_182.sum()} rows)")
-    elif verbose:
-        print("  Warning: Patient 182 not found — filter correction skipped")
-
     return df
 
 
@@ -1251,15 +1054,14 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     1.  diagnosis       → standardized English names
     2.  target_volume   → body part + side combined string
     3.  pain_points     → standardized English body parts + side
-    4.  filter          → filter_mm (float) + filter_material (Cu/Al)
-    5.  cumulative_dose → numeric (Gy)
-    6.  gender          → 'w' → 'f'
-    7.  overweight_bmi  → overweight (ja/nein) + bmi (float)
-    8.  months_last_visit → numeric months
-    9.  previous_therapy→ binary columns previous_therapy_1 … _7
-    10. response        → response_category + response_percent
-    11. ordinal columns → extract_numeric
-    12. pain_scale      → extract_continuous (handles German decimal comma)
+    4.  cumulative_dose → numeric (Gy)
+    5.  gender          → 'w' → 'f'
+    6.  overweight_bmi  → overweight (ja/nein) + bmi (float)
+    7.  complaints_since → numeric months
+    8.  previous_therapy→ binary columns previous_therapy_1 … _7
+    9.  response        → creates a response_category column
+    10. ordinal columns → extract_numeric values
+    11. pain_scale      → extract_continuous values
 
     Requires columns already renamed via rename_columns_cl.
 
@@ -1310,11 +1112,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         print("\n=== pain_points (after) ===")
         print(df['pain_points'].value_counts().head(20).to_dict())
 
-    # 4 — filter: drop (not used in modeling or EDA)
-    if 'filter' in df.columns:
-        df = df.drop(columns=['filter'])
-
-    # 5 — cumulative_dose
+    # 4 — cumulative_dose
     if 'cumulative_dose' in df.columns:
         if verbose:
             print("\n=== cumulative_dose (before) ===")
@@ -1326,7 +1124,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n=== cumulative_dose (after) ===")
             print(sorted(df['cumulative_dose'].dropna().unique()))
 
-    # 6 — gender: 'w' → 'f'
+    # 5 — gender: 'w' → 'f'
     if 'gender' in df.columns:
         if verbose:
             print("\n=== gender (before) ===")
@@ -1336,7 +1134,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n=== gender (after) ===")
             print(df['gender'].value_counts().to_dict())
 
-    # 7 — overweight_bmi → overweight + bmi
+    # 6 — overweight_bmi → overweight + bmi
     if 'overweight_bmi' in df.columns:
         if verbose:
             print("\n=== overweight_bmi (before) ===")
@@ -1350,23 +1148,23 @@ def parse_transform_cl(df_cl_clean, verbose=True):
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
 
-    # 8 — months_last_visit: parse duration strings to numeric months
-    if 'months_last_visit' in df.columns:
+    # 7 — complaints_since: parse duration strings to numeric months
+    if 'complaints_since' in df.columns:
         if verbose:
-            print("\n=== months_last_visit (before) ===")
-            print(df['months_last_visit'].value_counts(dropna=False).head(20).to_string())
+            print("\n=== complaints_since (before) ===")
+            print(df['complaints_since'].value_counts(dropna=False).head(20).to_string())
         date_col = df['date'] if 'date' in df.columns else None
-        df['months_last_visit'] = pd.to_numeric(
-            parse_symptoms_duration(df['months_last_visit'], date_col), errors='coerce'
+        df['complaints_since'] = pd.to_numeric(
+            parse_symptoms_duration(df['complaints_since'], date_col), errors='coerce'
         )
         if verbose:
-            valid = df['months_last_visit'].dropna()
+            valid = df['complaints_since'].dropna()
             if len(valid) > 0:
-                print(f"\n=== months_last_visit (after) ===")
+                print(f"\n=== complaints_since (after) ===")
                 print(f"  range {valid.min():.0f}–{valid.max():.0f} months, "
-                      f"{df['months_last_visit'].isna().sum()} missing")
+                      f"{df['complaints_since'].isna().sum()} missing")
 
-    # 9 — previous_therapy → binary indicator columns
+    # 8 — previous_therapy → binary indicator columns
     if 'previous_therapy' in df.columns:
         if verbose:
             print("\n=== previous_therapy (before) ===")
@@ -1378,15 +1176,13 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n=== previous_therapy (after: binary columns) ===")
             print(df[therapy_cols].sum().to_dict())
 
-    # 10 — response → response_category + response_percent
+    # 9 — response → response_category
     if 'response' in df.columns:
         df = standardize_response(df, response_col='response', verbose=verbose)
         if 'response_category' in df.columns:
             df = move_column_after(df, 'response_category', 'response')
-        if 'response_percent' in df.columns:
-            df = move_column_after(df, 'response_percent', 'response_category')
 
-    # 11 — Ordinal questionnaire columns → extract numeric
+    # 10 — Ordinal questionnaire columns → extract numeric
     ordinal_cols = ['pain_under_load', 'pain_at_rest', 'pain_daytime',
                     'pain_night', 'morning_stiffness']
     if verbose:
@@ -1404,7 +1200,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             if verbose:
                 print(f"  {col}: unique after = {sorted(df[col].dropna().unique())}")
 
-    # 12 — pain_scale (continuous): German decimal comma, ranges → midpoint
+    # 11 — pain_scale (continuous): German decimal comma, ranges → midpoint
     if 'pain_scale' in df.columns:
         if verbose:
             print("\n=== pain_scale (before extraction) ===")
@@ -1489,16 +1285,12 @@ def clean_cl(df_cl, verbose=True):
     Steps
     -----
     1.  Forward-fill patient-level columns + extract Timepoint  (forward_fill_clinical)
-    2.  Exclude Ausschluss patients, multi-body patients, EORTC columns  (exclude_patients_cl)
+    2.  Exclude predetermined patients + drop predetermined columns  (exclude_predetermined)
     3.  Rename columns German → English  (rename_columns_cl)
-    4.  Drop admin columns + empty/all-NaN-questionnaire rows  (drop_unused_cl)
-    5.  Apply manual data corrections  (manual_corrections_cl)
-    6.  Parse/transform all columns  (parse_transform_cl)
-    7.  Replace German NaN markers in-place  (replace_missing_markers)
-    7b. Drop rows where date is NaN OR all columns from months_last_visit
-        onwards are NaN (runs AFTER marker replacement so k.A./n.D. rows
-        are caught too). Flag questionnaire_missing=True for rows where
-        pain_under_load → pain_points are all NaN.
+    4.  Apply manual data corrections  (manual_corrections_cl)
+    5.  Parse/transform all columns  (parse_transform_cl)
+    6.  Replace German NaN markers in-place  (replace_missing_markers)
+    7.  Drop empty rows: no date or empty questionnaire  (drop_rows_cl)
     8.  Fix dtypes  (fix_dtypes_cl)
     9.  Return df_cl_vis with ALL columns (no >25% NaN drop).
         Modeling-specific reductions (>25% NaN drop, pain cols, leaky cols)
@@ -1518,69 +1310,34 @@ def clean_cl(df_cl, verbose=True):
     df_cl_clean = forward_fill_clinical(df_cl, verbose=verbose)
 
     if verbose:
-        print("\n  [2] Excluding patients and EORTC columns")
-    df_cl_clean = exclude_patients_cl(df_cl_clean, verbose=verbose)
+        print("\n  [2] Excluding predetermined patients and columns")
+    df_cl_clean = exclude_predetermined(df_cl_clean, verbose=verbose)
 
     if verbose:
-        print("\n  [3] Renaming columns German → English")
+        print("\n  [3] Renaming columns German to English")
     df_cl_clean = rename_columns_cl(df_cl_clean, verbose=verbose)
 
     if verbose:
-        print("\n  [4] Dropping unused columns and empty rows")
-    df_cl_clean = drop_unused_cl(df_cl_clean, verbose=verbose)
-
-    if verbose:
-        print("\n  [5] Applying manual corrections")
+        print("\n  [4] Applying manual corrections (typos)")
     df_cl_clean = manual_corrections_cl(df_cl_clean, verbose=verbose)
 
     if verbose:
-        print("\n  [6] Parsing and transforming columns")
+        print("\n  [5] Parsing and transforming columns")
     df_cl_clean = parse_transform_cl(df_cl_clean, verbose=verbose)
 
     if verbose:
-        print("\n  [7] Replacing German NaN markers")
+        print("\n  [6] Replacing NaN markers")
     replace_missing_markers(df_cl_clean, skip_cols=["Patient", "Timepoint"], verbose=verbose)
 
-    # [7b] — Drop empty rows (no questionarre data)
-    # Runs AFTER NaN marker replacement so k.A./n.D. entries are already NaN.
-
-    drop_mask = pd.Series(False, index=df_cl_clean.index)
-
-    if 'date' in df_cl_clean.columns:
-        drop_mask |= df_cl_clean['date'].isna()
-
-    if 'months_last_visit' in df_cl_clean.columns:
-        from_sym = df_cl_clean.loc[:, 'months_last_visit':]
-        drop_mask |= from_sym.isna().all(axis=1)
-
-    if verbose and drop_mask.any():
-        print(f"\n  [7b] Dropping {drop_mask.sum()} rows "
-            f"(date NaN or all columns from months_last_visit onwards NaN):")
-        print(df_cl_clean.loc[drop_mask, ['Patient', 'Timepoint']].to_string())
-
-    df_cl_clean = df_cl_clean.loc[~drop_mask].copy()
-
-    # --- Drop rows with missing questionnaire ---
-    if {'pain_under_load', 'pain_points'}.issubset(df_cl_clean.columns):
-
-        q_mask = df_cl_clean.loc[:, 'pain_under_load':'pain_points'].isna().all(axis=1)
-
-        if verbose and q_mask.any():
-            print(f"\n  [7c] Dropping {q_mask.sum()} rows with missing questionnaire:")
-            print(df_cl_clean.loc[q_mask, ['Patient', 'Timepoint']].to_string())
-
-        df_cl_clean = df_cl_clean.loc[~q_mask].copy()
-
     if verbose:
-        print(f"\n  Unique patients remaining: {df_cl_clean['Patient'].nunique()}")
-    
+        print("\n  [7] Dropping empty rows")
+    df_cl_clean = drop_rows_cl(df_cl_clean, verbose=verbose)
+
     if verbose:
         print("\n  [8] Fixing dtypes")
     df_cl_clean = fix_dtypes_cl(df_cl_clean, verbose=verbose)
 
-    # 9 — visualization/EDA copy: all columns, no >25% NaN drop yet.
-    # Modeling-specific reductions (>25% NaN drop, pain cols, leaky cols)
-    # are applied in results.py when creating df_cl_mod.
+    # 9 — visualization copy: all columns, no >25% NaN drop yet.
     df_cl_vis = df_cl_clean.copy()
 
     if verbose:
