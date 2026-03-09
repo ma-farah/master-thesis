@@ -582,9 +582,12 @@ def run_advanced_catboost_rent(
             if len(sel_idx) == 0:
                 return 1e6  # penalise: no features selected
 
-            sel_cols = [feature_cols[i] for i in sel_idx]
+            sel_cols     = [feature_cols[i] for i in sel_idx]
+            cat_cols_sel = [c for c in cat_cols if c in sel_cols]
             probe = CatBoostRegressor(
-                iterations=200, depth=5, random_seed=random_state, verbose=0)
+                iterations=200, depth=5,
+                cat_features=cat_cols_sel,
+                random_seed=random_state, verbose=0)
             scores = cross_val_score(
                 probe, X_train[sel_cols], y_train_fit,
                 cv=inner_cv, scoring='neg_root_mean_squared_error')
