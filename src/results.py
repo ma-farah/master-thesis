@@ -684,8 +684,6 @@ print('#'*60)
 
 
 #%%---------- Step 11a — CatBoost: pain_reduction (T1→T2) --------------------
-import joblib, os
-
 MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 
 print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction (T1→T2)')
@@ -700,14 +698,12 @@ cb_red_results, cb_red_model, cb_red_X, cb_red_ypred, cb_red_features, cb_red_re
 # — Save model and feature matrix so SHAP can be run later without retraining —
 cb_red_model.save_model(os.path.join(MODEL_DIR, 'cb_red_model.cbm'))
 joblib.dump(cb_red_X, os.path.join(MODEL_DIR, 'cb_red_X.pkl'))
-print('  ✓ Saved cb_red_model.cbm and cb_red_X.pkl to', os.path.abspath(_MODEL_DIR))
+print(' Saved Catboost model (pain_reduction target) cb_red_model.cbm and cb_red_X.pkl to', os.path.abspath(MODEL_DIR))
 
 
 #%%---------- Step 11b — SHAP: pain_reduction (load saved model) -------------
 import joblib, os
 from catboost import CatBoostRegressor
-
-MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 
 cb_red_model = CatBoostRegressor()
 cb_red_model.load_model(os.path.join(MODEL_DIR, 'cb_red_model.cbm'))
