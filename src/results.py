@@ -17,7 +17,7 @@ import preprocess
 import explore
 import model
 
-#%%########## PREPROCESSING (run this block first) #############################
+#%%########## PREPROCESSING (one block pipelin e) #############################
 
 # Load raw data
 df_im, df_cl = explore.load_data()
@@ -631,8 +631,8 @@ for tgt, tdf in _unique_targets.items():
 model_datasets['pain_reduction_pct'] = model_datasets['pain_reduction']
 
 # displaying combined datasets:
-TableReport(model_datasets['pain_reduction_pct'], max_plot_columns=180)
-TableReport(model_datasets['pain_under_load_reduction'], max_plot_columns=180)
+#TableReport(model_datasets['pain_reduction_pct'], max_plot_columns=180)
+#TableReport(model_datasets['pain_under_load_reduction'], max_plot_columns=180)
 
 
 #%%

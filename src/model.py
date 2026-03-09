@@ -365,10 +365,11 @@ def run_catboost_regressor(df_model, target_col, name,
             y_train_fit = y_train
 
         model = CatBoostRegressor(
-            iterations=1000,
+            iterations=300,
             loss_function='RMSE',
             random_seed=random_state,
-            thread_count=-1,
+            task_type='GPU', 
+            devices='0',
             verbose=0,
         )
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
@@ -597,9 +598,10 @@ def run_advanced_catboost_rent(
             sel_cols     = [feature_cols[i] for i in sel_idx]
             cat_cols_sel = [c for c in cat_cols if c in sel_cols]
             probe = CatBoostRegressor(
-                iterations=200, depth=5,
+                iterations=300, depth=5,
                 cat_features=cat_cols_sel,
-                random_seed=random_state, thread_count=-1, verbose=0)
+                random_seed=random_state, task_type='GPU', devices='0', verbose=0)
+            
             scores = cross_val_score(
                 probe, X_train[sel_cols], y_train_fit,
                 cv=inner_cv, scoring='neg_root_mean_squared_error',
@@ -651,7 +653,7 @@ def run_advanced_catboost_rent(
             iterations=300,
             cat_features=cat_cols_sel,
             random_seed=random_state,
-            thread_count=-1,
+            task_type='GPU', devices='0',
             verbose=0,
         )
         optuna_search = OptunaSearchCV(
@@ -732,7 +734,7 @@ def run_advanced_catboost_rent(
         custom_metric=['MAE', 'R2'],
         cat_features=cat_cols_final,
         random_seed=random_state,
-        thread_count=-1,
+        task_type='GPU', devices='0',
         verbose=0,
         **optuna_search.best_params_,
     )
