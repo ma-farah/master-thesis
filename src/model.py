@@ -173,11 +173,9 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
     Returns
     -------
-    df_immu_alone : pd.DataFrame
-        One row per patient: immu difference features + target columns.
     df_combined : pd.DataFrame
-        One row per patient: immu difference features + clinical baseline features
-        + target columns.
+        One row per patient: immunological T_b−T_a difference features
+        + clinical T_a baseline features + target columns.
     """
     t_a, t_b = timepoints[0], timepoints[1]
     id_cols  = {'Patient', 'Timepoint', 'Date', 'date', 'measurement_timepoint'}
@@ -237,12 +235,9 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     target_merge  = ['Patient'] + [c for c in targets.columns
                                    if c != 'Patient' and c not in leaky_tp_cols]
 
-    # ── MERGE into final datasets ─────────────────────────────────────────────
+    # ── MERGE into final dataset ──────────────────────────────────────────────
 
-    # Immunological-only: difference features + target columns
-    df_immu_alone = df_im_wide.merge(targets[target_merge], on='Patient', how='inner')
-
-    # Combined: difference features + clinical T_a baseline + target columns
+    # Combined: immu difference features + clinical T_a baseline + target columns
     df_combined = (
         df_im_wide
         .merge(df_cl_t1, on='Patient', how='inner')
@@ -250,29 +245,23 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     )
 
     baseline_cols = [c for c in target_merge if c.endswith(f'_t{t_a}')]
-    
-    # Dropping leaky columns
-    drop_cols = set(CL_MODEL_DROP_COLS + CL_QUESTIONNAIRE_COLS)
-    all_cols = set(df_immu_alone.columns) | set(df_combined.columns)
-    drop = {c for c in all_cols if c in drop_cols}
 
+    # Drop leaky / metadata columns
+    drop_cols = set(CL_MODEL_DROP_COLS + CL_QUESTIONNAIRE_COLS)
+    drop = {c for c in df_combined.columns if c in drop_cols}
     if drop:
         print(f"  prepare_model_input: dropping {len(drop)} cols — {sorted(drop)}")
-        df_immu_alone = df_immu_alone.drop(columns=list(drop), errors='ignore')
-        df_combined   = df_combined.drop(columns=list(drop), errors='ignore')
+        df_combined = df_combined.drop(columns=list(drop), errors='ignore')
 
-
-    print(f"\nModel datasets ready (T{t_a}–T{t_b} immunological differences only):")
+    print(f"\nModel dataset ready (T{t_a}–T{t_b} immunological differences + clinical baseline):")
     print(f"  Immunological diff features : {len(diff_cols)}  "
           f"(one T{t_b}−T{t_a} diff per original feature)")
     print(f"  Clinical baseline features  : {len(cl_feat_cols)}")
     print(f"  Target baseline included    : {baseline_cols}")
-    print(f"  df_immu_alone : shape={df_immu_alone.shape}, "
-          f"patients={df_immu_alone['Patient'].nunique()}")
-    print(f"  df_combined   : shape={df_combined.shape}, "
+    print(f"  df_combined : shape={df_combined.shape}, "
           f"patients={df_combined['Patient'].nunique()}")
 
-    return df_immu_alone, df_combined
+    return df_combined
 
 
 

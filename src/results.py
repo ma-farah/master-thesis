@@ -466,23 +466,22 @@ _unique_targets = {
 
 model_datasets = {}
 for tgt, tdf in _unique_targets.items():
-    df_immu, df_comb = model.create_model_datasets(
+    model_datasets[tgt] = model.create_model_datasets(
         df_cl_mod, df_im_mod, tdf, timepoints=[1, 2]
     )
-    model_datasets[tgt] = (df_immu, df_comb)
 
 # pain_reduction_pct lives in the same dataset as pain_reduction
 model_datasets['pain_reduction_pct'] = model_datasets['pain_reduction']
 
 # displaying combined datasets:
-TableReport(model_datasets['pain_reduction_pct'][1], max_plot_columns=180)
-TableReport(model_datasets['pain_under_load_reduction'][1], max_plot_columns=180)
+TableReport(model_datasets['pain_reduction_pct'], max_plot_columns=180)
+TableReport(model_datasets['pain_under_load_reduction'], max_plot_columns=180)
 
 
 #%%
 print('\nStep 10b: Model dataset diagnostics — target distributions and sample sizes')
 
-for tgt, (df_immu, df_comb) in model_datasets.items():
+for tgt, df_comb in model_datasets.items():
     y = df_comb[tgt].dropna()
     print(f"\n{'─'*55}")
     print(f"  Target : {tgt}")
@@ -505,7 +504,7 @@ for tgt, (df_immu, df_comb) in model_datasets.items():
 
 print(f"\n{'─'*55}")
 print("  Feature–target Pearson correlations (top 10, combined dataset):")
-for tgt, (df_immu, df_comb) in model_datasets.items():
+for tgt, df_comb in model_datasets.items():
     id_like = ['Patient', 'Timepoint']
     num_cols = [c for c in df_comb.select_dtypes(include='float64').columns
                 if c not in id_like]
@@ -531,19 +530,13 @@ print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_reduction_p
 _pt = PowerTransformer(method='yeo-johnson', standardize=True)
 
 baseline_results = {}
-for tgt, (df_immu, df_comb) in model_datasets.items():
-    res_immu, mdl_immu, X_immu, ypred_immu = model.run_catboost_regressor(
-        df_immu, tgt, 'Immunological T1−T2 diff', target_transformer=_pt)
+for tgt, df_comb in model_datasets.items():
     res_comb, mdl_comb, X_comb, ypred_comb = model.run_catboost_regressor(
         df_comb, tgt, 'Combined T1−T2 diff', target_transformer=_pt)
-    baseline_results[tgt] = {
-        'Immunological': (res_immu, mdl_immu, X_immu, ypred_immu),
-        'Combined':      (res_comb, mdl_comb, X_comb, ypred_comb),
-    }
+    baseline_results[tgt] = (res_comb, mdl_comb, X_comb, ypred_comb)
 
-for tgt, ds_results in baseline_results.items():
-    model.print_regression_summary(
-        {ds: res[0] for ds, res in ds_results.items()}, tgt)
+for tgt, (res, *_) in baseline_results.items():
+    model.print_regression_summary({'Combined': res}, tgt)
 
 
 
@@ -561,7 +554,7 @@ print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction_pct')
 
 cb_pct_results, cb_pct_params, cb_pct_model, cb_pct_X, cb_pct_ypred = \
     model.run_advanced_catboost_rent(
-        model_datasets['pain_reduction_pct'][1],
+        model_datasets['pain_reduction_pct'],
         target_col='pain_reduction_pct',
         target_transformer=_pt,
     )
@@ -578,7 +571,7 @@ print('\nStep 12a: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_redu
 
 cb_ul_results, cb_ul_params, cb_ul_model, cb_ul_X, cb_ul_ypred = \
     model.run_advanced_catboost_rent(
-        model_datasets['pain_under_load_reduction'][1],
+        model_datasets['pain_under_load_reduction'],
         target_col='pain_under_load_reduction',
         target_transformer=_pt,
     )
@@ -605,7 +598,7 @@ print('\nStep 13a: HGB (Nested CV + Optuna) — pain_reduction_pct')
 
 hgb_pct_results, hgb_pct_params, hgb_pct_model, hgb_pct_X, hgb_pct_ypred = \
     model.run_advanced_hgb_rent(
-        prepared_model_datasets['pain_reduction_pct'][1],
+        model_datasets['pain_reduction_pct'],
         target_col='pain_reduction_pct',
     )
 
@@ -621,7 +614,7 @@ print('\nStep 14a: HGB (Nested CV + Optuna) — pain_under_load_reduction')
 
 hgb_ul_results, hgb_ul_params, hgb_ul_model, hgb_ul_X, hgb_ul_ypred = \
     model.run_advanced_hgb_rent(
-        prepared_model_datasets['pain_under_load_reduction'][1],
+        model_datasets['pain_under_load_reduction'],
         target_col='pain_under_load_reduction',
     )
 
@@ -630,7 +623,7 @@ print('\nStep 14b: SHAP — HGB (pain_under_load_reduction)')
 ul_shap = model.plot_shap_regressor(
     hgb_ul_model, hgb_ul_X, 'HGB — pain_under_load_reduction')
 
-y_true_hgb_ul = model_datasets['pain_under_load_reduction'][1]['pain_under_load_reduction'].dropna().reset_index(drop=True)
+y_true_hgb_ul = model_datasets['pain_under_load_reduction']['pain_under_load_reduction'].dropna().reset_index(drop=True)
 
 
 #%%########## ADVANCED MODELS — ELASTICNET + RENT ##############################
@@ -645,7 +638,7 @@ print('\nStep 20a: ElasticNet + RENT (Nested CV + Optuna) — pain_reduction_pct
 
 en_rent_pct_results, en_rent_pct_params, en_rent_pct_model, en_rent_pct_X, en_rent_pct_ypred, en_rent_pct_features = \
     model.run_advanced_elasticnet_rent(
-        prepared_model_datasets['pain_reduction_pct'][1],
+        model_datasets['pain_reduction_pct'],
         target_col='pain_reduction_pct',)
 
 # shap
@@ -654,7 +647,7 @@ en_rent_pct_results, en_rent_pct_params, en_rent_pct_model, en_rent_pct_X, en_re
 print('\nStep 21a: ElasticNet + RENT (Nested CV + Optuna) — pain_under_load_reduction (T1→T2)')
 
 en_rent_ul_results, en_rent_ul_params, en_rent_ul_model, en_rent_ul_X, en_rent_ul_ypred, en_rent_ul_features = \
-    model.run_advanced_elasticnet_rent(prepared_model_datasets['pain_under_load_reduction'][1],
+    model.run_advanced_elasticnet_rent(model_datasets['pain_under_load_reduction'],
         target_col='pain_under_load_reduction',)
 
 # shap
