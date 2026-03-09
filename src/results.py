@@ -673,26 +673,26 @@ print('  CATBOOST MODEL (Nested CV + RENT + Optuna)')
 print('#'*60)
 
 
-#%%---------- Step 11a — CatBoost: pain_reduction_pct ------------------------
+#%%---------- Step 11a — CatBoost: pain_reduction (T1→T2) --------------------
 
-print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction_pct')
+print('\nStep 11a: CatBoost (Nested CV + RENT + Optuna) — pain_reduction (T1→T2)')
 
-cb_pct_results, cb_pct_model, cb_pct_X, cb_pct_ypred, cb_pct_features, cb_pct_rent_params = \
+cb_red_results, cb_red_model, cb_red_X, cb_red_ypred, cb_red_features, cb_red_rent_params = \
     model.run_advanced_catboost_rent(
-        model_datasets['pain_reduction_pct'],
-        target_col='pain_reduction_pct',
+        model_datasets['pain_reduction'],
+        target_col='pain_reduction',
         target_transformer=_pt,
     )
 
 
-print('\nStep 11b: SHAP — CatBoost (pain_reduction_pct)')
-cb_pct_shap = model.plot_shap_regressor(
-    cb_pct_model, cb_pct_X, 'CatBoost — pain_reduction_pct')
+print('\nStep 11b: SHAP — CatBoost (pain_reduction, T1→T2)')
+cb_red_shap = model.plot_shap_regressor(
+    cb_red_model, cb_red_X, 'CatBoost — pain_reduction (T1→T2)')
 
 
-#%%---------- Step 12a — CatBoost: pain_under_load_reduction -----------------
+#%%---------- Step 12a — CatBoost: pain_under_load_reduction (T1→T2) ---------
 
-print('\nStep 12a: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_reduction')
+print('\nStep 12a: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_reduction (T1→T2)')
 
 cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_features, cb_ul_rent_params = \
     model.run_advanced_catboost_rent(
@@ -701,9 +701,9 @@ cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_features, cb_ul_rent_par
         target_transformer=_pt,
     )
 
-print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction)')
+print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction, T1→T2)')
 cb_ul_shap = model.plot_shap_regressor(
-    cb_ul_model, cb_ul_X, 'CatBoost — pain_under_load_reduction')
+    cb_ul_model, cb_ul_X, 'CatBoost — pain_under_load_reduction (T1→T2)')
 
 
 
