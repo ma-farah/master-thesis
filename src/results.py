@@ -553,6 +553,21 @@ TableReport(model_datasets_t13['pain_reduction_pct'], max_plot_columns=180)
 TableReport(model_datasets_t13['pain_under_load_reduction'], max_plot_columns=180)
 
 
+#%%---------- Step T13-1b — Feature–target correlations (T1→T3) --------------
+
+print('\nStep T13-1b: Feature–target Pearson correlations (T1→T3)')
+print(f"\n{'─'*55}")
+print("  Feature–target Pearson correlations (top 20, combined dataset):")
+for tgt, df_comb in model_datasets_t13.items():
+    id_like = ['Patient', 'Timepoint']
+    num_cols = [c for c in df_comb.select_dtypes(include='float64').columns
+                if c not in id_like]
+    corrs = df_comb[num_cols].corrwith(df_comb[tgt]).drop(index=tgt, errors='ignore')
+    corrs = corrs.dropna().abs().sort_values(ascending=False).head(20)
+    print(f"\n  {tgt}:")
+    print(corrs.to_string())
+
+
 #%%---------- Step T13-2 — Baseline CatBoost (T1→T3) -------------------------
 
 print('\nStep T13-2: Baseline CatBoost — T1→T3 targets')
@@ -579,11 +594,6 @@ cb_t13_pct_results, cb_t13_pct_model, cb_t13_pct_X, cb_t13_pct_ypred, cb_t13_pct
         target_col='pain_reduction',
         target_transformer=_pt_t13,
     )
-
-print('\nStep T13-3b: SHAP — CatBoost (pain_reduction_pct, T1→T3)')
-cb_t13_pct_shap = model.plot_shap_regressor(
-    cb_t13_pct_model, cb_t13_pct_X, 'CatBoost — pain_reduction_pct (T1→T3)')
-
 
 #%%---------- Step T13-4a — CatBoost + RENT: pain_under_load_reduction (T1→T3)
 
@@ -688,6 +698,22 @@ cb_red_results, cb_red_model, cb_red_X, cb_red_ypred, cb_red_features, cb_red_re
 print('\nStep 11b: SHAP — CatBoost (pain_reduction, T1→T2)')
 cb_red_shap = model.plot_shap_regressor(
     cb_red_model, cb_red_X, 'CatBoost — pain_reduction (T1→T2)')
+
+
+#%%---------- Step 11c — CatBoost: pain_reduction_pct (T1→T2) ----------------
+
+print('\nStep 11c: CatBoost (Nested CV + RENT + Optuna) — pain_reduction_pct (T1→T2)')
+
+cb_pct_results, cb_pct_model, cb_pct_X, cb_pct_ypred, cb_pct_features, cb_pct_rent_params = \
+    model.run_advanced_catboost_rent(
+        model_datasets['pain_reduction_pct'],
+        target_col='pain_reduction_pct',
+        target_transformer=_pt,
+    )
+
+print('\nStep 11d: SHAP — CatBoost (pain_reduction_pct, T1→T2)')
+cb_pct_shap = model.plot_shap_regressor(
+    cb_pct_model, cb_pct_X, 'CatBoost — pain_reduction_pct (T1→T2)')
 
 
 #%%---------- Step 12a — CatBoost: pain_under_load_reduction (T1→T2) ---------

@@ -253,11 +253,16 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
         print(f"  prepare_model_input: dropping {len(drop)} cols — {sorted(drop)}")
         df_combined = df_combined.drop(columns=list(drop), errors='ignore')
 
+    # Drop baseline target values (e.g. pain_scale_t1) — regression-to-mean confound
+    baseline_present = [c for c in baseline_cols if c in df_combined.columns]
+    if baseline_present:
+        df_combined = df_combined.drop(columns=baseline_present)
+        print(f"  Dropped baseline target cols : {baseline_present}")
+
     print(f"\nModel dataset ready (T{t_a}–T{t_b} immunological differences + clinical baseline):")
     print(f"  Immunological diff features : {len(diff_cols)}  "
           f"(one T{t_b}−T{t_a} diff per original feature)")
     print(f"  Clinical baseline features  : {len(cl_feat_cols)}")
-    print(f"  Target baseline included    : {baseline_cols}")
     print(f"  df_combined : shape={df_combined.shape}, "
           f"patients={df_combined['Patient'].nunique()}")
 
