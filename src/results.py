@@ -10,6 +10,8 @@ from pathlib import Path
 from skrub import TableReport
 import scikit_na as na
 
+from sklearn.preprocessing import PowerTransformer
+
 import preprocess
 import explore
 import model
@@ -42,6 +44,7 @@ explore.patient_timepoint_summary(df_im, name='Immunological')
 
 print('\nStep 2: Cleaning immunological dataset')
 df_im_vis = preprocess.clean_im(df_im)
+_im_id_cols = ['Patient', 'Timepoint', 'Date']
 
 # TableReport after cleaning 
 print('\nTableReport of cleaned immunological dataset:')
@@ -50,8 +53,6 @@ TableReport(df_im_vis, max_plot_columns=180)
 
 #%%---------- Step 2a — Pearson correlation ------------------------------------
 print('\nStep 2a: EDA — Pearson correlation (immunological)')
-_im_id_cols = ['Patient', 'Timepoint', 'Date']
-
 im_pearson_matrix, im_pearson_pairs = explore.pearson_correlation(
     df_im_vis,
     id_cols=_im_id_cols,
@@ -421,64 +422,37 @@ for col_idx, (name, tdf) in enumerate(target_frames.items()):
 plt.suptitle('Target Distributions (T1 → T2)', fontsize=14, y=1.02)
 plt.tight_layout()
 plt.show()
+
 #%%
-# Apply power transfrom from scikit learn to targets pain_targets and targets_under_loadand plot again
+# Visualize power-transformed target distributions (on copies — originals unchanged for modeling)
 
-from sklearn.preprocessing import PowerTransformer
-# Assuming pain_targets and targets_under_load are DataFrames
-pt = PowerTransformer(method='yeo-johnson', standardize=True)
+fig, axes = plt.subplots(2, len(target_frames), figsize=(5 * len(target_frames), 8))
+colors = sns.color_palette('mako', len(target_frames))
 
-trans_pain_targets = pd.DataFrame(
-    pt.fit_transform(pain_targets),
-    columns=pain_targets.columns,
-    index=pain_targets.index
-)
-trans_under_load_targets = pd.DataFrame(
-    pt.fit_transform(targets_under_load),
-    columns=targets_under_load.columns,
-    index=targets_under_load.index
-)
-
-# Collect all reduction_pct columns across all target DataFrames for plotting
-newtarget_frames = {
-    'pain_scale':      trans_pain_targets,
-    'pain_under_load': trans_under_load_targets,
-}
-
-fig, axes = plt.subplots(2, len(newtarget_frames), figsize=(5 * len(newtarget_frames), 8))
-colors = sns.color_palette('mako', len(newtarget_frames))
-
-for col_idx, (name, tdf) in enumerate(newtarget_frames.items()):
-    prefix  = name.replace('_scale', '')   # matches construct_datasets_targets naming
+for col_idx, (name, tdf) in enumerate(target_frames.items()):
+    prefix  = name.replace('_scale', '')
     red_col = f'{prefix}_reduction'
     pct_col = f'{prefix}_reduction_pct'
 
-    # Absolute reduction
+    tdf_viz = tdf[[red_col, pct_col]].copy()
+    pt_viz  = PowerTransformer(method='yeo-johnson', standardize=True)
+    tdf_viz[[red_col, pct_col]] = pt_viz.fit_transform(tdf_viz)
+
     ax0 = axes[0, col_idx]
-    sns.histplot(tdf[red_col].dropna(), kde=True, ax=ax0,
+    sns.histplot(tdf_viz[red_col].dropna(), kde=True, ax=ax0,
                  color=colors[col_idx], bins=20)
-    ax0.set_title(f'{name}\nAbsolute reduction (T1−T2)')
-    ax0.set_xlabel('Reduction')
+    ax0.set_title(f'{name}\nAbsolute reduction (T1−T2) — transformed')
+    ax0.set_xlabel('Reduction (transformed)')
 
-    # Percent reduction
     ax1 = axes[1, col_idx]
-    sns.histplot(tdf[pct_col].dropna(), kde=True, ax=ax1,
+    sns.histplot(tdf_viz[pct_col].dropna(), kde=True, ax=ax1,
                  color=colors[col_idx], bins=20)
-    ax1.set_title(f'{name}\nPercent reduction (%)')
-    ax1.set_xlabel('Reduction (%)')
+    ax1.set_title(f'{name}\nPercent reduction (%) — transformed')
+    ax1.set_xlabel('Reduction (%) (transformed)')
 
-plt.suptitle('Target Distributions (T1 → T2)', fontsize=14, y=1.02)
+plt.suptitle('Target Distributions after Power Transform (T1 → T2)', fontsize=14, y=1.02)
 plt.tight_layout()
 plt.show()
-
-#%%
-
-# only transform the four target columns in pain_targets and target_under_load
-for col_idx, (name, tdf) in enumerate(target_frames.items()):
-    prefix  = name.replace('_scale', '')   # matches construct_datasets_targets naming
-    red_col = f'{prefix}_reduction'
-    pct_col = f'{prefix}_reduction_pct'
-    tdf[[red_col, pct_col]] = pt.fit_transform(tdf[[red_col, pct_col]])
 
 
 #%%---------- Step 9 — Prepare modeling datasets (immunological T1-T2 diffs) --
@@ -501,8 +475,8 @@ for tgt, tdf in _unique_targets.items():
 model_datasets['pain_reduction_pct'] = model_datasets['pain_reduction']
 
 # displaying combined datasets:
-TableReport(model_datasets['pain_reduction_pct'][1])
-TableReport(model_datasets['pain_under_load_reduction'][1])
+TableReport(model_datasets['pain_reduction_pct'][1], max_plot_columns=180)
+TableReport(model_datasets['pain_under_load_reduction'][1], max_plot_columns=180)
 
 
 #%%
@@ -554,12 +528,14 @@ print('#'*60)
 
 print('\nStep 10: Running baseline CatBoost — pain_reduction, pain_reduction_pct, pain_under_load_reduction')
 
+_pt = PowerTransformer(method='yeo-johnson', standardize=True)
+
 baseline_results = {}
 for tgt, (df_immu, df_comb) in model_datasets.items():
     res_immu, mdl_immu, X_immu, ypred_immu = model.run_catboost_regressor(
-        df_immu, tgt, 'Immunological T1−T2 diff')
+        df_immu, tgt, 'Immunological T1−T2 diff', target_transformer=_pt)
     res_comb, mdl_comb, X_comb, ypred_comb = model.run_catboost_regressor(
-        df_comb, tgt, 'Combined T1−T2 diff')
+        df_comb, tgt, 'Combined T1−T2 diff', target_transformer=_pt)
     baseline_results[tgt] = {
         'Immunological': (res_immu, mdl_immu, X_immu, ypred_immu),
         'Combined':      (res_comb, mdl_comb, X_comb, ypred_comb),
@@ -587,6 +563,7 @@ cb_pct_results, cb_pct_params, cb_pct_model, cb_pct_X, cb_pct_ypred = \
     model.run_advanced_catboost_rent(
         model_datasets['pain_reduction_pct'][1],
         target_col='pain_reduction_pct',
+        target_transformer=_pt,
     )
 
 
@@ -603,6 +580,7 @@ cb_ul_results, cb_ul_params, cb_ul_model, cb_ul_X, cb_ul_ypred = \
     model.run_advanced_catboost_rent(
         model_datasets['pain_under_load_reduction'][1],
         target_col='pain_under_load_reduction',
+        target_transformer=_pt,
     )
 
 print('\nStep 12b: SHAP — CatBoost (pain_under_load_reduction)')

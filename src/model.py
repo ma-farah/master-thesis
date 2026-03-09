@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
@@ -211,9 +211,9 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     df_im_merged = df_im_ta.merge(df_im_tb, on='Patient', how='inner')
     diff_cols = {}
     for c in im_feat_cols:
-        col_name         = f'{c}_t{t_a}_minus_t{t_b}'
+        col_name         = f'{c}_t{t_b}_minus_t{t_a}'
         diff_cols[c]     = col_name
-        df_im_merged[col_name] = df_im_merged[f'{c}_t{t_a}'] - df_im_merged[f'{c}_t{t_b}']
+        df_im_merged[col_name] = df_im_merged[f'{c}_t{t_b}'] - df_im_merged[f'{c}_t{t_a}']
 
     # Keep only Patient + difference columns (discard raw T_a and T_b feature columns)
     df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
@@ -264,7 +264,7 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
     print(f"\nModel datasets ready (T{t_a}–T{t_b} immunological differences only):")
     print(f"  Immunological diff features : {len(diff_cols)}  "
-          f"(one T{t_a}−T{t_b} diff per original feature)")
+          f"(one T{t_b}−T{t_a} diff per original feature)")
     print(f"  Clinical baseline features  : {len(cl_feat_cols)}")
     print(f"  Target baseline included    : {baseline_cols}")
     print(f"  df_immu_alone : shape={df_immu_alone.shape}, "
@@ -302,7 +302,8 @@ def regression_metrics(y_true, y_pred):
 
 
 def run_catboost_regressor(df_model, target_col, name,
-                           n_splits=5, n_repeats=5, random_state=42):
+                           n_splits=5, n_repeats=5, random_state=42,
+                           target_transformer=None):
     """Run a baseline CatBoostRegressor with RepeatedKFold cross-validation.
     Parameters
     ----------
@@ -328,6 +329,7 @@ def run_catboost_regressor(df_model, target_col, name,
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X = df_model[feature_cols].copy()
  
+    print(feature_cols) # check features used
 
     valid = y.notna()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
@@ -355,20 +357,30 @@ def run_catboost_regressor(df_model, target_col, name,
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
+        if target_transformer is not None:
+            pt_fold     = clone(target_transformer)
+            y_train_fit = pd.Series(
+                pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
+                index=y_train.index,
+            )
+        else:
+            pt_fold     = None
+            y_train_fit = y_train
+
         model = CatBoostRegressor(
             iterations=1000,
             loss_function='RMSE',
             random_seed=random_state,
             verbose=0,
         )
-        model.fit(
-            Pool(X_train, y_train, cat_features=cat_cols),
-        )
+        model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
 
-        preds = model.predict(X_test)
+        preds_raw = model.predict(X_test)
+        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
+                 if pt_fold is not None else preds_raw)
         y_pred.iloc[test_idx] = preds
 
-        # Compute metrics from predictions (consistent with advanced model)
+        # Metrics computed in original-space (inverse-transformed if transformer provided)
         mae  = mean_absolute_error(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         mse  = rmse ** 2
@@ -445,7 +457,7 @@ def print_regression_summary(results_dict, target_col):
 
 def run_advanced_catboost_rent(
     df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_1=0.7, tau_2=0.75, tau_3=0.95,
+    tau_1=0.7, tau_2=0.75, tau_3=0.95, target_transformer=None,
 ):
     """CatBoostRegressor with RENT feature selection + nested CV + Optuna.
 
@@ -536,6 +548,16 @@ def run_advanced_catboost_rent(
         X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
+        if target_transformer is not None:
+            pt_fold     = clone(target_transformer)
+            y_train_fit = pd.Series(
+                pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
+                index=y_train.index,
+            )
+        else:
+            pt_fold     = None
+            y_train_fit = y_train
+
         # ── RENT feature selection on training split only ─────────────────────
         # Step 1: OrdinalEncode categorical (str) columns - need to encode first
         X_train_enc = X_train.copy()
@@ -549,10 +571,10 @@ def run_advanced_catboost_rent(
         X_train_rent_arr = imputer.fit_transform(X_train_enc.astype(float))
         X_train_rent = pd.DataFrame(X_train_rent_arr, columns=feature_cols)
 
-        # Step 3: Run RENT
+        # Step 3: Run RENT (uses transformed y if transformer provided)
         rent_model = RENT.RENT_Regression(
             data=X_train_rent,
-            target=y_train.values,
+            target=y_train_fit.values,
             feat_names=feature_cols,
             C=[0.001, 0.01, 0.1, 1, 10, 100],
             l1_ratios=[0.1, 0.25, 0.5, 0.75, 0.9, 1],
@@ -602,10 +624,12 @@ def run_advanced_catboost_rent(
             verbose=0,
         )
 
-        optuna_search.fit(X_train_sel, y_train)
+        optuna_search.fit(X_train_sel, y_train_fit)
         best_params_list.append(optuna_search.best_params_)
 
-        preds = optuna_search.predict(X_test_sel)
+        preds_raw = optuna_search.predict(X_test_sel)
+        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
+                 if pt_fold is not None else preds_raw)
         rmse  = np.sqrt(mean_squared_error(y_test, preds))
         mae   = mean_absolute_error(y_test, preds)
         r2    = r2_score(y_test, preds)
@@ -676,6 +700,14 @@ def run_advanced_catboost_rent(
     X_final = X[final_cols]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
 
+    if target_transformer is not None:
+        pt_final = clone(target_transformer)
+        y_final_fit = pd.Series(
+            pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
+    else:
+        pt_final    = None
+        y_final_fit = y
+
     final_model = CatBoostRegressor(
         iterations=300,
         loss_function='RMSE',
@@ -685,8 +717,11 @@ def run_advanced_catboost_rent(
         verbose=0,
         **optuna_search.best_params_,
     )
-    final_model.fit(X_final, y)
-    y_pred = pd.Series(final_model.predict(X_final), index=range(len(X_final)), dtype='float64')
+    final_model.fit(X_final, y_final_fit)
+    y_pred_raw = pd.Series(final_model.predict(X_final), index=range(len(X_final)), dtype='float64')
+    y_pred = (pd.Series(pt_final.inverse_transform(y_pred_raw.values.reshape(-1, 1)).ravel(),
+                        index=y_pred_raw.index, dtype='float64')
+              if pt_final is not None else y_pred_raw)
 
     return results_df, final_model, X_final, y_pred, selected_features_per_fold
 
