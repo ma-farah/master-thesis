@@ -462,17 +462,19 @@ def run_advanced_catboost_rent(
     df_combined, target_col='pain_reduction_pct', random_state=42,
     tau_3=0.90, target_transformer=None,
 ):
-    """CatBoostRegressor with Optuna-tuned RENT + nested CV (two sequential studies).
+    """CatBoostRegressor with Optuna-tuned RENT + nested CV (per-inner-fold tuning).
 
-    Two Optuna studies per outer fold:
-      Study 1 — RENT HPs: tune C, l1_ratio, τ₁, τ₂ using a fixed probe CatBoost
-                          evaluated on inner CV.  τ₃ is fixed at tau_3.
+    For each outer fold → for each inner fold:
+      Study 1 — RENT HPs : tune C, l1_ratio, τ₁, τ₂ using a fixed probe CatBoost
+                           evaluated on the inner val split.  τ₃ is fixed at tau_3.
       Study 2 — Model HPs: tune depth, learning_rate, l2_leaf_reg, etc. on the
-                           features selected by Study 1.
+                           features selected by Study 1, evaluated on the inner val split.
+      Pick the best inner fold (lowest Study 2 val RMSE) → use its selected features
+      and model params to train on full X_train and evaluate on X_test.
 
     Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
-    Inner CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 fits per trial (both studies).
-    Study 1  : 50 Optuna trials for RENT HPs (K=100 internal RENT splits per trial).
+    Inner CV : RepeatedKFold(n_splits=4, n_repeats=2) =  8 inner folds per outer fold. # change to 4 repeats later?
+    Study 1  : 50 Optuna trials for RENT HPs (K=100 RENT splits per trial).
     Study 2  : 50 Optuna trials for CatBoost HPs.
 
     Parameters
@@ -493,11 +495,6 @@ def run_advanced_catboost_rent(
     best_rent_params_list      : list[dict]         Best RENT HPs per outer fold.
     """
     import optuna
-    try:
-        from optuna.integration import OptunaSearchCV
-    except ImportError:
-        from optuna_integration import OptunaSearchCV
-    from sklearn.model_selection import cross_val_score
     import warnings
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import OrdinalEncoder
@@ -506,7 +503,6 @@ def run_advanced_catboost_rent(
     warnings.filterwarnings('ignore', message='.*less than 75% GPU memory.*')
     warnings.filterwarnings('ignore', category=FutureWarning, module='RENT')
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
-    warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     N_RENT_TRIALS  = 50
@@ -530,19 +526,14 @@ def run_advanced_catboost_rent(
     print(f"  CatBoost + RENT (Optuna-tuned) — {target_col}")
     print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
     print(f"  τ₃={tau_3} (fixed)  |  τ₁, τ₂, C, l1_ratio tuned via Optuna")
-    print(f"  Outer: 4×5=20 folds  |  Inner: 4×5=20 fits")
-    print(f"  Study 1 (RENT HPs):  {N_RENT_TRIALS} trials × K=100 RENT splits")
-    print(f"  Study 2 (model HPs): {N_MODEL_TRIALS} trials")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×2=8 folds")
+    print(f"  OptunaStudy 1 (RENT HPs):  {N_RENT_TRIALS} trials × K=100 RENT splits  (per inner fold)")
+    print(f"  Optuna Study 2 (model HPs): {N_MODEL_TRIALS}                   (per inner fold)")
+    print(f" Total model fits 20x8x50x100 + 20x8x50 + 20 = approx. 808 020")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-
-    model_param_distributions = {
-        'depth':               optuna.distributions.IntDistribution(3, 10),
-        'learning_rate':       optuna.distributions.FloatDistribution(1e-3, 0.3, log=True),
-        'l2_leaf_reg':         optuna.distributions.FloatDistribution(1, 10.0, log=True),
-        'bagging_temperature': optuna.distributions.FloatDistribution(0.0, 1.0)}
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=2, random_state=random_state)
 
     fold_results               = []
     best_rent_params_list      = []
@@ -566,148 +557,155 @@ def run_advanced_catboost_rent(
             pt_fold     = None
             y_train_fit = y_train
 
-        # ── Prepare X_train_rent: encode categoricals + impute NaN ───────────
-        X_train_enc   = X_train.copy()
-        cat_mask_cols = [c for c in X_train.columns if X_train[c].dtype == object]
-        if cat_mask_cols:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_enc[cat_mask_cols] = oe.fit_transform(X_train[cat_mask_cols])
-        imputer          = SimpleImputer(strategy='median') 
-        X_train_rent_arr = imputer.fit_transform(X_train_enc.astype(float))
-        X_train_rent     = pd.DataFrame(X_train_rent_arr, columns=feature_cols)
+        # ── Inner CV: per-fold RENT + CatBoost tuning ────────────────────────
+        # For each inner fold: Study 1 (RENT HPs) → Study 2 (model HPs).
+        # Pick the best inner fold (lowest Study 2 val RMSE).
+        inner_fold_log = []  # (val_rmse, selected_cols, model_params, cat_cols_inner, rent_params)
 
-        # ── Study 1: Optuna for RENT HPs ──────────────────────────────────────
-        # Captures X_train_rent, X_train, y_train_fit, inner_cv, feature_cols from scope.
-        def rent_objective(trial):
-            c_val    = trial.suggest_float('C',        1e-3, 10, log=True)
-            l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
-            tau_1    = trial.suggest_float('tau_1',    0.6,  0.9)
-            tau_2    = trial.suggest_float('tau_2',    0.6,  0.9)
+        for inner_fold_idx, (inner_train_idx, inner_val_idx) in enumerate(
+            inner_cv.split(X_train), start=1
+        ):
+            X_it = X_train.iloc[inner_train_idx].copy()
+            y_it = y_train_fit.iloc[inner_train_idx]
+            X_iv = X_train.iloc[inner_val_idx].copy()
+            y_iv = y_train_fit.iloc[inner_val_idx]
 
-            rent_trial = RENT.RENT_Regression(
-                data=X_train_rent, target=y_train_fit.values,
+            # Prepare RENT input for this inner fold's training data
+            X_it_enc = X_it.copy()
+            cat_mask_cols = [c for c in X_it.columns if X_it[c].dtype == object]
+            if cat_mask_cols:
+                oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+                X_it_enc[cat_mask_cols] = oe.fit_transform(X_it[cat_mask_cols])
+            imputer   = SimpleImputer(strategy='median')
+            X_it_rent = pd.DataFrame(
+                imputer.fit_transform(X_it_enc.astype(float)), columns=feature_cols)
+
+            # ── Study 1: Tune RENT HPs — probe evaluated on inner val split ──
+            def rent_objective(trial):
+                c_val    = trial.suggest_float('C',        1e-3, 10, log=True)
+                l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
+                tau_1    = trial.suggest_float('tau_1',    0.6,  0.9)
+                tau_2    = trial.suggest_float('tau_2',    0.6,  0.9)
+
+                rent_t = RENT.RENT_Regression(
+                    data=X_it_rent, target=y_it.values,
+                    feat_names=feature_cols,
+                    C=[c_val], l1_ratios=[l1_ratio],
+                    autoEnetParSel=False, poly='OFF',
+                    testsize_range=(0.25, 0.25), K=100,
+                    random_state=random_state, verbose=0,
+                )
+                rent_t.train()
+                sel_idx = rent_t.select_features(
+                    tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+                if len(sel_idx) == 0:
+                    return 1e6
+                sel_cols     = [feature_cols[i] for i in sel_idx]
+                cat_cols_sel = [c for c in cat_cols if c in sel_cols]
+                probe = CatBoostRegressor(
+                    iterations=300, depth=5,
+                    cat_features=cat_cols_sel,
+                    random_seed=random_state,
+                    task_type='GPU', devices='0',
+                    gpu_ram_part=0.6, logging_level='Silent',
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    probe.fit(X_it[sel_cols], y_it)
+                preds = probe.predict(X_iv[sel_cols])
+                return np.sqrt(mean_squared_error(y_iv, preds))
+
+            rent_study = optuna.create_study(direction='minimize')
+            rent_study.optimize(rent_objective, n_trials=N_RENT_TRIALS, show_progress_bar=False)
+            best_rent_inner = rent_study.best_params
+
+            # Re-run RENT with best HPs → selected features for this inner fold
+            rent_final = RENT.RENT_Regression(
+                data=X_it_rent, target=y_it.values,
                 feat_names=feature_cols,
-                C=[c_val], l1_ratios=[l1_ratio],
-                autoEnetParSel=False,
-                poly='OFF', testsize_range=(0.25, 0.25),
-                K=100, random_state=random_state, verbose=0,
+                C=[best_rent_inner['C']], l1_ratios=[best_rent_inner['l1_ratio']],
+                autoEnetParSel=False, poly='OFF',
+                testsize_range=(0.25, 0.25), K=100,
+                random_state=random_state, verbose=0,
             )
-            rent_trial.train()
-            sel_idx = rent_trial.select_features(
-                tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+            rent_final.train()
+            sel_idx_inner = rent_final.select_features(
+                tau_1_cutoff=best_rent_inner['tau_1'],
+                tau_2_cutoff=best_rent_inner['tau_2'],
+                tau_3_cutoff=tau_3,
+            )
+            selected_cols  = ([feature_cols[i] for i in sel_idx_inner]
+                              if len(sel_idx_inner) > 0 else feature_cols)
+            cat_cols_inner = [c for c in cat_cols if c in selected_cols]
 
-            if len(sel_idx) == 0:
-                return 1e6  # penalise: no features selected
+            # ── Study 2: Tune CatBoost HPs on selected features ──────────────
+            def model_objective(trial):
+                params = {
+                    'depth':               trial.suggest_int('depth', 3, 10),
+                    'learning_rate':       trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
+                    'l2_leaf_reg':         trial.suggest_float('l2_leaf_reg', 1, 10.0, log=True),
+                    'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),
+                }
+                m = CatBoostRegressor(
+                    iterations=300, **params,
+                    cat_features=cat_cols_inner,
+                    random_seed=random_state,
+                    task_type='GPU', devices='0', gpu_ram_part=0.6,
+                    logging_level='Silent',
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    m.fit(X_it[selected_cols], y_it)
+                preds = m.predict(X_iv[selected_cols])
+                return np.sqrt(mean_squared_error(y_iv, preds))
 
-            sel_cols     = [feature_cols[i] for i in sel_idx]
-            cat_cols_sel = [c for c in cat_cols if c in sel_cols]
-            probe = CatBoostRegressor(
-                iterations=300, depth=5,
-                cat_features=cat_cols_sel,
-                random_seed=random_state, 
-                task_type='GPU', devices='0', 
-                gpu_ram_part=0.6, logging_level='Silent',)
-            
-            with contextlib.redirect_stderr(io.StringIO()): #supress warnings?
-                scores = cross_val_score(
-                    probe, X_train[sel_cols], y_train_fit,
-                    cv=inner_cv, scoring='neg_root_mean_squared_error',
-                    n_jobs=1, verbose=0,)
-            return -scores.mean()
+            model_study = optuna.create_study(direction='minimize')
+            model_study.optimize(model_objective, n_trials=N_MODEL_TRIALS, show_progress_bar=False)
+            best_model_params_inner = model_study.best_params
+            val_rmse_inner          = model_study.best_value
 
-        rent_study = optuna.create_study(direction='minimize')
-        rent_study.optimize(rent_objective, n_trials=N_RENT_TRIALS, show_progress_bar=False)
-        best_rent = rent_study.best_params
-        best_rent_params_list.append(best_rent)
-        print(f"    Study 1 best RENT: C={best_rent['C']:.4f}  l1={best_rent['l1_ratio']:.2f}"
-              f"  τ₁={best_rent['tau_1']:.2f}  τ₂={best_rent['tau_2']:.2f}"
-              f"  (score={rent_study.best_value:.4f})")
+            inner_fold_log.append((
+                val_rmse_inner, selected_cols,
+                best_model_params_inner, cat_cols_inner, best_rent_inner,
+            ))
 
-        # ── Re-run RENT with best HPs to obtain selected features ────────────
-        rent_best = RENT.RENT_Regression(
-            data=X_train_rent, target=y_train_fit.values,
-            feat_names=feature_cols,
-            C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
-            autoEnetParSel=False,
-            poly='OFF', testsize_range=(0.25, 0.25),
-            K=100, random_state=random_state, verbose=0,
-        )
-        rent_best.train()
-        selected_idx = rent_best.select_features(
-            tau_1_cutoff=best_rent['tau_1'],
-            tau_2_cutoff=best_rent['tau_2'],
-            tau_3_cutoff=tau_3,
-        )
-
-        if len(selected_idx) == 0:
-            print(f"    RENT: 0 features after best HPs — using all {len(feature_cols)}")
-            selected_cols = feature_cols
-        else:
-            selected_cols = [feature_cols[i] for i in selected_idx]
-            suffix = '...' if len(selected_cols) > 8 else ''
-            print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — "
-                  f"{selected_cols[:8]}{suffix}")
+        # ── Pick best inner fold ──────────────────────────────────────────────
+        best_inner = min(inner_fold_log, key=lambda x: x[0])
+        val_rmse_best, selected_cols, best_model_params, cat_cols_inner, best_rent = best_inner
 
         selected_features_per_fold.append(selected_cols)
+        best_model_params_list.append(best_model_params)
+        best_rent_params_list.append(best_rent)
 
+        suffix = '...' if len(selected_cols) > 8 else ''
+        print(f"    Best inner fold val RMSE={val_rmse_best:.4f}")
+        print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — "
+              f"{selected_cols[:8]}{suffix}")
+        print(f"    Model HPs: {best_model_params}")
 
-        def model_objective(trial):
-            params = {
-                'depth':               trial.suggest_int('depth', 3, 10),
-                'learning_rate':       trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
-                'l2_leaf_reg':         trial.suggest_float('l2_leaf_reg', 1, 10.0, log=True),
-                'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),}
-            fold_scores = []
-            
-            for inner_train_idx, inner_val_idx in inner_cv.split(X_train):
-                X_it = X_train.iloc[inner_train_idx]
-                y_it = y_train_fit.iloc[inner_train_idx]
-                X_iv = X_train.iloc[inner_val_idx]
-                y_iv = y_train_fit.iloc[inner_val_idx]
-
-                # RENT on this inner fold's training data only
-                rent_inner = RENT.RENT_Regression(
-                data=X_it[feature_cols].values,
-                target=y_it.values,
-                feat_names=feature_cols,
-                C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
-                autoEnetParSel=False,
-                poly='OFF', testsize_range=(0.25, 0.25),
-                K=100, random_state=random_state, verbose=0,)
-                rent_inner.train()
-                
-            inner_idx = rent_inner.select_features(
-                tau_1_cutoff=best_rent['tau_1'],
-                tau_2_cutoff=best_rent['tau_2'],
-                tau_3_cutoff=tau_3,)
-            inner_cols = [feature_cols[i] for i in inner_idx] if len(inner_idx) > 0 else feature_cols
-            cat_inner  = [c for c in cat_cols if c in inner_cols]
-
-            m = CatBoostRegressor(
-            iterations=300, **params,
-            cat_features=cat_inner,
+        # ── Train on full X_train with best inner fold's params ───────────────
+        fold_model = CatBoostRegressor(
+            iterations=300, **best_model_params,
+            cat_features=cat_cols_inner,
             random_seed=random_state,
             task_type='GPU', devices='0', gpu_ram_part=0.6,
-            logging_level='Silent',)
+            logging_level='Silent',
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            fold_model.fit(X_train[selected_cols], y_train_fit)
 
-            with contextlib.redirect_stderr(io.StringIO()):
-                m.fit(X_it[inner_cols], y_it)
-            preds = m.predict(X_iv[inner_cols])
-            fold_scores.append(np.sqrt(mean_squared_error(y_iv, preds)))
-        return np.mean(fold_scores)
+        preds_raw = fold_model.predict(X_test[selected_cols])
+        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
+                 if pt_fold is not None else preds_raw)
 
-    model_study = optuna.create_study(direction='minimize')
-    model_study.optimize(model_objective, n_trials=N_MODEL_TRIALS, show_progress_bar=False)
-    best_model_params = model_study.best_params
-    best_model_params_list.append(best_model_params)
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)  # suppress Study 1 next fold
-    fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
-    print(f"    Study 2 best model: {optuna_search.best_params_}")
-    print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        mae  = mean_absolute_error(y_test, preds)
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        mse  = rmse ** 2
+        r2   = r2_score(y_test, preds)
+        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
+        print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     elapsed = time.time() - start
     print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
+
 
     # ── Results summary ───────────────────────────────────────────────────────
     results_df  = pd.DataFrame(fold_results)
@@ -729,7 +727,7 @@ def run_advanced_catboost_rent(
     from collections import Counter
     all_selected = [f for fold_feats in selected_features_per_fold for f in fold_feats]
     freq = Counter(all_selected)
-    print(f"\n  RENT feature selection frequency ({n_outer} outer folds):")
+    print(f"\n  RENT feature selection frequency in ({n_outer} outer folds):")
     for feat, cnt in freq.most_common():
         marker = ' ◀' if cnt / n_outer >= 0.5 else ''
         print(f"    {cnt:>3}/{n_outer}  {feat}{marker}")
@@ -740,7 +738,7 @@ def run_advanced_catboost_rent(
     if not final_cols:
         print(f"\n  Warning: no feature met ≥50% threshold — falling back to top 10 by frequency")
         final_cols = [f for f, _ in freq.most_common(10)]
-    print(f"\n  Final model: {len(final_cols)} features selected (≥50% frequency)")
+    print(f"\n  Final model: {len(final_cols)} features selected (≥50% frequency): {final_cols}")
 
     X_final        = X[final_cols]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
@@ -753,6 +751,17 @@ def run_advanced_catboost_rent(
         pt_final    = None
         y_final_fit = y
 
+    # Aggregate model Hyperprameters across outer folds: use median for continuous params,
+    # mode for integer params.  avoid cherry picking model(?)
+    import statistics
+    _all_keys = best_model_params_list[0].keys()
+    best_model_params_final = {}
+    for k in _all_keys:
+        vals = [p[k] for p in best_model_params_list]
+        if isinstance(vals[0], int):
+            best_model_params_final[k] = int(round(statistics.median(vals)))
+        else:
+            best_model_params_final[k] = statistics.median(vals)
     final_model = CatBoostRegressor(
         iterations=300,
         loss_function='RMSE',
@@ -761,7 +770,7 @@ def run_advanced_catboost_rent(
         random_seed=random_state,
         task_type='GPU', devices='0', gpu_ram_part=0.6,
         logging_level='Silent',
-        **optuna_search.best_params_,
+        **best_model_params_final,
     )
 
     with contextlib.redirect_stderr(io.StringIO()):
@@ -773,7 +782,6 @@ def run_advanced_catboost_rent(
               if pt_final is not None else y_pred_raw)
 
     return results_df, final_model, X_final, y_pred, selected_features_per_fold, best_rent_params_list
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
