@@ -1,5 +1,6 @@
 # Modeling functions — baseline and advanced regressors
 import time
+import optuna
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,6 +14,8 @@ from catboost import CatBoostRegressor, Pool
 # shap is imported lazily inside plot_shap_regressor / plot_shap_pipeline
 # to avoid kernel crashes on Windows with restricted execution policies.
 import joblib, os
+import contextlib, io
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -304,7 +307,7 @@ def run_catboost_regressor(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42,
                            target_transformer=None):
     """Run a baseline CatBoostRegressor with RepeatedKFold cross-validation.
-    Parameters
+    Parameters uses CPU as task type
     ----------
     df_model     : pd.DataFrame   Dataset containing features and target column.
     target_col   : str            Name of the regression target column.
@@ -368,8 +371,8 @@ def run_catboost_regressor(df_model, target_col, name,
             iterations=300,
             loss_function='RMSE',
             random_seed=random_state,
-            task_type='GPU', 
-            devices='0',
+            task_type='CPU', 
+            thread_count=-1, #using all cores in paralell
             verbose=0,
         )
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
@@ -500,6 +503,7 @@ def run_advanced_catboost_rent(
     from sklearn.preprocessing import OrdinalEncoder
     from RENT import RENT
 
+    warnings.filterwarnings('ignore', message='.*less than 75% GPU memory.*')
     warnings.filterwarnings('ignore', category=FutureWarning, module='RENT')
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     warnings.filterwarnings('ignore', message='OptunaSearchCV is experimental')
@@ -575,7 +579,7 @@ def run_advanced_catboost_rent(
         # ── Study 1: Optuna for RENT HPs ──────────────────────────────────────
         # Captures X_train_rent, X_train, y_train_fit, inner_cv, feature_cols from scope.
         def rent_objective(trial):
-            c_val    = trial.suggest_float('C',        1e-3, 1e2, log=True)
+            c_val    = trial.suggest_float('C',        1e-3, 10, log=True)
             l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
             tau_1    = trial.suggest_float('tau_1',    0.6,  0.9)
             tau_2    = trial.suggest_float('tau_2',    0.6,  0.9)
@@ -600,12 +604,15 @@ def run_advanced_catboost_rent(
             probe = CatBoostRegressor(
                 iterations=300, depth=5,
                 cat_features=cat_cols_sel,
-                random_seed=random_state, task_type='GPU', devices='0', verbose=0)
+                random_seed=random_state, 
+                task_type='GPU', devices='0', 
+                gpu_ram_part=0.6, logging_level='Silent',)
             
-            scores = cross_val_score(
-                probe, X_train[sel_cols], y_train_fit,
-                cv=inner_cv, scoring='neg_root_mean_squared_error',
-                n_jobs=1)
+            with contextlib.redirect_stderr(io.StringIO()): #supress warnings?
+                scores = cross_val_score(
+                    probe, X_train[sel_cols], y_train_fit,
+                    cv=inner_cv, scoring='neg_root_mean_squared_error',
+                    n_jobs=1, verbose=0,)
             return -scores.mean()
 
         rent_study = optuna.create_study(direction='minimize')
@@ -643,43 +650,61 @@ def run_advanced_catboost_rent(
 
         selected_features_per_fold.append(selected_cols)
 
-        # ── Study 2: Optuna for CatBoost HPs on RENT-selected features ───────
-        optuna.logging.set_verbosity(optuna.logging.INFO)   # show trial progress
-        X_train_sel  = X_train[selected_cols]
-        X_test_sel   = X_test[selected_cols]
-        cat_cols_sel = [c for c in cat_cols if c in selected_cols]
 
-        base_model = CatBoostRegressor(
-            iterations=300,
-            cat_features=cat_cols_sel,
+        def model_objective(trial):
+            params = {
+                'depth':               trial.suggest_int('depth', 3, 10),
+                'learning_rate':       trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
+                'l2_leaf_reg':         trial.suggest_float('l2_leaf_reg', 1, 10.0, log=True),
+                'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),}
+            fold_scores = []
+            
+            for inner_train_idx, inner_val_idx in inner_cv.split(X_train):
+                X_it = X_train.iloc[inner_train_idx]
+                y_it = y_train_fit.iloc[inner_train_idx]
+                X_iv = X_train.iloc[inner_val_idx]
+                y_iv = y_train_fit.iloc[inner_val_idx]
+
+                # RENT on this inner fold's training data only
+                rent_inner = RENT.RENT_Regression(
+                data=X_it[feature_cols].values,
+                target=y_it.values,
+                feat_names=feature_cols,
+                C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
+                autoEnetParSel=False,
+                poly='OFF', testsize_range=(0.25, 0.25),
+                K=100, random_state=random_state, verbose=0,)
+                rent_inner.train()
+                
+            inner_idx = rent_inner.select_features(
+                tau_1_cutoff=best_rent['tau_1'],
+                tau_2_cutoff=best_rent['tau_2'],
+                tau_3_cutoff=tau_3,)
+            inner_cols = [feature_cols[i] for i in inner_idx] if len(inner_idx) > 0 else feature_cols
+            cat_inner  = [c for c in cat_cols if c in inner_cols]
+
+            m = CatBoostRegressor(
+            iterations=300, **params,
+            cat_features=cat_inner,
             random_seed=random_state,
-            task_type='GPU', devices='0',
-            verbose=0,
-        )
-        optuna_search = OptunaSearchCV(
-            estimator=base_model,
-            param_distributions=model_param_distributions,
-            cv=inner_cv,
-            scoring='neg_root_mean_squared_error',
-            n_trials=N_MODEL_TRIALS,
-            n_jobs=1,
-            verbose=0,
-        )
-        optuna_search.fit(X_train_sel, y_train_fit)
-        best_model_params_list.append(optuna_search.best_params_)
+            task_type='GPU', devices='0', gpu_ram_part=0.6,
+            logging_level='Silent',)
 
-        preds_raw = optuna_search.predict(X_test_sel)
-        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
-                 if pt_fold is not None else preds_raw)
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        mae  = mean_absolute_error(y_test, preds)
-        r2   = r2_score(y_test, preds)
-        mse  = rmse ** 2
+            with contextlib.redirect_stderr(io.StringIO()):
+                m.fit(X_it[inner_cols], y_it)
+            preds = m.predict(X_iv[inner_cols])
+            fold_scores.append(np.sqrt(mean_squared_error(y_iv, preds)))
+        return np.mean(fold_scores)
 
-        optuna.logging.set_verbosity(optuna.logging.WARNING)  # suppress Study 1 next fold
-        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
-        print(f"    Study 2 best model: {optuna_search.best_params_}")
-        print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+    model_study = optuna.create_study(direction='minimize')
+    model_study.optimize(model_objective, n_trials=N_MODEL_TRIALS, show_progress_bar=False)
+    best_model_params = model_study.best_params
+    best_model_params_list.append(best_model_params)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)  # suppress Study 1 next fold
+    fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
+    print(f"    Study 2 best model: {optuna_search.best_params_}")
+    print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     elapsed = time.time() - start
     print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
@@ -734,11 +759,14 @@ def run_advanced_catboost_rent(
         custom_metric=['MAE', 'R2'],
         cat_features=cat_cols_final,
         random_seed=random_state,
-        task_type='GPU', devices='0',
-        verbose=0,
+        task_type='GPU', devices='0', gpu_ram_part=0.6,
+        logging_level='Silent',
         **optuna_search.best_params_,
     )
-    final_model.fit(X_final, y_final_fit)
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        final_model.fit(X_final, y_final_fit)
+
     y_pred_raw = pd.Series(final_model.predict(X_final), index=range(len(X_final)), dtype='float64')
     y_pred = (pd.Series(pt_final.inverse_transform(y_pred_raw.values.reshape(-1, 1)).ravel(),
                         index=y_pred_raw.index, dtype='float64')
