@@ -505,8 +505,8 @@ def run_advanced_catboost_rent(
     warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    N_RENT_TRIALS  = 50
-    N_MODEL_TRIALS = 50
+    N_RENT_TRIALS  = 20
+    N_MODEL_TRIALS = 20
 
     y = df_combined[target_col].copy()
     exclude = ['Patient', 'Timepoint', target_col,
