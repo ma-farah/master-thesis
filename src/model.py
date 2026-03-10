@@ -562,6 +562,20 @@ def run_advanced_catboost_rent(
         # ── Step 3: Inner CV + Optuna — CatBoost HPs ─────────────────────────
         print(f"  [Step 3] CatBoost HP tuning ({N_TRIALS} trials, 20 inner folds each)")
 
+        # Pre-compute splits once — reused across all Optuna trials
+        inner_splits = list(inner_cv.split(X_train))
+
+        def _fit_inner(itr, ival, params):
+            m = CatBoostRegressor(
+                iterations=300, **params, cat_features=cat_cols_inner,
+                random_seed=random_state, task_type='CPU', thread_count=1,
+                logging_level='Silent')
+            with contextlib.redirect_stderr(io.StringIO()):
+                m.fit(X_train.iloc[itr][selected_cols], y_train_fit.iloc[itr])
+            return np.sqrt(mean_squared_error(
+                y_train_fit.iloc[ival],
+                m.predict(X_train.iloc[ival][selected_cols])))
+
         def model_objective(trial):
             params = dict(
                 depth               = trial.suggest_int(  'depth',               3,    10),
@@ -569,17 +583,9 @@ def run_advanced_catboost_rent(
                 l2_leaf_reg         = trial.suggest_float('l2_leaf_reg',         1.0,  10.0, log=True),
                 bagging_temperature = trial.suggest_float('bagging_temperature', 0.0,  1.0),
             )
-            rmses = []
-            for itr, ival in inner_cv.split(X_train):
-                m = CatBoostRegressor(
-                    iterations=300, **params, cat_features=cat_cols_inner,
-                    random_seed=random_state, task_type='GPU', devices='0',
-                    gpu_ram_part=0.6, logging_level='Silent')
-                with contextlib.redirect_stderr(io.StringIO()):
-                    m.fit(X_train.iloc[itr][selected_cols], y_train_fit.iloc[itr])
-                rmses.append(np.sqrt(mean_squared_error(
-                    y_train_fit.iloc[ival],
-                    m.predict(X_train.iloc[ival][selected_cols]))))
+            rmses = joblib.Parallel(n_jobs=-1, prefer='threads')(
+                joblib.delayed(_fit_inner)(itr, ival, params)
+                for itr, ival in inner_splits)
             return np.mean(rmses)
 
         def _cb(study, trial):
