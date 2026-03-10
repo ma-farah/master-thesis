@@ -931,3 +931,330 @@ def standardize_response(df, response_col='response', verbose=True):
 
     return df
 
+#%% old catboost approach rent and optuna on innder folds:
+
+
+def run_advanced_catboost_rent(
+    df_combined, target_col='pain_reduction_pct', random_state=42,
+    tau_3=0.90, target_transformer=None,
+):
+    """CatBoostRegressor with Optuna-tuned RENT + nested CV (per-inner-fold tuning).
+
+    For each outer fold → for each inner fold:
+      Study 1 — RENT HPs : tune C, l1_ratio, τ₁, τ₂ using a fixed probe CatBoost
+                           evaluated on the inner val split.  τ₃ is fixed at tau_3.
+      Study 2 — Model HPs: tune depth, learning_rate, l2_leaf_reg, etc. on the
+                           features selected by Study 1, evaluated on the inner val split.
+      Pick the best inner fold (lowest Study 2 val RMSE) → use its selected features
+      and model params to train on full X_train and evaluate on X_test.
+
+    Outer CV : RepeatedKFold(n_splits=4, n_repeats=5) = 20 outer folds.
+    Inner CV : RepeatedKFold(n_splits=4, n_repeats=2) =  8 inner folds per outer fold. # change to 4 repeats later?
+    Study 1  : 50 Optuna trials for RENT HPs (K=100 RENT splits per trial).
+    Study 2  : 50 Optuna trials for CatBoost HPs.
+
+    Parameters
+    ----------
+    df_combined        : pd.DataFrame  Combined dataset (immunological + clinical).
+    target_col         : str           Regression target (default: 'pain_reduction_pct').
+    random_state       : int           Random seed (default 42).
+    tau_3              : float         Fixed RENT τ₃ t-test threshold (default 0.90).
+    target_transformer : transformer   Optional sklearn-compatible power transformer.
+
+    Returns
+    -------
+    results_df                 : pd.DataFrame       Per-fold metrics + Mean/Std rows.
+    final_model                : CatBoostRegressor  Final model trained on full dataset.
+    X_final                    : pd.DataFrame       Features used by final model.
+    y_pred                     : pd.Series          Full-data predictions (original scale).
+    selected_features_per_fold : list[list[str]]    Features selected per outer fold.
+    best_rent_params_list      : list[dict]         Best RENT HPs per outer fold.
+    """
+    import optuna
+    import warnings
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import OrdinalEncoder
+    from RENT import RENT
+
+    warnings.filterwarnings('ignore', message='.*less than 75% GPU memory.*')
+    warnings.filterwarnings('ignore', category=FutureWarning, module='RENT')
+    warnings.filterwarnings('ignore', category=RuntimeWarning, module='RENT')
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    N_RENT_TRIALS  = 50
+    N_MODEL_TRIALS = 50
+
+    y = df_combined[target_col].copy()
+    exclude = ['Patient', 'Timepoint', target_col,
+               'pain_reduction', 'pain_reduction_pct',
+               'pain_under_load_reduction', 'pain_under_load_reduction_pct']
+    feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[feature_cols].copy()
+
+    valid = y.notna()
+    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    for col in X.select_dtypes(include=['category', 'object']).columns:
+        X[col] = X[col].astype(str)
+    cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+    print(f"\n{'='*65}")
+    print(f"  CatBoost + RENT (Optuna-tuned) — {target_col}")
+    print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
+    print(f"  τ₃={tau_3} (fixed)  |  τ₁, τ₂, C, l1_ratio tuned via Optuna")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×2=8 folds") # try with 1 first
+    print(f"  OptunaStudy 1 (RENT HPs):  {N_RENT_TRIALS} trials × K=100 RENT splits  (per inner fold)")
+    print(f"  Optuna Study 2 (model HPs): {N_MODEL_TRIALS}                   (per inner fold)")
+    print(f" Total model fits 20x8x50x100 + 20x8x50 + 20 = approx. 808 020")
+    print(f"{'='*65}")
+
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=2, random_state=random_state) # try 2 repeat first
+
+    fold_results               = []
+    best_rent_params_list      = []
+    best_model_params_list     = []
+    selected_features_per_fold = []
+    start = time.time()
+
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
+        print(f"\n  ── Outer fold {outer_fold}/{outer_cv.get_n_splits()} ──")
+
+        X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        if target_transformer is not None:
+            pt_fold     = clone(target_transformer)
+            y_train_fit = pd.Series(
+                pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
+                index=y_train.index,
+            )
+        else:
+            pt_fold     = None
+            y_train_fit = y_train
+
+        # ── Inner CV: per-fold RENT + CatBoost tuning ────────────────────────
+        # For each inner fold: Study 1 (RENT HPs) → Study 2 (model HPs).
+        # Pick the best inner fold (lowest Study 2 val RMSE).
+        inner_fold_log = []  # (val_rmse, selected_cols, model_params, cat_cols_inner, rent_params)
+
+        for inner_fold_idx, (inner_train_idx, inner_val_idx) in enumerate(
+            inner_cv.split(X_train), start=1
+        ):
+            X_it = X_train.iloc[inner_train_idx].copy()
+            y_it = y_train_fit.iloc[inner_train_idx]
+            X_iv = X_train.iloc[inner_val_idx].copy()
+            y_iv = y_train_fit.iloc[inner_val_idx]
+          
+            # Prepare RENT input for this inner fold's training data
+            X_it_enc = X_it.copy()
+            cat_mask_cols = [c for c in X_it.columns if X_it[c].dtype == object]
+            if cat_mask_cols:
+                oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+                X_it_enc[cat_mask_cols] = oe.fit_transform(X_it[cat_mask_cols])
+            imputer   = SimpleImputer(strategy='median')
+            X_it_rent = pd.DataFrame(
+                imputer.fit_transform(X_it_enc.astype(float)), columns=feature_cols)
+
+            # ── Study 1: Tune RENT HPs — probe evaluated on inner val split ──
+            def rent_objective(trial):
+                c_val    = trial.suggest_float('C',        1e-3, 10, log=True)
+                l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
+                tau_1    = trial.suggest_float('tau_1',    0.6,  0.9)
+                tau_2    = trial.suggest_float('tau_2',    0.6,  0.9)
+
+                rent_t = RENT.RENT_Regression(
+                    data=X_it_rent, target=y_it.values,
+                    feat_names=feature_cols,
+                    C=[c_val], l1_ratios=[l1_ratio],
+                    autoEnetParSel=False, poly='OFF',
+                    testsize_range=(0.25, 0.25), K=100,
+                    random_state=random_state, verbose=0,
+                )
+                rent_t.train()
+                sel_idx = rent_t.select_features(
+                    tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+                if len(sel_idx) == 0:
+                    return 1e6
+                sel_cols     = [feature_cols[i] for i in sel_idx]
+                cat_cols_sel = [c for c in cat_cols if c in sel_cols]
+                probe = CatBoostRegressor(
+                    iterations=300, depth=5,
+                    cat_features=cat_cols_sel,
+                    random_seed=random_state,
+                    task_type='GPU', devices='0',
+                    gpu_ram_part=0.6, logging_level='Silent',
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    probe.fit(X_it[sel_cols], y_it)
+                preds = probe.predict(X_iv[sel_cols])
+                return np.sqrt(mean_squared_error(y_iv, preds))
+         
+            rent_study = optuna.create_study(direction='minimize')
+            rent_study.optimize(rent_objective, n_trials=N_RENT_TRIALS, show_progress_bar=False)
+            best_rent_inner = rent_study.best_params
+
+            # Re-run RENT with best HPs → selected features for this inner fold
+            rent_final = RENT.RENT_Regression(
+                data=X_it_rent, target=y_it.values,
+                feat_names=feature_cols,
+                C=[best_rent_inner['C']], l1_ratios=[best_rent_inner['l1_ratio']],
+                autoEnetParSel=False, poly='OFF',
+                testsize_range=(0.25, 0.25), K=100,
+                random_state=random_state, verbose=0,
+            )
+            rent_final.train()
+            sel_idx_inner = rent_final.select_features(
+                tau_1_cutoff=best_rent_inner['tau_1'],
+                tau_2_cutoff=best_rent_inner['tau_2'],
+                tau_3_cutoff=tau_3,
+            )
+            selected_cols  = ([feature_cols[i] for i in sel_idx_inner]
+                              if len(sel_idx_inner) > 0 else feature_cols)
+            cat_cols_inner = [c for c in cat_cols if c in selected_cols]
+
+            # ── Study 2: Tune CatBoost HPs on selected features ──────────────
+            def model_objective(trial):
+                params = {
+                    'depth':               trial.suggest_int('depth', 3, 10),
+                    'learning_rate':       trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
+                    'l2_leaf_reg':         trial.suggest_float('l2_leaf_reg', 1, 10.0, log=True),
+                    'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),
+                }
+                m = CatBoostRegressor(
+                    iterations=300, **params,
+                    cat_features=cat_cols_inner,
+                    random_seed=random_state,
+                    task_type='GPU', devices='0', gpu_ram_part=0.6,
+                    logging_level='Silent',
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    m.fit(X_it[selected_cols], y_it)
+                preds = m.predict(X_iv[selected_cols])
+                return np.sqrt(mean_squared_error(y_iv, preds))
+
+            model_study = optuna.create_study(direction='minimize')
+            model_study.optimize(model_objective, n_trials=N_MODEL_TRIALS, show_progress_bar=False)
+            best_model_params_inner = model_study.best_params
+            val_rmse_inner          = model_study.best_value
+            inner_fold_log.append((
+                val_rmse_inner, selected_cols,
+                best_model_params_inner, cat_cols_inner, best_rent_inner,
+            ))
+            print(f" Inner fold {inner_fold_idx}/{inner_cv.get_n_splits()} - val RMSE={val_rmse_inner:.4f} - selected features={len(selected_cols)}")
+
+        # ── Pick best inner fold ──────────────────────────────────────────────
+        best_inner = min(inner_fold_log, key=lambda x: x[0])
+        val_rmse_best, selected_cols, best_model_params, cat_cols_inner, best_rent = best_inner
+
+        selected_features_per_fold.append(selected_cols)
+        best_model_params_list.append(best_model_params)
+        best_rent_params_list.append(best_rent)
+
+        suffix = '...' if len(selected_cols) > 8 else ''
+        print(f"    Best inner fold val RMSE={val_rmse_best:.4f}")
+        print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — "
+              f"{selected_cols[:8]}{suffix}")
+        print(f"    Model hyperparameters: {best_model_params}")
+
+        # ── Train on full X_train with best inner fold's params ───────────────
+        fold_model = CatBoostRegressor(
+            iterations=300, **best_model_params,
+            cat_features=cat_cols_inner,
+            random_seed=random_state,
+            task_type='GPU', devices='0', gpu_ram_part=0.6,
+            logging_level='Silent',
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            fold_model.fit(X_train[selected_cols], y_train_fit)
+
+        preds_raw = fold_model.predict(X_test[selected_cols])
+        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
+                 if pt_fold is not None else preds_raw)
+
+        mae  = mean_absolute_error(y_test, preds)
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        mse  = rmse ** 2
+        r2   = r2_score(y_test, preds)
+        fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
+        print(f"      MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+
+    elapsed = time.time() - start
+    print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
+
+
+    # ── Results summary ───────────────────────────────────────────────────────
+    results_df  = pd.DataFrame(fold_results)
+    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df = pd.concat(
+        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    n_outer = len(fold_results)
+    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
+    print(f"\n  Summary (4×5 outer CV, 95% CI):")
+    for m in metric_cols:
+        mv = mean_row[m]; sv = std_row[m]
+        ci = t_crit * sv / np.sqrt(n_outer)
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
+
+    # ── Feature selection frequency ───────────────────────────────────────────
+    from collections import Counter
+    all_selected = [f for fold_feats in selected_features_per_fold for f in fold_feats]
+    freq = Counter(all_selected)
+    print(f"\n  RENT feature selection frequency in ({n_outer} outer folds):")
+    for feat, cnt in freq.most_common():
+        marker = ' ◀' if cnt / n_outer >= 0.5 else ''
+        print(f"    {cnt:>3}/{n_outer}  {feat}{marker}")
+
+
+    # ── Final model: features selected in ≥50% of outer folds ────────────────
+    final_cols = [f for f, cnt in freq.items() if cnt / n_outer >= 0.5]
+    if not final_cols:
+        print(f"\n  Warning: no feature met ≥50% threshold — falling back to top 10 by frequency")
+        final_cols = [f for f, _ in freq.most_common(10)]
+    print(f"\n  Final model: {len(final_cols)} features selected (≥50% frequency): {final_cols}")
+
+    X_final        = X[final_cols]
+    cat_cols_final = [c for c in cat_cols if c in final_cols]
+
+    if target_transformer is not None:
+        pt_final    = clone(target_transformer)
+        y_final_fit = pd.Series(
+            pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
+    else:
+        pt_final    = None
+        y_final_fit = y
+
+    # Aggregate model Hyperprameters across outer folds: use median for continuous params,
+    # mode for integer params.  avoid cherry picking model(?)
+    import statistics
+    _all_keys = best_model_params_list[0].keys()
+    best_model_params_final = {}
+    for k in _all_keys:
+        vals = [p[k] for p in best_model_params_list]
+        if isinstance(vals[0], int):
+            best_model_params_final[k] = int(round(statistics.median(vals)))
+        else:
+            best_model_params_final[k] = statistics.median(vals)
+    final_model = CatBoostRegressor(
+        iterations=300,
+        loss_function='RMSE',
+        custom_metric=['MAE', 'R2'],
+        cat_features=cat_cols_final,
+        random_seed=random_state,
+        task_type='GPU', devices='0', gpu_ram_part=0.6,
+        logging_level='Silent',
+        **best_model_params_final,
+    )
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        final_model.fit(X_final, y_final_fit)
+
+    y_pred_raw = pd.Series(final_model.predict(X_final), index=range(len(X_final)), dtype='float64')
+    y_pred = (pd.Series(pt_final.inverse_transform(y_pred_raw.values.reshape(-1, 1)).ravel(),
+                        index=y_pred_raw.index, dtype='float64')
+              if pt_final is not None else y_pred_raw)
+
+    return results_df, final_model, X_final, y_pred, selected_features_per_fold, best_rent_params_list
