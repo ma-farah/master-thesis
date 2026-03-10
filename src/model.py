@@ -526,14 +526,14 @@ def run_advanced_catboost_rent(
     print(f"  CatBoost + RENT (Optuna-tuned) — {target_col}")
     print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
     print(f"  τ₃={tau_3} (fixed)  |  τ₁, τ₂, C, l1_ratio tuned via Optuna")
-    print(f"  Outer: 4×5=20 folds  |  Inner: 4×2=8 folds")
+    print(f"  Outer: 4×5=20 folds  |  Inner: 4×2=8 folds") # try with 1 first
     print(f"  OptunaStudy 1 (RENT HPs):  {N_RENT_TRIALS} trials × K=100 RENT splits  (per inner fold)")
     print(f"  Optuna Study 2 (model HPs): {N_MODEL_TRIALS}                   (per inner fold)")
     print(f" Total model fits 20x8x50x100 + 20x8x50 + 20 = approx. 808 020")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=2, random_state=random_state)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=2, random_state=random_state) # try 2 repeat first
 
     fold_results               = []
     best_rent_params_list      = []
@@ -569,7 +569,7 @@ def run_advanced_catboost_rent(
             y_it = y_train_fit.iloc[inner_train_idx]
             X_iv = X_train.iloc[inner_val_idx].copy()
             y_iv = y_train_fit.iloc[inner_val_idx]
-
+          
             # Prepare RENT input for this inner fold's training data
             X_it_enc = X_it.copy()
             cat_mask_cols = [c for c in X_it.columns if X_it[c].dtype == object]
@@ -613,7 +613,7 @@ def run_advanced_catboost_rent(
                     probe.fit(X_it[sel_cols], y_it)
                 preds = probe.predict(X_iv[sel_cols])
                 return np.sqrt(mean_squared_error(y_iv, preds))
-
+         
             rent_study = optuna.create_study(direction='minimize')
             rent_study.optimize(rent_objective, n_trials=N_RENT_TRIALS, show_progress_bar=False)
             best_rent_inner = rent_study.best_params
@@ -661,11 +661,11 @@ def run_advanced_catboost_rent(
             model_study.optimize(model_objective, n_trials=N_MODEL_TRIALS, show_progress_bar=False)
             best_model_params_inner = model_study.best_params
             val_rmse_inner          = model_study.best_value
-
             inner_fold_log.append((
                 val_rmse_inner, selected_cols,
                 best_model_params_inner, cat_cols_inner, best_rent_inner,
             ))
+            print(f" Inner fold {inner_fold_idx}/{inner_cv.get_n_splits()} - val RMSE={val_rmse_inner:.4f} - selected features={len(selected_cols)}")
 
         # ── Pick best inner fold ──────────────────────────────────────────────
         best_inner = min(inner_fold_log, key=lambda x: x[0])
@@ -679,7 +679,7 @@ def run_advanced_catboost_rent(
         print(f"    Best inner fold val RMSE={val_rmse_best:.4f}")
         print(f"    RENT: {len(selected_cols)}/{len(feature_cols)} features — "
               f"{selected_cols[:8]}{suffix}")
-        print(f"    Model HPs: {best_model_params}")
+        print(f"    Model hyperparameters: {best_model_params}")
 
         # ── Train on full X_train with best inner fold's params ───────────────
         fold_model = CatBoostRegressor(
@@ -701,7 +701,7 @@ def run_advanced_catboost_rent(
         mse  = rmse ** 2
         r2   = r2_score(y_test, preds)
         fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2})
-        print(f"    → MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        print(f"      MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     elapsed = time.time() - start
     print(f"\n  Training time: {elapsed:.1f}s  ({elapsed/60:.1f} min)")
