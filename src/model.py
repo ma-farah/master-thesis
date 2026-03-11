@@ -11,7 +11,7 @@ from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from sklearn.ensemble import HistGradientBoostingRegressor
 from catboost import CatBoostRegressor, Pool
-# shap is imported lazily inside plot_shap_beeswarm
+# shap is imported lazily inside plot_shap_regressor / plot_shap_pipeline
 # to avoid kernel crashes on Windows with restricted execution policies.
 import joblib, os
 import contextlib, io
@@ -282,6 +282,26 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 # BASELINE CATBOOST
 # ══════════════════════════════════════════════════════════════════════════════
 
+def regression_metrics(y_true, y_pred):
+    """Compute standard regression metrics for a single prediction array.
+
+    Parameters
+    ----------
+    y_true : array-like   Ground-truth target values.
+    y_pred : array-like   Model-predicted values, same length as y_true.
+
+    Returns
+    -------
+    dict with keys 'MAE', 'MSE', 'RMSE', 'R2' (float values).
+    """
+    # Compute each metric individually so callers can inspect any subset
+    mae  = mean_absolute_error(y_true, y_pred)
+    mse  = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2   = r2_score(y_true, y_pred)
+    return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
+
+
 
 def run_catboost_regressor(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42,
@@ -393,6 +413,27 @@ def run_catboost_regressor(df_model, target_col, name,
     return results_df, model, X, y_pred
 
 
+
+def plot_shap_regressor(model, X, name):
+    """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
+    import shap
+    print(f"\n=== SHAP Analysis: {name} ===")
+    explainer   = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+
+    shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
+    plt.title(f"SHAP Feature Importance — {name}")
+    plt.tight_layout()
+    plt.show()
+
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title(f"SHAP Beeswarm — {name}")
+    plt.tight_layout()
+    plt.show()
+
+    return shap_values
+
+
 def print_regression_summary(results_dict, target_col):
     """Print a mean ± std summary table across all datasets for a given target."""
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
@@ -418,7 +459,7 @@ def print_regression_summary(results_dict, target_col):
 # ══════════════════════════════════════════════════════════════════════════════
 def run_advanced_catboost_rent(
     df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_3=0.975, target_transformer=None,
+    tau_3=0.95, target_transformer=None,
 ):
     """CatBoostRegressor with Optuna-tuned RENT + nested CV.
     Per outer fold:
@@ -515,6 +556,7 @@ def run_advanced_catboost_rent(
                 C=[c_val], l1_ratios=[l1_ratio], autoEnetParSel=False,
                 poly='OFF', testsize_range=(0.25, 0.25), K=100,
                 random_state=random_state, verbose=0)
+            
             with contextlib.redirect_stderr(io.StringIO()):
                 rent_t.train()
             sel_idx = rent_t.select_features(
@@ -522,6 +564,7 @@ def run_advanced_catboost_rent(
             if len(sel_idx) == 0:
                 return 1e6
             sel_cols = [feature_cols[i] for i in sel_idx]
+
             probe    = CatBoostRegressor(
                 iterations=300, depth=5, random_seed=random_state,
                 cat_features=[c for c in cat_cols if c in sel_cols],
@@ -533,34 +576,39 @@ def run_advanced_catboost_rent(
         rent_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
             rent_study.optimize(rent_objective, n_trials=N_TRIALS, show_progress_bar=False)
+        
         best_rent = rent_study.best_params
         best_rent_params_list.append(best_rent)
-        print(f"  Best RENT trial: RMSE={rent_study.best_value:.4f}  {best_rent}")
+        print(f"  Best RENT RMSE={rent_study.best_value:.4f}  {best_rent}")
 
         # ── Step 2: Re-run RENT on full X_train with best HPs ────────────────
         print(f"  [Step 2] RENT on full X_train with best HPs")
         X_train_rent = _encode_for_rent(X_train, feature_cols)
+
         rent_full    = RENT.RENT_Regression(
             data=X_train_rent, target=y_train_fit.values, feat_names=feature_cols,
             C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
             autoEnetParSel=False, poly='OFF', testsize_range=(0.25, 0.25),
             K=100, random_state=random_state, verbose=0)
+        
         with contextlib.redirect_stderr(io.StringIO()):
             rent_full.train()
         sel_idx_outer = rent_full.select_features(
             tau_1_cutoff=best_rent['tau_1'],
             tau_2_cutoff=best_rent['tau_2'],
             tau_3_cutoff=tau_3)
+        
         selected_cols  = ([feature_cols[i] for i in sel_idx_outer]
                           if len(sel_idx_outer) > 0 else feature_cols)
         cat_cols_inner = [c for c in cat_cols if c in selected_cols]
         selected_features_per_fold.append(selected_cols)
+
         suffix = '...' if len(selected_cols) > 8 else ''
-        print(f"  RENT: {len(selected_cols)}/{len(feature_cols)} features — "
+        print(f"  RENT Selected : {len(selected_cols)}/{len(feature_cols)} features — "
               f"{selected_cols[:8]}{suffix}")
 
         # ── Step 3: Inner CV + Optuna — CatBoost HPs ─────────────────────────
-        print(f"  [Step 3] CatBoost HP tuning ({N_TRIALS} trials, 20 inner folds each)")
+        print(f"  [Step 3] CatBoost HP tuning with 20 trials, on 20 inner folds each)") #fix typo
 
         # Pre-compute splits once — reused across all Optuna trials
         inner_splits = list(inner_cv.split(X_train))
@@ -599,7 +647,7 @@ def run_advanced_catboost_rent(
                                  callbacks=[_cb], show_progress_bar=False)
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
-        print(f"  Best: RMSE={model_study.best_value:.4f}  {best_model_params}")
+        print(f"  Best Trial: {model_study.best_trial.number} - RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         # ── Step 4: Train on full X_train → eval on X_test ───────────────────
         fold_model = CatBoostRegressor(
@@ -645,7 +693,7 @@ def run_advanced_catboost_rent(
     feature_freq.index.name = 'feature'
     print(f"\n  RENT feature selection frequency ({n_outer} outer folds):")
     for feat, cnt in freq.most_common():
-        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥50%)' if cnt/n_outer >= 0.5 else ''}")
+        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥50%)' if cnt/n_outer >= 0.5 else ''}") # bytte til valgte i hver i fold
 
     # ── Final model ───────────────────────────────────────────────────────────
     final_cols = ([f for f, cnt in freq.items() if cnt / n_outer >= 0.5]
@@ -1205,48 +1253,62 @@ def run_advanced_elasticnet_rent(
     return results_df, best_params_df, final_pipeline, X_final, y_pred, selected_features_per_fold
 
 
-def plot_shap_beeswarm(model_or_pipeline, X, name, top_n=20):
-    """SHAP beeswarm plot for a CatBoostRegressor or sklearn Pipeline.
+def plot_shap_pipeline(pipeline, X_final, name, top_n=20):
+    """SHAP bar + beeswarm plots for a fitted sklearn Pipeline.
+
+    Selects the appropriate SHAP explainer based on the model type:
+      - ElasticNet  → shap.LinearExplainer  (exact, fast)
+      - HGB         → shap.TreeExplainer    (exact, fast)
+    
+    For pipelines with preprocessing steps (Imputer → Scaler → model), X is
+    transformed through those steps before SHAP is applied to the model directly,
+    so SHAP values are in the standardised feature space.
 
     Parameters
     ----------
-    model_or_pipeline : CatBoostRegressor or Pipeline
-    X                 : pd.DataFrame  Feature matrix.
-    name              : str           Label shown in plot title.
-    top_n             : int           Max features to display (default 20).
+    pipeline : sklearn Pipeline  Fitted pipeline with last step named 'model'.
+    X_final  : pd.DataFrame      OrdinalEncoded feature matrix (RENT-selected cols).
+    name     : str               Label shown in plot titles.
+    top_n    : int               Maximum features to display (default 20).
     """
     import shap
     from sklearn.linear_model import ElasticNet
-    from sklearn.pipeline import Pipeline
 
-    if isinstance(model_or_pipeline, Pipeline):
-        feature_names    = list(X.columns)
-        model            = model_or_pipeline.named_steps['model']
-        preprocess_steps = list(model_or_pipeline.named_steps.keys())[:-1]
-        X_t = X.copy()
-        for sname in preprocess_steps:
-            X_t = model_or_pipeline.named_steps[sname].transform(X_t)
-        X_t = pd.DataFrame(X_t, columns=feature_names)
-        if isinstance(model, ElasticNet):
-            explainer   = shap.LinearExplainer(model, X_t)
-            shap_values = explainer.shap_values(X_t)
-        elif isinstance(model, HistGradientBoostingRegressor):
-            explainer   = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X)
-            X_t         = X.copy()
-        else:
-            explainer   = shap.Explainer(model.predict, X_t)
-            shap_values = explainer(X_t).values
+    feature_names  = list(X_final.columns)
+    model          = pipeline.named_steps['model']
+    step_names     = list(pipeline.named_steps.keys())
+    preprocess_steps = step_names[:-1]   # all steps before 'model'
+
+    # Transform X through preprocessing steps (imputer, scaler) if present
+    X_t = X_final.copy()
+    for sname in preprocess_steps:
+        X_t = pipeline.named_steps[sname].transform(X_t)
+    X_t = pd.DataFrame(X_t, columns=feature_names)
+
+    print(f"\n=== SHAP Analysis: {name} ===")
+
+    if isinstance(model, ElasticNet):
+        explainer   = shap.LinearExplainer(model, X_t)
+        shap_values = explainer.shap_values(X_t)
+    elif isinstance(model, HistGradientBoostingRegressor):
+        # HGB pipeline has no preprocessing steps; pass X_final directly
+        explainer   = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_final)
+        X_t = X_final.copy()
     else:
-        # CatBoostRegressor
-        X_t         = X
-        explainer   = shap.TreeExplainer(model_or_pipeline)
-        shap_values = explainer.shap_values(X)
+        # PLS and any other model: permutation-based (model-agnostic)
+        explainer   = shap.Explainer(model.predict, X_t)
+        shap_values = explainer(X_t).values
 
-    print(f"\n=== SHAP Beeswarm: {name} ===")
+    shap.summary_plot(shap_values, X_t, plot_type="bar", show=False, max_display=top_n)
+    plt.title(f"SHAP Feature Importance — {name}")
+    plt.tight_layout()
+    plt.show()
+
     shap.summary_plot(shap_values, X_t, show=False, max_display=top_n)
     plt.title(f"SHAP Beeswarm — {name}")
     plt.tight_layout()
     plt.show()
+
     return shap_values
 
