@@ -691,14 +691,14 @@ def run_advanced_catboost_rent(
                     .reindex(feature_cols, fill_value=0)
                     .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
-    print(f"\n  RENT feature selection frequency ({n_outer} outer folds):")
-    for feat, cnt in freq.most_common():
-        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥50%)' if cnt/n_outer >= 0.5 else ''}") # bytte til valgte i hver i fold
+    print(f"\n  Top 20 RENT feature selection frequency ({n_outer} outer folds):") # 50% too strict, set to 25%?
+    for feat, cnt in freq.most_common(20):
+        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥25%)' if cnt/n_outer >= 0.25 else ''}") 
 
     # ── Final model ───────────────────────────────────────────────────────────
-    final_cols = ([f for f, cnt in freq.items() if cnt / n_outer >= 0.5]
+    final_cols = ([f for f, cnt in freq.items() if cnt / n_outer >= 0.25]
                   or [f for f, _ in freq.most_common(10)])
-    print(f"\n  Final model: {len(final_cols)} features (≥50%): {final_cols}")
+    print(f"\n  Final model: {len(final_cols)} features (≥25%): {final_cols}")
 
     X_final        = X[final_cols]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
@@ -730,7 +730,6 @@ def run_advanced_catboost_rent(
                   if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            selected_features_per_fold, best_rent_params_list,
             best_model_params_list, feature_freq)
 
 
