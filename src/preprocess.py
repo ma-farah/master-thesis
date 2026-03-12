@@ -201,8 +201,9 @@ IM_CONFIRMED_OUTLIERS = [
     (109, 5),
     (266, 4),
     (255, 1),  #adding more
-    (229, 2),
-    (227, 2),
+    (229, 2)]
+
+""" ask: (227, 2),
     (228, 2),
     (223, 2),
     (224, 2),
@@ -217,6 +218,7 @@ IM_CONFIRMED_OUTLIERS = [
     (197, 1),
     (229, 2),
 ]
+"""
 
 
 def remove_outlier_observations(df, outliers=None,

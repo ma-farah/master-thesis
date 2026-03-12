@@ -541,7 +541,7 @@ def run_advanced_catboost_rent(
             pt_fold, y_train_fit = None, y_train
 
         # ── Step 1: Tune RENT HPs on 75-25 split of X_train ──────────────────
-        print(f"  [Step 1] RENT HP tuning ({N_TRIALS} trials, 75-25 split)")
+        print(f"  1: RENT HP tuning ({N_TRIALS} trials)")
         X_tr, X_val, y_tr, y_val = train_test_split(
             X_train, y_train_fit, test_size=0.25, random_state=random_state)
         X_tr_rent = _encode_for_rent(X_tr, feature_cols)
@@ -566,7 +566,7 @@ def run_advanced_catboost_rent(
             sel_cols = [feature_cols[i] for i in sel_idx]
 
             probe    = CatBoostRegressor(
-                iterations=300, depth=5, random_seed=random_state,
+                iterations=300, depth=6, random_seed=random_state, loss_function='RMSE',
                 cat_features=[c for c in cat_cols if c in sel_cols],
                 task_type='GPU', devices='0', gpu_ram_part=0.6, logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
@@ -582,7 +582,7 @@ def run_advanced_catboost_rent(
         print(f"  Best RENT RMSE={rent_study.best_value:.4f}  {best_rent}")
 
         # ── Step 2: Re-run RENT on full X_train with best HPs ────────────────
-        print(f"  [Step 2] RENT on full X_train with best HPs")
+        print(f"  2: RENT on full X_train with best HPs")
         X_train_rent = _encode_for_rent(X_train, feature_cols)
 
         rent_full    = RENT.RENT_Regression(
@@ -608,14 +608,14 @@ def run_advanced_catboost_rent(
               f"{selected_cols[:8]}{suffix}")
 
         # ── Step 3: Inner CV + Optuna — CatBoost HPs ─────────────────────────
-        print(f"  [Step 3] CatBoost HP tuning with 20 trials, on 20 inner folds each)") #fix typo
+        print(f"  3: CatBoost HP tuning with 20 trials x 20 inner folds") 
 
         # Pre-compute splits once — reused across all Optuna trials
         inner_splits = list(inner_cv.split(X_train))
 
         def _fit_inner(itr, ival, params):
             m = CatBoostRegressor(
-                iterations=300, **params, cat_features=cat_cols_inner,
+                iterations=300, **params, cat_features=cat_cols_inner, loss_function='RMSE',
                 random_seed=random_state, task_type='CPU', thread_count=1,
                 logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
@@ -651,7 +651,7 @@ def run_advanced_catboost_rent(
 
         # ── Step 4: Train on full X_train → eval on X_test ───────────────────
         fold_model = CatBoostRegressor(
-            iterations=300, **best_model_params, cat_features=cat_cols_inner,
+            iterations=1000, **best_model_params, cat_features=cat_cols_inner, loss_function='RMSE',
             random_seed=random_state, task_type='GPU', devices='0',
             gpu_ram_part=0.6, logging_level='Silent')
         with contextlib.redirect_stderr(io.StringIO()):
@@ -717,7 +717,7 @@ def run_advanced_catboost_rent(
     print(f"  Final model HPs (median): {hp_final}")
 
     final_model = CatBoostRegressor(
-        iterations=300, loss_function='RMSE', custom_metric=['MAE', 'R2'],
+        iterations=1000, loss_function='RMSE', custom_metric=['MAE', 'R2'],
         cat_features=cat_cols_final, random_seed=random_state,
         task_type='GPU', devices='0', gpu_ram_part=0.6, logging_level='Silent',
         **hp_final)

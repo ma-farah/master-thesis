@@ -1258,3 +1258,19 @@ def run_advanced_catboost_rent(
 
     return results_df, final_model, X_final, y_pred, selected_features_per_fold, best_rent_params_list
 
+#%%
+# pain under load target 
+print('\n1.3: CatBoost (Nested CV + RENT + Optuna) — pain_under_load_reduction (T1-T2)')
+_pt = PowerTransformer(method='yeo-johnson', standardize=True)
+
+cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_model_params, cb_ul_freq = \
+    model.run_advanced_catboost_rent(
+        model_datasets['pain_under_load_reduction'],
+        target_col='pain_under_load_reduction',
+        target_transformer=_pt,
+    )
+
+# Save model and feature matrix so SHAP can be run without retraining
+cb_ul_model.save_model(os.path.join(MODEL_DIR, 'cb_ul_model.cbm'))
+joblib.dump(cb_ul_X, os.path.join(MODEL_DIR, 'cb_ul_X.pkl'))
+print(' Saved cb_ul_model.cbm and cb_ul_X.pkl to', os.path.abspath(MODEL_DIR))
