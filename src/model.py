@@ -691,14 +691,18 @@ def run_advanced_catboost_rent(
                     .reindex(feature_cols, fill_value=0)
                     .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
-    print(f"\n  Top 20 RENT feature selection frequency ({n_outer} outer folds):") # 50% too strict, set to 25%?
-    for feat, cnt in freq.most_common(20):
-        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥25%)' if cnt/n_outer >= 0.25 else ''}") 
+
+    print(f"\n  Top 30 RENT feature selection frequency ({n_outer} outer folds):") # 75% too strict?
+    for feat, cnt in freq.most_common(30):
+        print(f"    {cnt:>3}/{n_outer}  {feat}{'  ◀ (≥75%)' if cnt/n_outer >= 0.75 else ''}") 
+    
+    if not [f for f, cnt in freq.items() if cnt / n_outer >= 0.75]:
+        print("   No features met ≥75% threshold - falling back to top 10 selected features for final model.")
 
     # ── Final model ───────────────────────────────────────────────────────────
-    final_cols = ([f for f, cnt in freq.items() if cnt / n_outer >= 0.25]
+    final_cols = ([f for f, cnt in freq.items() if cnt / n_outer >= 0.75]
                   or [f for f, _ in freq.most_common(10)])
-    print(f"\n  Final model: {len(final_cols)} features (≥25%): {final_cols}")
+    print(f"\n  Final model: {len(final_cols)} features (≥75%): {final_cols}")
 
     X_final        = X[final_cols]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
