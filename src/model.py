@@ -480,8 +480,8 @@ def run_advanced_catboost_rent(
         # CatBoost (steps 3 & 4) uses raw X_train/X_test with NaN intact.
         print(f"  0: MICE imputation on X_train (for RENT)")
         X_train_imp, _ = preprocess.impute_miceforest(
-            X_train, num_datasets=5, iterations=2,  # TEST: iterations=2 (production: 5)
-            mean_match_candidates=5, random_state=random_state, verbose=True)
+            X_train, datasets=5, iterations=2,  # TEST: iterations=2 (production: 5)
+            random_state=random_state, verbose=True)
 
         # Ordinal-encode imputed X_train → fully numeric, NaN-free matrix for RENT
         X_train_rent = _prep_for_rent(X_train_imp)

@@ -1402,16 +1402,16 @@ def impute_miceforest(df, datasets=5, ex_cols=None, iterations=10, random_state=
     )
     kernel.mice(iterations=iterations)
 
-    num_datasets  = [kernel.complete_data(i) for i in range(datasets)]
-    X_imputed = num_datasets[0].copy()
- 
+    completed = [kernel.complete_data(i) for i in range(datasets)]
+    X_imputed = completed[0].copy()
+
     # Numeric: mean across all datasets
     if num_renamed:
-        X_imputed[num_renamed] = sum(d[num_renamed] for d in num_datasets) / num_datasets
+        X_imputed[num_renamed] = sum(d[num_renamed] for d in completed) / datasets
 
     # Categorical: mode across all datasets
     if cat_renamed:
-        cat_stack = pd.concat(num_datasets, axis=0, keys=range(num_datasets))
+        cat_stack = pd.concat(completed, axis=0, keys=range(datasets))
         for c in cat_renamed:
             X_imputed[c] = cat_stack[c].groupby(level=1).agg(lambda x: x.mode().iloc[0])
 
