@@ -27,7 +27,7 @@ import preprocess
 import model
 
 
-def _prep_for_catboost(df):
+def _prep_for_catboost(df, cat_cols):
     """Convert category columns to object dtype, preserving NaN as real NaN."""
     out = df.copy()
     for col in cat_cols:
@@ -35,7 +35,7 @@ def _prep_for_catboost(df):
             out[col] = out[col].astype(object)
     return out
 
-def _prep_for_rent(X_imp):
+def _prep_for_rent(X_imp, cat_cols):
     """OrdinalEncode categorical columns in an already-imputed DataFrame.
     RENT requires a fully numeric NaN-free matrix."""
     out = X_imp.copy()
@@ -97,7 +97,7 @@ def run_advanced_catboost_rent(
     inner_cv = RepeatedKFold(n_splits=2, n_repeats=2, random_state=random_state)  # TEST: 2×2 (production: 4×5)
 
     # Storing best parameters
-    fold_results, best_rent_params_list   = [], []
+    fold_results = []
     best_model_params_list, selected_features_per_fold = [], []
     start = time.time()
 
@@ -107,7 +107,7 @@ def run_advanced_catboost_rent(
         print(f"  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
         print(f"{'─'*65}")
 
-        X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
         # Power-transform target-value
@@ -119,28 +119,33 @@ def run_advanced_catboost_rent(
         else:
             pt_fold, y_train_fit = None, y_train
 
+        # Prepare CatBoost-ready X_train
+        X_train_cb = _prep_for_catboost(X_train, cat_cols)
 
         # ── Step 0: MICE imputation on X_train for Rent Tuning ───────────────
         print(f"  0: MICE imputation on Outer Fold X_train...")
         X_train_imp, _ = preprocess.impute_miceforest(
             X_train, num_datasets=5, iterations=2,  # TEST: iterations=2 (production: 5)
             mean_match_candidates=5, random_state=random_state, verbose=True)
-        
-        # Ordinal-encode imputed X_train to a fully numeric dataframe
-        X_train_rent = _prep_for_rent(X_train_imp)
+
+        # Ordinal-encode imputed X_train to a fully numeric dataframe; free imputed copy
+        X_train_rent = _prep_for_rent(X_train_imp, cat_cols)
+        del X_train_imp
 
 
         # ── Step 1: Tune RENT HPs on 75-25 split of imputed X_train ──────────
         # Splitting the imputed+encoded matrix for rent-tuning and feature selection
- 
+
         print(f"  1: RENT HP tuning ({N_TRIALS} trials)")
         X_tr_rent, X_val_rent, y_tr, y_val = train_test_split(
             X_train_rent, y_train_fit, test_size=0.25, random_state=random_state)
 
+        # Slice the already-prepared CatBoost matrix — no extra conversion needed
+        X_tr_cb  = X_train_cb.loc[X_tr_rent.index]
+        X_val_cb = X_train_cb.loc[X_val_rent.index]
 
-        # Dataset with NaN - used for CatBoost tuning  - X_tr_rent.index preserves the original X_train row indices 
-        X_tr_cb  = _prep_for_catboost(X_train.loc[X_tr_rent.index])
-        X_val_cb = _prep_for_catboost(X_train.loc[X_val_rent.index])
+        # Precompute reset index once instead of repeating inside every Optuna trial
+        X_tr_rent_reset = X_tr_rent.reset_index(drop=True)
 
         # Suggested Rent Parameters for tuning
         def rent_objective(trial):
@@ -151,7 +156,7 @@ def run_advanced_catboost_rent(
 
             # Running RENT on imputed+encoded data to select features
             rent_t = RENT.RENT_Regression(
-                data=X_tr_rent.reset_index(drop=True),
+                data=X_tr_rent_reset,
                 target=y_tr.values, feat_names=feature_cols,
                 C=[c_val], l1_ratios=[l1_ratio], autoEnetParSel=False,
                 poly='OFF', testsize_range=(0.25, 0.25), K=5,  # TEST: K=5 (production: 100)
@@ -180,7 +185,6 @@ def run_advanced_catboost_rent(
 
         # Store best parameters and RMSE score (in transformed space!)
         best_rent = rent_study.best_params
-        best_rent_params_list.append(best_rent)
         print(f"  Best RENT RMSE={rent_study.best_value:.4f}  {best_rent}")
 
         # -- Step 2: Re-run RENT on full imputed X_train with best HPs ─────────
@@ -212,10 +216,8 @@ def run_advanced_catboost_rent(
 
         # ── Step 3: Inner CV CatBoost Hyperparameter tuning with Optuna  ─────────────────────────
         # CatBoost handles NaN, no imputation needed, using nan-dataset
-        # Convert category to object dtype to preserve NaN as real NaN (not "nan" string).
         print(f"  3: CatBoost HP tuning with {N_TRIALS} trials x {inner_cv.get_n_splits()} inner folds")
 
-        X_train_cb   = _prep_for_catboost(X_train)
         inner_splits = list(inner_cv.split(X_train_cb))
 
         def _fit_inner(itr, ival, params):
@@ -260,7 +262,7 @@ def run_advanced_catboost_rent(
 
         # ── Step 4: Train on full X_train --> evaluate on X_test ───────────────
         # conserve category types:
-        X_test_cb  = _prep_for_catboost(X_test)
+        X_test_cb  = _prep_for_catboost(X_test, cat_cols)
 
         fold_model = CatBoostRegressor(
             iterations=100, **best_model_params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST: 100 (production: 1000)
@@ -322,7 +324,7 @@ def run_advanced_catboost_rent(
     print(f"\n  Final model: {len(final_cols)} features (≥75%): {final_cols}")
 
     # Prepare full dataset for CatBoost (category → object, NaN preserved)
-    X_final        = _prep_for_catboost(X[final_cols])
+    X_final        = _prep_for_catboost(X[final_cols], cat_cols)
     cat_cols_final = [c for c in cat_cols if c in final_cols]
 
     if target_transformer is not None:
