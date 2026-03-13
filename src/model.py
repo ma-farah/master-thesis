@@ -378,25 +378,6 @@ def plot_shap_regressor(model, X, name):
     return shap_values
 
 
-def print_regression_summary(results_dict, target_col):
-    """Print a mean ± std summary table across all datasets for a given target."""
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    rows = []
-    for ds_name, res_df in results_dict.items():
-        fold_rows = res_df[~res_df['Fold'].isin(['Mean', 'Std'])]
-        row = {'Dataset': ds_name}
-        for m in metric_cols:
-            mv = fold_rows[m].mean()
-            sv = fold_rows[m].std()
-            row[m] = f"{mv:.3f} ± {sv:.4f}"
-        rows.append(row)
-    summary = pd.DataFrame(rows)
-    print(f"\n{'='*75}")
-    print(f"  CATBOOST BASELINE SUMMARY — Target: {target_col}  (mean ± std)")
-    print(f"{'='*75}")
-    print(summary.to_string(index=False))
-    return summary
-
 
 # TUNED CATBOOST + RENT FEATURE SELECTION  (Nested CV + Optuna)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -721,8 +702,6 @@ def run_advanced_catboost_rent(
 
     return (results_df, final_model, X_final, y_pred,
             best_model_params_list, feature_freq)
-
-
 
 
 
