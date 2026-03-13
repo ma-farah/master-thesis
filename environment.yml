@@ -11,7 +11,7 @@ dependencies:
   - pandas
   - scipy
   - skrub
-  - scikit-learn        # includes ElasticNet, HistGradientBoostingRegressor, RepeatedKFold, etc.
+  - scikit-learn        
   - prince
   - miceforest
   - hoggorm
@@ -19,12 +19,12 @@ dependencies:
   - seaborn
   - jupyterlab
   - ipykernel
-  - catboost            # CatBoostRegressor
+  - catboost            
   - lightgbm
   - shap
   - phik
   - pyod
-  - optuna              # hyperparameter tuning (nested CV, phase 4)
+  - optuna             
   - pip
   - pip:
       - scikit-na

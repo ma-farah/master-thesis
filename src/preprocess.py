@@ -130,6 +130,7 @@ IM_EXCLUDED_COLUMNS = [
     "mDC-1_CD86+",
     "mDC-2_CD86+",
     "pDC_CD86+",
+    "Basophils.1",  # duplicate column, high correlation
 ]
 
 # Empty rows at the bottom of dataset

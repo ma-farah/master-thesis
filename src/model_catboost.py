@@ -89,11 +89,11 @@ def run_advanced_catboost_rent(
     print(f"\n{'='*65}")
     print(f"  CatBoost + Optuna + RENT — {target_col}")
     print(f"  n={len(X)}, p={len(feature_cols)}, τ₃={tau_3}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | RENT & Optuna trials={N_TRIALS} | K=100")  
+    print(f"  Outer 4×5=20 | Inner 4×25=100 | RENT & Optuna trials={N_TRIALS} | K=100")  
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  #
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # TEST 25 repeats
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=25, random_state=random_state)  # TEST 25 repeats
 
     # Storing best parameters
     fold_results = []
