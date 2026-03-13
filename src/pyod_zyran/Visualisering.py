@@ -229,18 +229,18 @@ def visualiser_OD(X_sc, list_OD_algorithms, patient_ids, visualize, save_folder=
             if figure_append_name:
                 model = pca_visualization(data, data_objNames, data_varNames, save_folder, figure_append_name)
                 pca_df = scatter_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, save_folder, figure_append_name)
-                pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use, save_folder, figure_append_name)
+                #pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use, save_folder, figure_append_name)
             else:
                 model = pca_visualization(data, data_objNames, data_varNames, save_folder)
                 pca_df = scatter_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids,
                                                     save_folder)
-                pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use,
-                                        save_folder)
+                #pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use,
+                                        #save_folder)
 
         else:
             model = pca_visualization(data, data_objNames, data_varNames)
             pca_df = scatter_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids)
-            pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use)
+            #pair_plot_visualization(model, y_predproba_array, y_pred_confidence_array, patient_ids, X_data_to_use)
 
 
     no_od_df = pd.DataFrame(initial_array, index=patient_ids, columns=["No. OD Detected"])

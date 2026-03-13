@@ -1274,3 +1274,170 @@ cb_ul_results, cb_ul_model, cb_ul_X, cb_ul_ypred, cb_ul_model_params, cb_ul_freq
 cb_ul_model.save_model(os.path.join(MODEL_DIR, 'cb_ul_model.cbm'))
 joblib.dump(cb_ul_X, os.path.join(MODEL_DIR, 'cb_ul_X.pkl'))
 print(' Saved cb_ul_model.cbm and cb_ul_X.pkl to', os.path.abspath(MODEL_DIR))
+
+#%%
+
+
+def standardize_response(df, response_col='response', verbose=True):
+    """Parse raw response column into response_category (CR/PR/NI). 
+
+    Multiple categories in one entry are kept as comma-separated ('CR, NI', 'PR, CR').
+    Unrecognized entries are kept as-is
+    """
+    df = df.copy()
+    raw = df[response_col].astype(str).str.strip()
+
+    phrase_map = {
+        'no improvement':                  'ni',
+        'no imrovement':                   'ni',
+        'no imrpvovemnet':                 'ni', 
+        'recovery only on the right side': 'pr',
+        'initial improvement':             'pr',
+        'subtotal remission':              'pr',
+        'improvement':                     'pr',
+        'pd':                              'pr', 
+    }
+
+    categories = pd.Series(pd.NA, index=df.index, dtype=object)
+    _null_marker_pat = re.compile(r'^([kK]\.?[aA]\.?|[nN]\.?[dD]\.?)$')
+
+    for idx, val in raw.items():
+        if val in ('nan', '', 'None', 'NaN'):
+            continue
+        if _null_marker_pat.match(val.strip()):
+            continue
+
+        s = val.lower().strip()
+        for phrase, replacement in phrase_map.items():
+            s = s.replace(phrase.lower(), replacement)
+
+        s = re.sub(r'\b([lr])\s*[>~=]\s*(\d+)', r'pr > \2', s)
+
+        found = []
+        if re.search(r'\bni\b', s):
+            found.append('NI')
+        if re.search(r'\bcr\b', s):
+            found.append('CR')
+        if re.search(r'\bpr\b', s):
+            found.append('PR')
+
+        categories[idx] = ', '.join(found) if found else val.strip()
+
+    df['response_category'] = categories.astype('category')
+
+    if verbose:
+        print(f"\nResponse categories:\n"
+              f"{df['response_category'].value_counts(dropna=False).to_string()}")
+
+    return df
+
+#%%
+
+def standardize_pain_points(series):
+    """Standardize pain_points: map German body parts to English, extract side (L/R/B).
+
+    Pure number entries become NaN. Returns standardized 'BodyPart Side, BodyPart Side' format.
+    """
+    body_part_keywords = [
+        ('Achilles Tendon', ['achillessehne']),
+        ('Ankle',           ['fußgelenk', 'fußknöchel', 'knöchel']),
+        ('Heel',            ['ferse', 'fersen', 'ferser', 'fersensporn', 'fersenaußenseite']),
+        ('Foot',            ['fuß', 'füße', 'fußsohle', 'fußaußenseite', 'fußknochen', 'mittelfuß', 'ballen']),
+        ('Toe',             ['zehen', 'zehe']),
+        ('Fibula',          ['wadenbein']),
+        ('Calf',            ['wade', 'waden']),
+        ('Shin',            ['schienbein']),
+        ('Knee',            ['knie']),
+        ('Thigh',           ['oberschenkel']),
+        ('Leg',             ['bein']),
+        ('Hip',             ['hüfte']),
+        ('Groin',           ['leistengegend', 'leiste']),
+        ('Buttocks',        ['po']),
+        ('Back',            ['rücken']),
+        ('Neck',            ['nacken']),
+        ('Shoulder',        ['schulter']),
+        ('Upper Arm',       ['oberarm']),
+        ('Forearm',         ['unterarm']),
+        ('Elbow',           ['ellenbogen', 'ellbogen', 'ellenbogengelenk']),
+        ('Arm',             [r'\barm\b']),
+        ('Wrist',           ['handgelenk', 'hangelenk']),
+        ('Thumb',           ['daumen', 'daumensattelgelenk']),
+        ('Hand',            [r'\bhand\b', 'hände']),
+        ('Finger',          ['finger']),
+    ]
+
+    def find_side(seg):
+        s = seg.lower().strip()
+        if re.search(r'beide|bds|li\s*[+&/]\s*re|re\s*[+&/]\s*li|li\s+u\.?\s+re|re\s+u\.?\s+li|li\s+und\s+re|re\s+und\s+li', s):
+            return 'B'
+        if re.search(r'\bli\b|\blinks\b|\blinke[rns]?\b', s):
+            return 'L'
+        if re.search(r'\bre\b|\brechts\b|\brechte[rns]?\b|\brecht\b', s):
+            return 'R'
+        return ''
+
+    def find_body_part(seg):
+        s = seg.lower().strip()
+        for name, keywords in body_part_keywords:
+            if any(re.search(kw, s) for kw in keywords):
+                return name
+        return None
+
+    def parse_entry(val):
+        if pd.isna(val):
+            return pd.NA
+        s = str(val).strip()
+        if re.match(r'^\d+$', s):
+            return pd.NA
+        s_clean = s.replace('(', '').replace(')', '')
+        s_clean = re.sub(r'[?]', '', s_clean)
+        s_clean = re.sub(r'(\D)\d+\b', r'\1', s_clean)
+        segments = re.split(r'[,;]', s_clean)
+        results = []
+        last_body_part = None
+
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            body = find_body_part(seg)
+            side = find_side(seg)
+            if body is None and side and last_body_part:
+                body = last_body_part
+            if body:
+                entry = f"{body} {side}".strip()
+                if entry not in results:
+                    results.append(entry)
+                last_body_part = body
+
+        if not results:
+            return s.strip()
+
+        sides_by_part = defaultdict(set)
+        order = []
+        for entry in results:
+            parts = entry.rsplit(' ', 1)
+            if len(parts) == 2 and parts[1] in ('L', 'R', 'B'):
+                part, side = parts
+            else:
+                part, side = entry, ''
+            if part not in order:
+                order.append(part)
+            sides_by_part[part].add(side)
+
+        merged = []
+        for part in order:
+            sides = sides_by_part[part]
+            if 'B' in sides or ('L' in sides and 'R' in sides):
+                merged.append(f"{part} B")
+            elif 'L' in sides:
+                merged.append(f"{part} L")
+            elif 'R' in sides:
+                merged.append(f"{part} R")
+            else:
+                merged.append(part)
+
+        return ', '.join(merged)
+
+    return series.apply(parse_entry)
+
