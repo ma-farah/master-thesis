@@ -1330,7 +1330,115 @@ def clean_cl(df_cl, verbose=True):
 # IMPUTATION 
 # ══════════════════════════════════════════════════════════════════════════════
 
-def impute_miceforest(df, ex_cols=None, num_datasets=5, iterations=10,
+def impute_miceforest(df, datasets=5, ex_cols=None, iterations=10, random_state=42, verbose=True):
+    """MICE imputation with miceforest. Handles both numeric-only and mixed-type datasets.
+
+    Numeric columns: mean across all imputed datasets.
+    Categorical/object columns: mode across all imputed datasets.
+
+    Can be used standalone (with ex_cols) or inside a CV loop (feature matrix only).
+
+    Parameters
+    ----------
+    df                    : pd.DataFrame
+        Full dataframe (with id columns) when ex_cols is provided,
+        or feature-only matrix when ex_cols is None (CV use case).
+    ex_cols               : list of str or None
+        Columns to exclude from imputation (e.g. ['Patient', 'Timepoint']).
+        If None, df is treated as a feature-only matrix.
+    num_datasets          : int           number of imputed datasets (default 5)
+    iterations            : int           MICE iterations per dataset (default 10)
+    mean_match_candidates : int
+        5 for numeric-only datasets (immunological);
+        0 to disable KD-tree mean matching for mixed categorical/numeric data (clinical)
+    random_state          : int
+
+    Returns
+    -------
+    df_imputed : pd.DataFrame  imputed data (full df if ex_cols given, feature matrix otherwise)
+    kernel     : miceforest.ImputationKernel  fitted kernel (use kernel.impute_new_data() on test set)
+    """
+    import miceforest as mf
+    if verbose:
+        print(f"\nMiceforest imputation:")
+
+    ex_cols   = list(ex_cols) if ex_cols is not None else []
+    feat_cols = [c for c in df.columns if c not in ex_cols]
+    orig_index = df.index
+
+    def _clean_col(col):
+        col = str(col).strip()
+        col = re.sub(r'[^\w]', '_', col)
+        col = re.sub(r'_+', '_', col)
+        return col
+
+    rename_map  = {c: _clean_col(c) for c in feat_cols}
+    reverse_map = {v: k for k, v in rename_map.items()}
+
+    X = (df[feat_cols]
+         .reset_index(drop=True)
+         .rename(columns=rename_map))
+
+    # Convert object columns to category so miceforest can handle them
+    for c in X.select_dtypes('object').columns:
+        X[c] = X[c].astype('category')
+
+    # Remove unused categories to prevent LightGBM errors
+    for c in X.select_dtypes('category').columns:
+        X[c] = X[c].cat.remove_unused_categories()
+    
+    cat_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name in ('category', 'object')]
+    num_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name not in ('category', 'object')]
+
+    # Record which columns have NaN before imputation
+    nan_before    = X.isna().sum()
+    cols_with_nan = nan_before[nan_before > 0].rename(index=reverse_map)
+
+    kernel = mf.ImputationKernel(
+        X,
+        datasets=5,
+        categorical_feature='auto',
+        random_state=42,
+    )
+    kernel.mice(iterations=iterations)
+
+    num_datasets  = [kernel.complete_data(i) for i in range(datasets)]
+    X_imputed = num_datasets[0].copy()
+ 
+    # Numeric: mean across all datasets
+    if num_renamed:
+        X_imputed[num_renamed] = sum(d[num_renamed] for d in num_datasets) / num_datasets
+
+    # Categorical: mode across all datasets
+    if cat_renamed:
+        cat_stack = pd.concat(num_datasets, axis=0, keys=range(num_datasets))
+        for c in cat_renamed:
+            X_imputed[c] = cat_stack[c].groupby(level=1).agg(lambda x: x.mode().iloc[0])
+
+    X_imputed = X_imputed.rename(columns=reverse_map).reindex(columns=feat_cols)
+    X_imputed.index = orig_index
+
+    if ex_cols:
+        df_imputed = pd.concat(
+            [df[ex_cols].reset_index(drop=True),
+             X_imputed.reset_index(drop=True)],
+            axis=1,
+        )[df.columns]
+    else:
+        df_imputed = X_imputed
+
+    if verbose:
+        total_imputed = int(cols_with_nan.sum())
+        print(f"  Imputed {total_imputed} values across {len(cols_with_nan)} columns:")
+        for col, n in cols_with_nan.items():
+            print(f"    {col}: {n}")
+        print(f"  Shape: {df_imputed.shape}  |  Remaining NaN: {df_imputed.isna().sum().sum()}")
+
+    return df_imputed, kernel
+
+
+
+def impute_miceforest_pyod(df, ex_cols=None, num_datasets=5, iterations=10,
                       mean_match_candidates=5, random_state=42, verbose=True):
     """MICE imputation with miceforest. Handles both numeric-only and mixed-type datasets.
 
@@ -1399,6 +1507,7 @@ def impute_miceforest(df, ex_cols=None, num_datasets=5, iterations=10,
         X,
         num_datasets=num_datasets,
         mean_match_candidates=mean_match_candidates,
+        categorical_feature='auto',
         random_state=random_state,
     )
     kernel.mice(iterations)
