@@ -7,7 +7,6 @@ import datetime as dt
 from collections import defaultdict
 from skrub import TableReport
 
-
 # Helper function: replace missing value markers
 def replace_missing_markers(df, skip_cols=None, verbose=False):
     """Replace German missing-value strings with NaN in all object columns.
@@ -1330,7 +1329,93 @@ def clean_cl(df_cl, verbose=True):
 # IMPUTATION 
 # ══════════════════════════════════════════════════════════════════════════════
 
-def impute_miceforest(df, datasets=5, ex_cols=None, iterations=10, random_state=42, verbose=True):
+
+def impute_iterative(df, ex_cols=None, iterations=20, random_state=42, verbose=False):
+    """Iterative imputation using sklearn IterativeImputer.
+    Numeric columns: IterativeImputer (BayesianRidge).
+    Categorical/object columns: SimpleImputer (Majority vote).
+
+    Parameters
+    ----------
+    df         : pd.DataFrame
+    ex_cols    : list of str or None  — columns to exclude (e.g. id columns)
+    iterations : int                  — max iterations (default 10)
+    random_state : int
+    verbose    : bool
+
+    Returns
+    -------
+    df_imputed : pd.DataFrame  — same shape as df
+    imputer    : fitted ColumnTransformer  — use imputer.transform() on test set
+    """
+
+    from sklearn.experimental import enable_iterative_imputer  
+    from sklearn.impute import IterativeImputer, SimpleImputer
+    from sklearn.compose import ColumnTransformer
+
+    ex_cols   = list(ex_cols) if ex_cols is not None else []
+    feat_cols = [c for c in df.columns if c not in ex_cols]
+    orig_index = df.index
+
+    X = df[feat_cols].reset_index(drop=True)
+
+    num_cols = X.select_dtypes('number').columns.tolist()
+    cat_cols = X.select_dtypes(['category', 'object']).columns.tolist()
+
+    # Record NaN before imputation
+    nan_before    = X.isna().sum()
+    cols_with_nan = nan_before[nan_before > 0]
+
+    transformers = []
+    if num_cols:
+        transformers.append((
+            'num',
+            IterativeImputer(max_iter=iterations, random_state=random_state),
+            num_cols
+        ))
+    if cat_cols:
+        transformers.append((
+            'cat',
+            SimpleImputer(strategy='most_frequent'),
+            cat_cols
+        ))
+
+    imputer = ColumnTransformer(transformers=transformers, remainder='passthrough')
+    arr = imputer.fit_transform(X)
+
+    out_cols = num_cols + cat_cols
+    X_imputed = pd.DataFrame(arr, columns=out_cols).reindex(columns=feat_cols)
+
+    # Restore dtypes
+    for c in num_cols:
+        X_imputed[c] = pd.to_numeric(X_imputed[c])
+    for c in cat_cols:
+        X_imputed[c] = X_imputed[c].astype(df[c].dtype)
+
+    X_imputed.index = orig_index
+
+    if ex_cols:
+        df_imputed = pd.concat(
+            [df[ex_cols].reset_index(drop=True),
+             X_imputed.reset_index(drop=True)],
+            axis=1,
+        )[df.columns]
+    else:
+        df_imputed = X_imputed
+
+    if verbose:
+        total_imputed = int(cols_with_nan.sum())
+        print(f"  Imputed {total_imputed} values across {len(cols_with_nan)} columns:")
+        for col, n in cols_with_nan.items():
+            print(f"    {col}: {n}")
+        print(f"  Shape: {df_imputed.shape}  |  Remaining NaN: {df_imputed.isna().sum().sum()}")
+
+    return df_imputed, imputer
+
+
+
+
+def impute_miceforest(df, ex_cols=None, iterations=10, random_state=42, verbose=True):
     """MICE imputation with miceforest. Handles both numeric-only and mixed-type datasets.
 
     Numeric columns: mean across all imputed datasets.
@@ -1386,34 +1471,22 @@ def impute_miceforest(df, datasets=5, ex_cols=None, iterations=10, random_state=
     # Remove unused categories to prevent LightGBM errors
     for c in X.select_dtypes('category').columns:
         X[c] = X[c].cat.remove_unused_categories()
-    
-    cat_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name in ('category', 'object')]
-    num_renamed = [rename_map[c] for c in feat_cols if df[c].dtype.name not in ('category', 'object')]
 
     # Record which columns have NaN before imputation
     nan_before    = X.isna().sum()
     cols_with_nan = nan_before[nan_before > 0].rename(index=reverse_map)
 
+    from miceforest import MeanMatchScheme
+    mms = MeanMatchScheme(mean_match_candidates=0)
+
     kernel = mf.ImputationKernel(
         X,
-        datasets=5,
         categorical_feature='auto',
+        mean_match_scheme=mms,
         random_state=42,
     )
     kernel.mice(iterations=iterations)
-
-    completed = [kernel.complete_data(i) for i in range(datasets)]
-    X_imputed = completed[0].copy()
-
-    # Numeric: mean across all datasets
-    if num_renamed:
-        X_imputed[num_renamed] = sum(d[num_renamed] for d in completed) / datasets
-
-    # Categorical: mode across all datasets
-    if cat_renamed:
-        cat_stack = pd.concat(completed, axis=0, keys=range(datasets))
-        for c in cat_renamed:
-            X_imputed[c] = cat_stack[c].groupby(level=1).agg(lambda x: x.mode().iloc[0])
+    X_imputed = kernel.complete_data(dataset= 0,iteration=-1) 
 
     X_imputed = X_imputed.rename(columns=reverse_map).reindex(columns=feat_cols)
     X_imputed.index = orig_index

@@ -7,32 +7,20 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from catboost import CatBoostRegressor
-import optuna, warnings, statistics
-from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder
-from sklearn.model_selection import train_test_split
-from RENT import RENT
-import joblib, os, tempfile
+import joblib, os
 import contextlib, io
 
-for cat in [FutureWarning, RuntimeWarning]:
-    warnings.filterwarnings('ignore', category=cat, module='RENT')
-for pat in ['.*less than 75% GPU memory.*', '.*joblib.*', '.*loky.*']:
-    warnings.filterwarnings('ignore', message=pat)
-optuna.logging.set_verbosity(optuna.logging.WARNING)
-
 import preprocess
-import model
 
 
 def _prep_for_catboost(df, cat_cols):
-    """Convert category columns to object dtype, preserving NaN as real NaN."""
+    """Convert category columns to object dtype, filling NaN with 'missing'."""
     out = df.copy()
     for col in cat_cols:
         if col in out.columns:
-            out[col] = out[col].astype(object)
+            out[col] = out[col].astype(object).fillna('missing')
     return out
 
 def _prep_for_rent(X_imp, cat_cols):
@@ -70,8 +58,19 @@ def run_advanced_catboost_rent(
 
     Returns: results_df, final_model, X_final, y_pred, best_model_params_list, feature_freq
     """
+    from RENT import RENT
+    from catboost import CatBoostRegressor
+    import optuna, warnings, statistics
+    from collections import Counter
+    
+    for cat in [FutureWarning, RuntimeWarning]:
+        warnings.filterwarnings('ignore', category=cat, module='RENT')
+    for pat in ['.*less than 75% GPU memory.*', '.*joblib.*', '.*loky.*']:
+        warnings.filterwarnings('ignore', message=pat)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    N_TRIALS = 2  # TEST: 2 (production: 20)
+
+    N_TRIALS = 5  # TEST: 2 (production: 20)
 
     y            = df_combined[target_col].copy()
 
@@ -93,8 +92,8 @@ def run_advanced_catboost_rent(
     print(f"  Outer 2×2=4 | Inner 2×2=4 | RENT & model trials={N_TRIALS} | K=5")  # TEST
     print(f"{'='*65}")
 
-    outer_cv = RepeatedKFold(n_splits=2, n_repeats=2, random_state=random_state)  # TEST: 2×2 (production: 4×5)
-    inner_cv = RepeatedKFold(n_splits=2, n_repeats=2, random_state=random_state)  # TEST: 2×2 (production: 4×5)
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # TEST: 2×2 (production: 4×5)
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # TEST: 2×2 (production: 4×5)
 
     # Storing best parameters
     fold_results = []
@@ -122,10 +121,10 @@ def run_advanced_catboost_rent(
         # Prepare CatBoost-ready X_train
         X_train_cb = _prep_for_catboost(X_train, cat_cols)
 
-        # ── Step 0: MICE imputation on X_train for Rent Tuning ───────────────
-        print(f"  0: MICE imputation on Outer Fold X_train...")
-        X_train_imp, _ = preprocess.impute_miceforest(
-            X_train, datasets=5, ex_cols=None, iterations=2,  # TEST: iterations=2 (production: 5)
+        # ── Step 0: Iterative Imputer on X_train for Rent Tuning ───────────────
+        print(f"  0: IterativeImputer on Outer Fold X_train...")
+        X_train_imp, imputer = preprocess.impute_iterative(
+            X_train, ex_cols=None, iterations=5,  # TEST: iterations=2 (production: 5)
             random_state=42, verbose=False)
 
         # Ordinal-encode imputed X_train to a fully numeric dataframe; free imputed copy
@@ -173,7 +172,7 @@ def run_advanced_catboost_rent(
             probe = CatBoostRegressor(
                 iterations=50, depth=6, random_seed=random_state, loss_function='RMSE',  # TEST: 50/4 (production: 300/6)
                 cat_features=cat_sel,
-                task_type='GPU', devices='0', gpu_ram_part=0.6, logging_level='Silent')
+                task_type='CPU', thread_count=-1, logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
                 probe.fit(X_tr_cb[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_cb[sel_cols])))
@@ -265,8 +264,7 @@ def run_advanced_catboost_rent(
 
         fold_model = CatBoostRegressor(
             iterations=100, **best_model_params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST: 100 (production: 1000)
-            random_seed=random_state, task_type='GPU', devices='0',
-            gpu_ram_part=0.6, logging_level='Silent')
+            random_seed=random_state, task_type='CPU', thread_count=-1, logging_level='Silent')
         with contextlib.redirect_stderr(io.StringIO()):
             fold_model.fit(X_train_cb[selected_cols], y_train_fit)
 
@@ -343,7 +341,7 @@ def run_advanced_catboost_rent(
     final_model = CatBoostRegressor(
         iterations=100, loss_function='RMSE', custom_metric=['MAE', 'R2'],  # TEST: 100 (production: 1000)
         cat_features=cat_cols_final, random_seed=random_state,
-        task_type='GPU', devices='0', gpu_ram_part=0.6, logging_level='Silent',
+        task_type='CPU', thread_count=-1, logging_level='Silent',
         **hp_final)
     with contextlib.redirect_stderr(io.StringIO()):
         final_model.fit(X_final, y_final_fit)
