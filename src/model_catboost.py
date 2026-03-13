@@ -125,8 +125,8 @@ def run_advanced_catboost_rent(
         # ── Step 0: MICE imputation on X_train for Rent Tuning ───────────────
         print(f"  0: MICE imputation on Outer Fold X_train...")
         X_train_imp, _ = preprocess.impute_miceforest(
-            X_train, num_datasets=5, iterations=2,  # TEST: iterations=2 (production: 5)
-            mean_match_candidates=5, random_state=random_state, verbose=True)
+            X_train, ex_cols=None, num_datasets=5, iterations=2,  # TEST: iterations=2 (production: 5)
+            mean_match_candidates=5, random_state=random_state, verbose=False)
 
         # Ordinal-encode imputed X_train to a fully numeric dataframe; free imputed copy
         X_train_rent = _prep_for_rent(X_train_imp, cat_cols)
