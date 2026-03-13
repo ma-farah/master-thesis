@@ -5,7 +5,7 @@ This repository outlines my thesis work, which aims to predict the treatment res
 recieving Low-Dose Radiation Therapy (LDRT), using datasets consisting of immunological and clinical variables,
 across multiple timepoints. This project covers data preprocessing, exploratory data analysis,
 outlier detection, machine learning modelling with nested cross-validation, Optuna hyperparameter
-optiization, RENT feature selection, and SHAP-analysis to identify i predictors of treatment response.
+optimization, RENT feature selection, and SHAP-analysis to identify predictors of treatment response.
 
 ## Repository Structure
 ```
