@@ -14,7 +14,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.model_selection import train_test_split
 from RENT import RENT
-import joblib, os
+import joblib, os, tempfile
 import contextlib, io
 
 for cat in [FutureWarning, RuntimeWarning]:
