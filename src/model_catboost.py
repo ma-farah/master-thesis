@@ -123,7 +123,7 @@ def run_advanced_catboost_rent(
 
         # ---- Iterative Imputer on X_train for Rent Tuning --------
         X_train_imp, imputer = preprocess.impute_iterative(
-            X_train, ex_cols=None, iterations=5,  # TEST: iterations=2 (production: 5)
+            X_train, ex_cols=None, iterations=10, 
             random_state=42, verbose=False)
 
         # Ordinal-encode imputed X_train to a fully numeric dataframe; free imputed copy
@@ -212,7 +212,6 @@ def run_advanced_catboost_rent(
         # CatBoost handles NaN, no imputation needed, using nan-dataset
    
         inner_splits = list(inner_cv.split(X_train_cb))
-        print(f" Inner Folds CatBoost Tuning:")
         def _fit_inner(itr, ival, params):
             # Train and evaluate one inner-fold CatBoost model on dataset (with nan)
             m = CatBoostRegressor(
