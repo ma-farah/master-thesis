@@ -1,4 +1,3 @@
-# master-thesis
 ## Master Thesis 2026 By Muna Ahmed Farah
 
 ## Description
@@ -6,9 +5,10 @@ This repository outlines my thesis work, which aims to predict the treatment res
 recieving Low-Dose Radiation Therapy (LDRT), using datasets consisting of immunological and clinical variables,
 across multiple timepoints. This project covers data preprocessing, exploratory data analysis,
 outlier detection, machine learning modelling with nested cross-validation, Optuna hyperparameter
-optiization, RENT feature selection, and SHAP-analysis to identify i predictors of treatment response.
+optimization, RENT feature selection, and SHAP-analysis to identify predictors of treatment response.
 
 ## Repository Structure
+```
 masterthesis/
 ├── data/
 │   └──                             # Raw data (not tracked by git)
@@ -30,7 +30,7 @@ masterthesis/
 ├── docs/                           # Reports, figures
 ├── environment.yml                 # Conda environment
 └── README.md
-
+```
 
 ## Requirements
 Create and activate the conda environment:
