@@ -312,7 +312,7 @@ def run_catboost_regressor(df_model, target_col, name,
             y_train_fit = y_train
 
         model = CatBoostRegressor(
-            iterations=300,
+            iterations=1000,
             loss_function='RMSE',
             random_seed=random_state,
             task_type='CPU', 
@@ -370,6 +370,24 @@ def plot_shap_regressor(model, X, name):
     plt.tight_layout()
     plt.show()
 
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title(f"SHAP Beeswarm — {name}")
+    plt.tight_layout()
+    plt.show()
+
+    return shap_values
+
+def plot_shap_elasticnet(model, X, name):
+    """SHAP bar + beeswarm for a fitted ElasticNet."""
+    import shap
+    
+    print(f"\n=== SHAP Analysis: {name} ===")
+    explainer   = shap.LinearExplainer(model, X)
+    shap_values = explainer.shap_values(X)
+    shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
+    plt.title(f"SHAP Feature Importance — {name}")
+    plt.tight_layout()
+    plt.show()
     shap.summary_plot(shap_values, X, show=False, max_display=20)
     plt.title(f"SHAP Beeswarm — {name}")
     plt.tight_layout()
