@@ -47,6 +47,7 @@ def run_advanced_elasticnet_rent(
 
     Returns: results_df, final_model, X_final, y_pred,
              best_model_params_list, feature_freq, scaler_final
+             (scaler_final needed to inverse-transform feature units for SHAP)
     """
     from RENT import RENT
     from sklearn.linear_model import ElasticNet
@@ -85,7 +86,6 @@ def run_advanced_elasticnet_rent(
     fold_results               = []
     best_model_params_list     = []
     selected_features_per_fold = []
-    scalers_per_fold           = []
     start = time.time()
 
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_enc), start=1):
@@ -117,7 +117,7 @@ def run_advanced_elasticnet_rent(
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
             columns=feature_cols, index=X_train.index)
-        scalers_per_fold.append(scaler)
+
 
         # ── X_test — impute + scale using X_train fitted objects ──────────────
         X_test_imp = pd.DataFrame(
@@ -325,4 +325,4 @@ def run_advanced_elasticnet_rent(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            best_model_params_list, feature_freq)
+            best_model_params_list, feature_freq, scaler_final)

@@ -280,7 +280,7 @@ def run_advanced_pls_rent(
     print(f"\n  Final model: {len(final_cols)} features (≥75%): {final_cols}")
 
     # Encode → impute → scale full dataset for final model
-    X_enc_final        = encode_categoricals(X, cat_cols)
+    X_enc_final        = encode_categoricals(X)
     X_final_imp, _     = preprocess.impute_iterative(
         X_enc_final, ex_cols=None, iterations=10,
         random_state=42, verbose=False)

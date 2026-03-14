@@ -377,13 +377,21 @@ def plot_shap_regressor(model, X, name):
 
     return shap_values
 
-def plot_shap_elasticnet(model, X, name):
-    """SHAP bar + beeswarm for a fitted ElasticNet."""
+def plot_shap_elasticnet(model, X, name, scaler=None):
+    """SHAP bar + beeswarm for a fitted ElasticNet.
+
+    If scaler is provided, SHAP values are divided by scaler.scale_ to convert
+    from scaled units back to original feature units.
+    """
     import shap
 
     print(f"\n=== SHAP Analysis: {name} ===")
-    explainer = shap.LinearExplainer(model, X, feature_perturbation="correlation_dependent")
+    explainer   = shap.LinearExplainer(model, X, feature_perturbation="correlation_dependent")
     shap_values = explainer.shap_values(X)
+
+    if scaler is not None:
+        shap_values = shap_values / scaler.scale_
+
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
     plt.title(f"SHAP Feature Importance — {name}")
     plt.tight_layout()
