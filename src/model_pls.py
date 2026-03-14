@@ -6,50 +6,41 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder
 import joblib, os
 import contextlib, io
 
 import preprocess
 
 
-def _encode_categoricals(X):
+# ── Preprocess once before CV loop ───────────────────────────────────────
+# Encode all categorical/object columns ordinally
+# This runs once and all folds use the same encoded X
+
+def encode_categoricals(X):
     """OrdinalEncode all categorical/object columns once before CV.
-    Returns fully encoded DataFrame — NaN in numeric cols preserved,
-    categorical cols are now numeric. No statistics learned — no leakage."""
+    Returns fully encoded DataFrame — NaN in numeric cols preserved for CatBoost,
+    categorical cols are now numeric."""
     out = X.copy()
     all_non_numeric = out.select_dtypes(
         include=['category', 'object']).columns.tolist()
+    
     if all_non_numeric:
         oe = OrdinalEncoder(
             handle_unknown='use_encoded_value', unknown_value=-1)
         out[all_non_numeric] = oe.fit_transform(
             out[all_non_numeric].astype(str))
-    return out.astype(float)
+    
+    return out.astype(float)  # but NaN in numeric cols preserved
 
 
-def run_advanced_elasticnet_rent(
+def run_advanced_pls_rent(
     df_combined, target_col='pain_reduction', random_state=42,
     tau_3=0.95, target_transformer=None,
 ):
-    """ElasticNet with Optuna-tuned RENT and Model Hyperparameters.
-
-    Per outer fold:
-      0. Encode categoricals once before CV loop — no leakage
-      1. Tune RENT HPs via Optuna on 75-25 split of imputed+scaled X_train
-      2. Re-run RENT on full imputed+scaled X_train with best HPs
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet HPs
-      4. Train final fold model on X_train → evaluate on X_test
-      5. Final model: features selected in ≥75% of outer folds, median HPs
-
-    Categorical encoding: done once before CV — no leakage risk.
-    Imputation + scaling: fitted on X_train only, applied to X_test.
-
-    Returns: results_df, final_model, X_final, y_pred,
-             best_model_params_list, feature_freq, scaler_final
-    """
     from RENT import RENT
-    from sklearn.linear_model import ElasticNet
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.preprocessing import StandardScaler
     import optuna, warnings, statistics
     from collections import Counter
 
@@ -57,7 +48,7 @@ def run_advanced_elasticnet_rent(
         warnings.filterwarnings('ignore', category=cat, module='RENT')
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    N_TRIALS = 50
+    N_TRIALS = 20
 
     y            = df_combined[target_col].copy()
     exclude      = {'Patient', 'Timepoint', target_col, 'pain_reduction',
@@ -69,12 +60,14 @@ def run_advanced_elasticnet_rent(
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    # ── Encode categoricals ONCE before CV loop ───────────────────────────────
-    # Only converts strings → integers, learns no statistics — no leakage
-    X_enc = _encode_categoricals(X)
+    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+
+    # ── Encode categoricals ONCE before CV loop — no leakage risk ────────────
+    # Only encodes strings→integers, learns no statistics from data
+    X_enc = encode_categoricals(X)
 
     print(f"\n{'='*65}")
-    print(f"  ElasticNet + Optuna + RENT — {target_col}")
+    print(f"  PLS + Optuna + RENT — {target_col}")
     print(f"  n={len(X)}, p={len(feature_cols)}, τ₃={tau_3}")
     print(f"  Outer 4×5=20 | Inner 4×5=20 | RENT & Optuna trials={N_TRIALS} | K=100")
     print(f"{'='*65}")
@@ -93,8 +86,8 @@ def run_advanced_elasticnet_rent(
         print(f"  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
         print(f"{'─'*65}")
 
-        X_train, X_test = X_enc.iloc[train_idx], X_enc.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx],     y.iloc[test_idx]
+        X_train_enc, X_test_enc = X_enc.iloc[train_idx], X_enc.iloc[test_idx]
+        y_train, y_test         = y.iloc[train_idx],     y.iloc[test_idx]
 
         # ── Target transform ──────────────────────────────────────────────────
         if target_transformer is not None:
@@ -107,25 +100,25 @@ def run_advanced_elasticnet_rent(
 
         # ── Impute numeric NaN — fit on X_train only ──────────────────────────
         X_train_imp, imputer = preprocess.impute_iterative(
-            X_train, ex_cols=None, iterations=10,
+            X_train_enc, ex_cols=None, iterations=10,
             random_state=42, verbose=False)
         X_train_imp = pd.DataFrame(
-            X_train_imp, columns=feature_cols, index=X_train.index)
+            X_train_imp, columns=feature_cols, index=X_train_enc.index)
 
         # ── Scale — fit on X_train only ───────────────────────────────────────
         scaler         = StandardScaler()
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
-            columns=feature_cols, index=X_train.index)
+            columns=feature_cols, index=X_train_enc.index)
         scalers_per_fold.append(scaler)
 
-        # ── X_test — impute + scale using X_train fitted objects ──────────────
+        # ── X_test — transform only, no fit ──────────────────────────────────
         X_test_imp = pd.DataFrame(
-            imputer.transform(X_test),              # transform only, no fit
-            columns=feature_cols, index=X_test.index)
+            imputer.transform(X_test_enc),          # reuse imputer from X_train
+            columns=feature_cols, index=X_test_enc.index)
         X_test_scaled = pd.DataFrame(
-            scaler.transform(X_test_imp),            # transform only, no fit
-            columns=feature_cols, index=X_test.index)
+            scaler.transform(X_test_imp),            # reuse scaler from X_train
+            columns=feature_cols, index=X_test_enc.index)
 
         # ── Step 1: Tune RENT HPs on 75-25 split ─────────────────────────────
         X_tr_rent, X_val_rent, y_tr, y_val = train_test_split(
@@ -152,14 +145,14 @@ def run_advanced_elasticnet_rent(
             if len(sel_idx) == 0:
                 return 1e6
 
-            sel_cols = [feature_cols[i] for i in sel_idx]
+            sel_cols   = [feature_cols[i] for i in sel_idx]
+            n_comp_max = min(len(sel_cols), len(y_tr) - 1, 5)
+            if n_comp_max < 1:
+                return 1e6
 
-            # Probe ElasticNet to score selected features
-            probe = ElasticNet(
-                alpha=0.1, l1_ratio=l1_ratio,
-                max_iter=5000, random_state=random_state)
+            probe = PLSRegression(n_components=n_comp_max)
             probe.fit(X_tr_rent[sel_cols], y_tr)
-            preds = probe.predict(X_val_rent[sel_cols])
+            preds = probe.predict(X_val_rent[sel_cols]).ravel()
             return np.sqrt(mean_squared_error(y_val, preds))
 
         rent_study = optuna.create_study(direction='minimize')
@@ -193,24 +186,22 @@ def run_advanced_elasticnet_rent(
         print(f"  RENT Selected: {len(selected_cols)}/{len(feature_cols)} features — "
               f"{selected_cols[:8]}{suffix}")
 
-        # ── Step 3: Inner CV ElasticNet HP tuning ────────────────────────────
+        # ── Step 3: Inner CV PLS — tune n_components only ────────────────────
+        n_comp_upper = min(len(selected_cols), 10)
         inner_splits = list(inner_cv.split(X_train_scaled))
 
-        def _fit_inner_en(itr, ival, params):
-            m = ElasticNet(**params, max_iter=5000, random_state=random_state)
+        def _fit_inner_pls(itr, ival, n_components):
+            m = PLSRegression(n_components=n_components)
             m.fit(X_train_scaled.iloc[itr][selected_cols],
                   y_train_fit.iloc[itr])
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
-                m.predict(X_train_scaled.iloc[ival][selected_cols])))
+                m.predict(X_train_scaled.iloc[ival][selected_cols]).ravel()))
 
         def model_objective(trial):
-            params = dict(
-                alpha    = trial.suggest_float('alpha',    1e-4, 10.0, log=True),
-                l1_ratio = trial.suggest_float('l1_ratio', 0.0,  1.0),
-            )
+            n_components = trial.suggest_int('n_components', 1, n_comp_upper)
             rmses = joblib.Parallel(n_jobs=-1, prefer='threads')(
-                joblib.delayed(_fit_inner_en)(itr, ival, params)
+                joblib.delayed(_fit_inner_pls)(itr, ival, n_components)
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
@@ -230,12 +221,11 @@ def run_advanced_elasticnet_rent(
               f"RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         # ── Step 4: Train on full X_train → evaluate on X_test ───────────────
-        # X_test already prepared above using X_train fitted imputer + scaler
-        fold_model = ElasticNet(
-            **best_model_params, max_iter=5000, random_state=random_state)
+        # X_test already prepared above — imputer and scaler from X_train
+        fold_model = PLSRegression(**best_model_params)
         fold_model.fit(X_train_scaled[selected_cols], y_train_fit)
 
-        preds_raw = fold_model.predict(X_test_scaled[selected_cols])
+        preds_raw = fold_model.predict(X_test_scaled[selected_cols]).ravel()
         preds     = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                      if pt_fold is not None else preds_raw)
 
@@ -243,7 +233,8 @@ def run_advanced_elasticnet_rent(
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         r2   = r2_score(y_test, preds)
         fold_results.append({
-            'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
+            'Fold': outer_fold, 'MAE': mae,
+            'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
         print(f"  Outer Fold {outer_fold} | Features={len(selected_cols)}: {selected_cols}")
         print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
@@ -289,16 +280,17 @@ def run_advanced_elasticnet_rent(
     print(f"\n  Final model: {len(final_cols)} features (≥75%): {final_cols}")
 
     # Encode → impute → scale full dataset for final model
-    X_final_imp, _ = preprocess.impute_iterative(
-        X_enc, ex_cols=None, iterations=10,
+    X_enc_final        = encode_categoricals(X, cat_cols)
+    X_final_imp, _     = preprocess.impute_iterative(
+        X_enc_final, ex_cols=None, iterations=10,
         random_state=42, verbose=False)
-    X_final_imp    = pd.DataFrame(
-        X_final_imp, columns=feature_cols, index=X_enc.index)
-    scaler_final   = StandardScaler()
-    X_final_scaled = pd.DataFrame(
+    X_final_imp        = pd.DataFrame(
+        X_final_imp, columns=feature_cols, index=X_enc_final.index)
+    scaler_final       = StandardScaler()
+    X_final_scaled     = pd.DataFrame(
         scaler_final.fit_transform(X_final_imp),
-        columns=feature_cols, index=X_enc.index)
-    X_final        = X_final_scaled[final_cols]
+        columns=feature_cols, index=X_enc_final.index)
+    X_final            = X_final_scaled[final_cols]
 
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
@@ -308,16 +300,15 @@ def run_advanced_elasticnet_rent(
         pt_final, y_final_fit = None, y
 
     hp_final = {
-        k: statistics.median([p[k] for p in best_model_params_list])
+        k: int(round(statistics.median([p[k] for p in best_model_params_list])))
         for k in best_model_params_list[0]}
     print(f"  Final model HPs (median): {hp_final}")
 
-    final_model = ElasticNet(
-        **hp_final, max_iter=5000, random_state=random_state)
+    final_model = PLSRegression(**hp_final)
     final_model.fit(X_final, y_final_fit)
 
     y_pred_raw = pd.Series(
-        final_model.predict(X_final),
+        final_model.predict(X_final).ravel(),
         index=range(len(X_final)), dtype='float64')
     y_pred = (pd.Series(
         pt_final.inverse_transform(y_pred_raw.values.reshape(-1, 1)).ravel(),
@@ -325,4 +316,4 @@ def run_advanced_elasticnet_rent(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            best_model_params_list, feature_freq)
+            best_model_params_list, feature_freq, scaler_final)

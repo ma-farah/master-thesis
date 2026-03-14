@@ -70,7 +70,7 @@ def run_advanced_catboost_rent(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-    N_TRIALS = 50  
+    N_TRIALS = 20 # prøv 50 etterhvert   
 
     y            = df_combined[target_col].copy()
 
@@ -304,7 +304,7 @@ def run_advanced_catboost_rent(
         print(f"    {cnt:>3}/{n_outer}  {feat}{'   (≥75%)' if cnt/n_outer >= 0.75 else ''}")
 
     if not [f for f, cnt in freq.items() if cnt / n_outer >= 0.75]:
-        print("   No features met ≥75% threshold - falling back to top 10 selected features for final model.")
+        print("   Warning: No features met ≥75% threshold - falling back to top 10 selected features for final model.")
 
 
     # ── Final model ───────────────────────────────────────────────────────────

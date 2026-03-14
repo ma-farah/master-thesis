@@ -380,9 +380,9 @@ def plot_shap_regressor(model, X, name):
 def plot_shap_elasticnet(model, X, name):
     """SHAP bar + beeswarm for a fitted ElasticNet."""
     import shap
-    
+
     print(f"\n=== SHAP Analysis: {name} ===")
-    explainer   = shap.LinearExplainer(model, X)
+    explainer = shap.LinearExplainer(model, X, feature_perturbation="correlation_dependent")
     shap_values = explainer.shap_values(X)
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
     plt.title(f"SHAP Feature Importance — {name}")
@@ -395,3 +395,110 @@ def plot_shap_elasticnet(model, X, name):
 
     return shap_values
 
+def plot_pls_importance(model, X, name):
+    """VIP scores + coefficients plot for a fitted PLSRegression."""
+    import matplotlib.pyplot as plt
+
+    # ── VIP scores ────────────────────────────────────────────────────────
+    t = model.x_scores_
+    w = model.x_weights_
+    q = model.y_loadings_
+    p, h     = w.shape
+    vip      = np.zeros(p)
+    s        = np.diag(t.T @ t @ q.T @ q)
+    for i in range(p):
+        weight = np.array([
+            (w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
+        vip[i] = np.sqrt(p * (s @ weight) / np.sum(s))
+
+    # ── Coefficients for direction ────────────────────────────────────────
+    coefs = model.coef_.ravel()
+
+    importance_df = pd.DataFrame({
+        'feature':     X.columns,
+        'vip':         vip,
+        'coefficient': coefs,
+        'signed_vip':  vip * np.sign(coefs)   # direction from coefficient
+    }).sort_values('vip', ascending=True)
+
+    # Only show VIP > 0.8
+    importance_df = importance_df[importance_df['vip'] > 0.8]
+
+    colors = ['#d73027' if s > 0 else '#4575b4'
+              for s in importance_df['signed_vip']]
+
+    fig, ax = plt.subplots(figsize=(8, max(4, len(importance_df) * 0.4 + 2)))
+    ax.barh(importance_df['feature'], importance_df['signed_vip'],
+            color=colors, edgecolor='white', height=0.7)
+    ax.axvline(x=0,    color='black', linewidth=0.8)
+    ax.axvline(x=1.0,  color='gray',  linewidth=0.8,
+               linestyle='--', label='VIP=1.0 threshold')
+    ax.axvline(x=-1.0, color='gray',  linewidth=0.8, linestyle='--')
+    ax.set_xlabel('VIP Score (signed by coefficient direction)')
+    ax.set_title(f'PLS Feature Importance\n{name}\n'
+                 f'(+) = higher marker → more pain reduction')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    return importance_df
+
+
+
+def plot_feature_frequency(feature_freq, name, threshold=0.75, n_outer=20, top_n=30):
+    """Bar plot of RENT feature selection frequency across outer folds.
+    
+    Parameters:
+        feature_freq : pd.Series  — selection counts per feature (from run_* functions)
+        name         : str        — plot title suffix
+        threshold    : float      — frequency threshold used for final model (default 0.75)
+        n_outer      : int        — total number of outer folds (default 20)
+        top_n        : int        — max features to display (default 30)
+    """
+    import matplotlib.pyplot as plt
+
+    threshold_count = threshold * n_outer
+
+    # Filter to features selected at least once, take top_n
+    freq_plot = (feature_freq[feature_freq > 0]
+                 .nlargest(top_n)
+                 .sort_values(ascending=True))  # ascending → highest bar at top
+
+    if freq_plot.empty:
+        print("   Warning: No features were selected in any fold!")
+        return
+
+    # Red = met threshold, blue = did not
+    colors = ['#d73027' if v >= threshold_count else '#4575b4'
+              for v in freq_plot.values]
+
+    fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.4 + 2)))
+
+    ax.barh(freq_plot.index, freq_plot.values,
+            color=colors, edgecolor='white', height=0.7)
+
+    # Threshold line
+    ax.axvline(x=threshold_count, color='black', linewidth=1.2,
+               linestyle='--',
+               label=f'≥{int(threshold*100)}% threshold '
+                     f'({int(threshold_count)}/{n_outer} folds)')
+
+    # Annotate count on each bar
+    for i, (feat, val) in enumerate(freq_plot.items()):
+        ax.text(val + 0.1, i, f'{int(val)}/{n_outer}',
+                va='center', fontsize=8, color='black')
+
+    ax.set_xlim(0, n_outer + 2)
+    ax.set_xlabel(f'Selection count (out of {n_outer} outer folds)')
+    ax.set_title(f'RENT Feature Selection Frequency\n{name}')
+    ax.legend(loc='lower right')
+
+    # Color legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#d73027', label=f'Selected in ≥{int(threshold*100)}% folds → final model'),
+        Patch(facecolor='#4575b4', label=f'Selected in <{int(threshold*100)}% folds → excluded'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
+
+    plt.tight_layout()
+    plt.show()
