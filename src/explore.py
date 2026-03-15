@@ -325,17 +325,17 @@ def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 
     f_stat, p_anova = stats.f_oneway(*groups)
 
     # Print summary table
-    widths = {'Diagnosis': 28, 'n': 5, 'Mean': 8, 'std': 7, 'F': 7, 'p-value': 10}
-    header = '  '.join(f'{c:>{widths[c]}}' for c in widths)
+    widths = {'Diagnosis': 18, 'n': 5, 'Mean': 8, 'std': 7, 'F': 7, 'p-value': 10}
+    header = '  '.join(f'{c:<{widths[c]}}' if c == 'Diagnosis' else f'{c:>{widths[c]}}' for c in widths)
 
     print(f"\nOne-way ANOVA — {col} reduction by diagnosis ({tp_label})\n")
     print(header)
-    print('_' * 84)
+    print('_' * 65)
     for dx in order:
         vals = plot_df.loc[plot_df['diagnosis'] == dx, target_col].dropna()
-        print(f"  {dx:<26}  {len(vals):>{widths['n']}}  {vals.mean():>{widths['Mean']}.3f}  "
+        print(f"  {dx:<{widths['Diagnosis']}}  {len(vals):>{widths['n']}}  {vals.mean():>{widths['Mean']}.3f}  "
               f"{vals.std():>{widths['std']}.3f}  {f_stat:>{widths['F']}.3f}  "
-              f"{p_anova:>{widths['p-value']}.2e}")
+              f"{p_anova:>{widths['p-value']}.3f}")
 
     # 4 — Tukey HSD post-hoc
     tukey    = pairwise_tukeyhsd(plot_df[target_col], plot_df['diagnosis'])
@@ -394,7 +394,7 @@ def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 
 
 
 # ── Pearson correlation ───────────────────────────────────────────────────────
-
+# immunological x immunological
 def pearson_correlation(df, ex_cols, name, n_top=40):
     """Compute pairwise Pearson r on only numeric columns, print top pairs, and plot heatmaps.
 
@@ -498,8 +498,8 @@ def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
                .sort_values('r', ascending=False)
                .reset_index(drop=True))
 
-    top_pos = results.head(n_top)
-    top_neg = results.tail(n_top).sort_values('r')
+    pos = results[results['r'] > 0.05].copy()
+    neg = results[results['r'] < 0].sort_values('r').copy()
 
     def _print_table(df, label):
         print(f"\n{label}:")
@@ -508,8 +508,8 @@ def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
         for _, row in df.iterrows():
             print(f"  {row['Feature']:<35}  {row['r']:>7.3f}")
 
-    _print_table(top_pos, f"Top {n_top} Most Positive Correlations with pain_scale")
-    _print_table(top_neg, f"Top {n_top} Most Negative Correlations with pain_scale")
+    _print_table(pos, "Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.05)")
+    _print_table(neg, "Negative Pearsons Correlations: Immunological Features x pain_scale")
 
     def _bar_plot(df, title, color):
         fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
@@ -519,17 +519,14 @@ def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
         plt.tight_layout()
         plt.show()
 
-    _bar_plot(top_pos,
-              f'Top {n_top} Positive Correlations Immunological Features × pain_scale',
-              '#d62728')
-    _bar_plot(top_neg,
-              f'Top {n_top} Negative Correlations — Immunological Features × pain_scale',
-              '#1f77b4')
+    _bar_plot(results[results['r'] > 0.1],
+              'Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.05)', 'skyblue')
+    _bar_plot(neg, 'Negative Pearsons Correlations: Immunological Features x pain_scale', 'navy')
 
     return results
 
 
-# ── Phik correlation ──────────────────────────────────────────────────────────
+# ── Phik correlation  complete clinical dataset ────────────────────────────────────────────────────────
 
 def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     """Compute phik correlation matrix (can use on data with mixed feature types)
@@ -600,6 +597,8 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     return phik_matrix, phik_pairs
 
 
+
+# between clinical features and pain_scale
 def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     """PhiK correlation between every feature and a single target column.
 
@@ -646,17 +645,17 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     print(f"  Features: {len(result)}  |  computable (phik > 0): {len(nonzero)}  "
           f"|  skipped (phik = 0): {zero_n}")
 
-    print(f"\nAll features × '{target}' (phik, sorted descending):")
+    print(f"\nPhik Correlations: All Clinical features × '{target}'")
     print(f"  {'Feature':<35}  {'phik':>6}")
     print("  " + "-" * 45)
     for _, row in nonzero.iterrows():
         print(f"  {row['Feature']:<35}  {row['phik']:>6.3f}")
 
     fig, ax = plt.subplots(figsize=(9, 0.45 * len(nonzero) + 1.5))
-    ax.barh(nonzero['Feature'][::-1], nonzero['phik'][::-1], color='#2ca02c')
+    ax.barh(nonzero['Feature'][::-1], nonzero['phik'][::-1], color='turquoise')
     ax.set_xlabel('PhiK')
     ax.set_xlim(0, 1)
-    ax.set_title(f'All Features × {target} ({name} Dataset, PhiK)')
+    ax.set_title(f'Phik Correlations: Clinical Dataset × {target}')
     plt.tight_layout()
     plt.show()
 
