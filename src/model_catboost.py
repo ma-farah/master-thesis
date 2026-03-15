@@ -146,8 +146,8 @@ def run_advanced_catboost_rent(
         def rent_objective(trial):
             c_val    = trial.suggest_float('C',        1e-3, 10,  log=True)
             l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
-            tau_1    = trial.suggest_float('tau_1',    0.6,  0.95)
-            tau_2    = trial.suggest_float('tau_2',    0.6,  0.95)
+            tau_1    = trial.suggest_float('tau_1',    0.7,  0.95)
+            tau_2    = trial.suggest_float('tau_2',    0.7,  0.95)
 
             # Running RENT on imputed+encoded data to select features
             rent_t = RENT.RENT_Regression(
@@ -160,7 +160,10 @@ def run_advanced_catboost_rent(
                 rent_t.train()
             sel_idx = rent_t.select_features(
                 tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+            # penalize over selection
             if len(sel_idx) == 0:
+                return 1e6
+            if len(sel_idx) > 45:
                 return 1e6
             sel_cols    = [feature_cols[i] for i in sel_idx]
             cat_sel     = [c for c in cat_cols if c in sel_cols]
@@ -188,7 +191,7 @@ def run_advanced_catboost_rent(
             target=y_train_fit.values, feat_names=feature_cols,
             C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
             autoEnetParSel=False, poly='OFF', testsize_range=(0.25, 0.25),
-            K=5, random_state=random_state, verbose=0)  # TEST: K=5 (production: 100)
+            K=100, random_state=random_state, verbose=0)  
         
         with contextlib.redirect_stderr(io.StringIO()):
             rent_full.train()
@@ -215,7 +218,7 @@ def run_advanced_catboost_rent(
         def _fit_inner(itr, ival, params):
             # Train and evaluate one inner-fold CatBoost model on dataset (with nan)
             m = CatBoostRegressor(
-                iterations=1000, **params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST: 50 (production: 300)
+                iterations=500, **params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST
                 random_seed=random_state, task_type='CPU', thread_count=-1,
                 logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
