@@ -1441,3 +1441,101 @@ def standardize_pain_points(series):
 
     return series.apply(parse_entry)
 
+
+#%% 
+
+def parse_symptoms_duration(series, date_series=None):
+    """Convert months since complaints/symtpoms to numeric value in months.
+
+    Handles: "3 Monate", "2 Jahre", "6-12 Mo.", "1,5 J.", "1/2 J.",
+    ranges → midpoint, German decimals, fractions, ~approx, >greater-than.
+    Date entries (2023-04-01, ~02/2022, Okt/Nov 2022) → months from measurement date.
+    Vague entries (Jahre, mehrere, täglich) → NaN.
+    Standalone numbers without unit → assumed months.
+    """
+    month_map = {
+        'jan': 1, 'feb': 2, 'mär': 3, 'mar': 3, 'apr': 4, 'mai': 5,
+        'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'oct': 10,
+        'nov': 11, 'dez': 12, 'dec': 12,
+    }
+
+    def parse_entry(val, meas_date):
+        if pd.isna(val):
+            return pd.NA
+        s = str(val).strip()
+
+        if s.lower() in ('einige jahre', 'einige j.', 'einge j.'):
+            return 12.0
+        if s.lower() in ('jahre', 'jahre ', 'mehrere', 'mehrere jahre',
+                         'mehrere monate', 'mehreren mo.', 'täglich'):
+            return pd.NA
+
+        date_match = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+        if date_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(
+                    f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        de_date_match = re.match(r'^~?(\d{1,2})\.(\d{1,2})\.(\d{4})$', s.strip())
+        if de_date_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(
+                    f"{de_date_match.group(3)}-{int(de_date_match.group(2)):02d}"
+                    f"-{int(de_date_match.group(1)):02d}"
+                )
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        my_match = re.match(r'^~?(\d{2})/(\d{4})$', s)
+        if my_match:
+            if pd.notna(meas_date):
+                symptom_date = pd.Timestamp(f"{my_match.group(2)}-{my_match.group(1)}-01")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        mon_match = re.match(r'^(\w{3})\w*(?:/\w+)?\s+(\d{4})', s, re.IGNORECASE)
+        if mon_match:
+            paren_match = re.search(r'\((\d+)\s*Mo', s)
+            if paren_match:
+                return float(paren_match.group(1))
+            mon_key = mon_match.group(1).lower()
+            year = int(mon_match.group(2))
+            if mon_key in month_map and pd.notna(meas_date):
+                symptom_date = pd.Timestamp(f"{year}-{month_map[mon_key]:02d}-01")
+                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
+            return pd.NA
+
+        s_clean = re.sub(r'\(\?\)', '', s)
+        s_clean = re.sub(r'\([^)]*\)', '', s_clean).strip()
+        s_clean = re.sub(r'^[~><]\s*', '', s_clean)
+        s_clean = re.sub(r'^akut\s+', '', s_clean, flags=re.IGNORECASE)
+
+        is_years = bool(re.search(r'(Jahr\w*|J\.?\b)', s_clean, re.IGNORECASE))
+
+        frac_match = re.match(r'(\d+)/(\d+)', s_clean)
+        if frac_match:
+            number = float(frac_match.group(1)) / float(frac_match.group(2))
+            return number * 12 if is_years else number
+
+        range_match = re.search(r'(\d+[,.]?\d*)\s*-\s*(\d+[,.]?\d*)', s_clean)
+        if range_match:
+            start = float(range_match.group(1).replace(',', '.'))
+            end = float(range_match.group(2).replace(',', '.'))
+            number = (start + end) / 2
+            return number * 12 if is_years else number
+
+        num_match = re.search(r'(\d+[,.]?\d*)', s_clean)
+        if num_match:
+            number = float(num_match.group(1).replace(',', '.'))
+            return number * 12 if is_years else number
+
+        return pd.NA
+
+    if date_series is not None:
+        return pd.Series(
+            [parse_entry(v, d) for v, d in zip(series, date_series)],
+            index=series.index,
+        )
+    return series.apply(lambda v: parse_entry(v, None))

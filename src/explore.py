@@ -9,6 +9,7 @@ from missing_methods import pca as mm_pca, rv2 as mm_rv2
 from missing_methods.sk import StandardScaler as MM_StandardScaler
 from adjustText import adjust_text as _adj
 from itertools import combinations as _combns
+from scipy import stats
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -148,7 +149,7 @@ def plot_clinical_distributions(df_cl_vis):
     """
     print('Clinical dataset - Distribution Plots')
 
-    cl_t1  = df_cl_vis[df_cl_vis['Timepoint'] == 1].copy()
+    cl_t1  = df_cl_vis[df_cl_vis['Timepoint'] == 1].drop_duplicates('Patient').copy()
     mako3  = sns.color_palette('mako', 3)
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
@@ -212,6 +213,184 @@ def plot_clinical_distributions(df_cl_vis):
 
     plt.tight_layout()
     plt.show()
+
+
+
+def t_test_pain_reduction(df_cl_vis):
+    """
+    One-sample t-test for wether the mean pain_scale reduction is significantly
+    greater than zero for each baseline-vs-followup timepoint pair 
+    H1: reduction > 0, using significance level at 0.05
+
+    """
+    followups = sorted(df_cl_vis['Timepoint'].dropna().unique().astype(int))
+    followups = [t for t in followups if t > 1]
+    pairs     = [(1, t) for t in followups]
+
+    records = []
+    for t_a, t_b in pairs:
+        t1 = (df_cl_vis[df_cl_vis['Timepoint'] == t_a][['Patient', 'pain_scale']]
+              .drop_duplicates('Patient').dropna()
+              .rename(columns={'pain_scale': 'pain_t1'}))
+        
+        t2 = (df_cl_vis[df_cl_vis['Timepoint'] == t_b][['Patient', 'pain_scale']]
+              .drop_duplicates('Patient').dropna()
+              .rename(columns={'pain_scale': f'pain_t{t_b}'}))
+
+        df_r        = t1.merge(t2, on='Patient')
+        df_r['red'] = df_r['pain_t1'] - df_r[f'pain_t{t_b}']
+        vals        = df_r['red'].dropna()
+
+        t_stat, p_two = stats.ttest_1samp(vals, popmean=0)
+        p_one         = p_two / 2
+
+        records.append({
+            'Comparison': f'T1 -> T{t_b}',
+            'n'         : len(vals),
+            'Mean'      : round(vals.mean(), 3),
+            'std'       : round(vals.std(), 3),
+            't'         : round(t_stat, 3),
+            'p-value'   : f'{p_one:.2e}',
+        })
+
+    result_df = pd.DataFrame(records)
+
+    cols   = result_df.columns.tolist()
+    widths = {'Comparison': 13, 'n': 6, 'Mean': 8, 'std': 7, 't': 8, 'p-value': 10}
+    header = '  '.join(f'{c:>{widths[c]}}' for c in cols)
+
+    print("\nOne-sample t-test: pain_scale reduction vs 0  (H1: reduction > 0)\n")
+    print(header)
+    print('_' * 66)
+    for _, row in result_df.iterrows():
+        print('  '.join(f'{str(row[c]):>{widths[c]}}' for c in cols))
+
+    return result_df
+
+
+def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 6)):
+    """
+    Boxplot of pain reduction by diagnosis, computed from df_cl_vis. 
+
+    Matches patients present at both timepoints, computes reduction as
+    col(t_a) - col(t_b), filters to diagnosis groups with enough patients,
+    then runs one-way ANOVA and eventually Tukey HSD post-hoc for significant tests
+
+    Parameters
+    ----------
+    df_cl_vis  : pd.DataFrame  cleaned clinical dataset
+    col        : str           column to compute reduction from, e.g. 'pain_scale'
+    timepoints : list[int]     [t_a, t_b], reduction = col_ta - col_tb
+    min_n      : int           minimum patients per diagnosis group (default 10)
+    figsize    : tuple
+    """
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    from statannotations.Annotator import Annotator
+    from itertools import combinations
+
+    t_a, t_b     = timepoints[0], timepoints[1]
+    target_col   = f'{col}_reduction'
+    tp_label     = f'T{t_a}-T{t_b}'
+
+    # 1 — Extract col + diagnosis at t_a; col at t_b; match on Patient
+    ta = (df_cl_vis[df_cl_vis['Timepoint'] == t_a][['Patient', 'diagnosis', col]]
+          .drop_duplicates('Patient').dropna(subset=[col]))
+    tb = (df_cl_vis[df_cl_vis['Timepoint'] == t_b][['Patient', col]]
+          .drop_duplicates('Patient').dropna(subset=[col]))
+
+    merged = ta.merge(tb, on='Patient', suffixes=(f'_t{t_a}', f'_t{t_b}'))
+    merged[target_col] = merged[f'{col}_t{t_a}'] - merged[f'{col}_t{t_b}']
+    merged = merged.dropna(subset=[target_col, 'diagnosis'])
+    merged['diagnosis'] = merged['diagnosis'].astype(str)
+
+    print(f"\nPatients with {col} at both T{t_a} and T{t_b}: {len(merged)}")
+
+    # 2 — Filter to diagnosis groups with enough patients
+    counts   = merged['diagnosis'].value_counts()
+    valid_dx = counts[counts >= min_n].index.tolist()
+    plot_df  = merged[merged['diagnosis'].isin(valid_dx)].copy()
+
+    print(f"Diagnosis-groups with n ≥ {min_n}: {valid_dx}")
+
+    # Sort by median descending
+    order = (plot_df.groupby('diagnosis')[target_col]
+                    .median()
+                    .sort_values(ascending=False)
+                    .index.tolist())
+
+    # 3 — One-way ANOVA (exclude groups with zero variance this causes F=nan)
+    groups          = [plot_df.loc[plot_df['diagnosis'] == dx, target_col].values
+                       for dx in order]
+    groups          = [g for g in groups if g.std() > 0]
+    f_stat, p_anova = stats.f_oneway(*groups)
+
+    # Print summary table
+    widths = {'Diagnosis': 28, 'n': 5, 'Mean': 8, 'std': 7, 'F': 7, 'p-value': 10}
+    header = '  '.join(f'{c:>{widths[c]}}' for c in widths)
+
+    print(f"\nOne-way ANOVA — {col} reduction by diagnosis ({tp_label})\n")
+    print(header)
+    print('_' * 84)
+    for dx in order:
+        vals = plot_df.loc[plot_df['diagnosis'] == dx, target_col].dropna()
+        print(f"  {dx:<26}  {len(vals):>{widths['n']}}  {vals.mean():>{widths['Mean']}.3f}  "
+              f"{vals.std():>{widths['std']}.3f}  {f_stat:>{widths['F']}.3f}  "
+              f"{p_anova:>{widths['p-value']}.2e}")
+
+    # 4 — Tukey HSD post-hoc
+    tukey    = pairwise_tukeyhsd(plot_df[target_col], plot_df['diagnosis'])
+    tukey_df = pd.DataFrame(
+        data    = tukey._results_table.data[1:],
+        columns = tukey._results_table.data[0],
+    )
+    pval_map = {}
+    for _, row in tukey_df.iterrows():
+        pval_map[(row['group1'], row['group2'])] = row['p-adj']
+        pval_map[(row['group2'], row['group1'])] = row['p-adj']
+
+    all_pairs = list(combinations(order, 2))
+    sig_pairs = [(a, b) for a, b in all_pairs if pval_map.get((a, b), 1.0) < 0.05]
+    sig_pvals = [pval_map[(a, b)] for a, b in sig_pairs]
+
+    # 5 — Plot
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.boxplot(
+        data=plot_df, x='diagnosis', y=target_col,
+        order=order, palette='mako', width=0.5,
+        flierprops=dict(marker='o', markersize=4, alpha=0.5), ax=ax,
+    )
+    sns.stripplot(
+        data=plot_df, x='diagnosis', y=target_col,
+        order=order, color='black', alpha=0.3, size=3, jitter=True, ax=ax,
+    )
+
+    # 6 — Annotate only significant Tukey pairs 
+    if sig_pairs:
+        annotator = Annotator(ax, sig_pairs, data=plot_df,
+                              x='diagnosis', y=target_col, order=order)
+        annotator.configure(text_format='star', loc='inside', verbose=False)
+        annotator.set_pvalues_and_annotate(sig_pvals)
+
+    # 7 — Labels
+    anova_str = f"ANOVA F={f_stat:.2f}, p={p_anova:.3f}"
+    ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
+    ax.set_xlabel('Diagnosis', fontsize=12)
+    ax.set_ylabel(f'{col} reduction ({tp_label})', fontsize=12)
+    ax.set_title(f'{col} Reduction by Diagnosis — {tp_label}\n'
+                 f'(n ≥ {min_n} per group; {anova_str}; Tukey HSD brackets = p<0.05)',
+                 fontsize=12)
+    ax.tick_params(axis='x', rotation=35)
+
+    for i, dx in enumerate(order):
+        n = counts[dx]
+        ax.text(i, ax.get_ylim()[0] - 0.15, f'n={n}',
+                ha='center', va='top', fontsize=8, color='gray')
+
+    plt.tight_layout()
+    plt.show()
+
+    return fig
+
 
 
 # ── Pearson correlation ───────────────────────────────────────────────────────
@@ -282,6 +461,74 @@ def pearson_correlation(df, ex_cols, name, n_top=40):
     return pearson_matrix, pearson_pairs
 
 
+def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
+    """Pearson correlation between each immunological feature and pain_scale.
+
+    Merges df_im_vis with pain_scale from df_cl_vis on (Patient, Timepoint),
+    keeping only rows present in both datasets.
+
+    Parameters
+    ----------
+    df_cl_vis  : pd.DataFrame   clinical dataset (must contain Patient, Timepoint, pain_scale)
+    df_im_vis  : pd.DataFrame   immunological dataset
+    ex_cols_im : list[str]      non-feature columns in df_im_vis (e.g. ['Patient','Timepoint','Date'])
+    n_top      : int            number of top/bottom correlations to print and plot 
+
+    Returns
+    -------
+    results : pd.DataFrame  columns: Feature, 
+    """
+    print("\nPearson Correlations - Immunological Features × pain_scale")
+
+    pain   = df_cl_vis[['Patient', 'Timepoint', 'pain_scale']].dropna(subset=['pain_scale'])
+    merged = df_im_vis.merge(pain, on=['Patient', 'Timepoint'], how='inner')
+    print(f"({merged['Patient'].nunique()} unique patients)")
+
+    feat_cols = [c for c in df_im_vis.columns if c not in ex_cols_im]
+
+    records = []
+    for col in feat_cols:
+        sub = merged[['pain_scale', col]].dropna()
+        if len(sub) < 5:
+            continue
+        r = stats.pearsonr(sub[col], sub['pain_scale']).statistic
+        records.append({'Feature': col, 'r': r})
+
+    results = (pd.DataFrame(records)
+               .sort_values('r', ascending=False)
+               .reset_index(drop=True))
+
+    top_pos = results.head(n_top)
+    top_neg = results.tail(n_top).sort_values('r')
+
+    def _print_table(df, label):
+        print(f"\n{label}:")
+        print(f"  {'Feature':<35}  {'r':>7}")
+        print("  " + "-" * 45)
+        for _, row in df.iterrows():
+            print(f"  {row['Feature']:<35}  {row['r']:>7.3f}")
+
+    _print_table(top_pos, f"Top {n_top} Most Positive Correlations with pain_scale")
+    _print_table(top_neg, f"Top {n_top} Most Negative Correlations with pain_scale")
+
+    def _bar_plot(df, title, color):
+        fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
+        ax.barh(df['Feature'][::-1], df['r'][::-1], color=color)
+        ax.set_xlabel('Pearson r')
+        ax.set_title(title)
+        plt.tight_layout()
+        plt.show()
+
+    _bar_plot(top_pos,
+              f'Top {n_top} Positive Correlations Immunological Features × pain_scale',
+              '#d62728')
+    _bar_plot(top_neg,
+              f'Top {n_top} Negative Correlations — Immunological Features × pain_scale',
+              '#1f77b4')
+
+    return results
+
+
 # ── Phik correlation ──────────────────────────────────────────────────────────
 
 def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
@@ -305,8 +552,9 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     feat_cols = [c for c in df.columns if c not in ex_cols]
     df_phik   = df[feat_cols].copy()
 
-    # phik requires category columns to be string-typed:
-    for c in df_phik.select_dtypes('category').columns:
+    # phik requires categorical columns to be string-typed (not category dtype);
+    # also ensure no literal 'nan' strings slip through as valid categories:
+    for c in df_phik.select_dtypes(['category', 'object']).columns:
         df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
 
     interval_cols = [c for c in num_cols if c in feat_cols]
@@ -321,19 +569,16 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
         .sort_values('phik', ascending=False)
         .reset_index(drop=True)
     )
-    print(f"\nTop {n_top} Most Positively Correlated Feature Pairs (phik):")
+    nonzero_pairs = phik_pairs[phik_pairs['phik'] > 0].reset_index(drop=True)
+    zero_pairs    = phik_pairs[phik_pairs['phik'] == 0].reset_index(drop=True)
+
+    print(f"\nTop {n_top} Most Strongly Associated Feature Pairs (phik):")
     print("=" * 80)
-    print(phik_pairs.head(n_top).to_string(index=False))
-    
-    print(f"\nThe {n_top} Least Correlated Feature Pairs (phik):")
+    print(nonzero_pairs.head(n_top).to_string(index=False))
+
+    print(f"\nTop {n_top} Weakest Computable Associations (phik > 0, sorted ascending):")
     print("=" * 80)
-    print(upper.stack()
-          .reset_index()
-          .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'phik'})
-          .sort_values('phik', ascending=True)
-          .head(n_top)
-          .reset_index(drop=True)
-          .to_string(index=False))
+    print(nonzero_pairs.tail(n_top).sort_values('phik').reset_index(drop=True).to_string(index=False))
 
 
     # Full heatmap
@@ -353,6 +598,69 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     plt.show()
 
     return phik_matrix, phik_pairs
+
+
+def phik_correlation_pain(df, target, ex_cols, name, num_cols):
+    """PhiK correlation between every feature and a single target column.
+
+    Computes the full phik_matrix and extracts the target column, so all
+    pairwise statistics (including significance) are consistent with the
+    matrix computation. PhiK is [0,1] with no direction.
+
+    Parameters
+    ----------
+    df       : pd.DataFrame  dataframe (must contain target column)
+    target   : str           name of the target column (e.g. 'pain_scale')
+    ex_cols  : list[str]     columns to exclude (target must NOT be in ex_cols)
+    name     : str           label used in titles
+    num_cols : list[str]     numeric/interval columns for phik
+
+    Returns
+    -------
+    result : pd.DataFrame  columns: Feature, phik  (sorted descending, target excluded)
+    """
+    print(f"\nPhiK — Features × {target} ({name} Dataset)")
+
+    feat_cols = [c for c in df.columns if c not in ex_cols]
+    if target not in feat_cols:
+        raise ValueError(f"'{target}' not in feat_cols — remove it from ex_cols")
+
+    df_phik = df[feat_cols].copy()
+    for c in df_phik.select_dtypes(['category', 'object']).columns:
+        df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
+
+    interval_cols = [c for c in num_cols if c in feat_cols]
+    phik_matrix   = df_phik.phik_matrix(interval_cols=interval_cols)
+
+    result = (phik_matrix[[target]]
+              .drop(index=target)
+              .rename(columns={target: 'phik'})
+              .reset_index()
+              .rename(columns={'index': 'Feature'})
+              .sort_values('phik', ascending=False)
+              .reset_index(drop=True))
+
+    nonzero = result[result['phik'] > 0].reset_index(drop=True)
+    zero_n  = (result['phik'] == 0).sum()
+
+    print(f"  Features: {len(result)}  |  computable (phik > 0): {len(nonzero)}  "
+          f"|  skipped (phik = 0): {zero_n}")
+
+    print(f"\nAll features × '{target}' (phik, sorted descending):")
+    print(f"  {'Feature':<35}  {'phik':>6}")
+    print("  " + "-" * 45)
+    for _, row in nonzero.iterrows():
+        print(f"  {row['Feature']:<35}  {row['phik']:>6.3f}")
+
+    fig, ax = plt.subplots(figsize=(9, 0.45 * len(nonzero) + 1.5))
+    ax.barh(nonzero['Feature'][::-1], nonzero['phik'][::-1], color='#2ca02c')
+    ax.set_xlabel('PhiK')
+    ax.set_xlim(0, 1)
+    ax.set_title(f'All Features × {target} ({name} Dataset, PhiK)')
+    plt.tight_layout()
+    plt.show()
+
+    return result
 
 
 # ── RV2 matrix ────────────────────────────────────────────────────────────────
@@ -740,7 +1048,7 @@ def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random
     return no_od_df, outlier_candidates
 
 
-# ── Trajectory PCA — immunological specific ───────────────────────────────────
+# ── Trajectory PCA — immunological  ───────────────────────────────────
 
 def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
     """Trajectory PCA, stacking two timepoints together and drawing arrows for patient trajectories..
@@ -961,3 +1269,6 @@ def mfa_im(df, timepoints, ex_cols, ncomp=5):
         for k in top10l:
             print(f"  {feat_names[k]:>45}  {loadings[k, pc_i]:>10.4f}")
 
+
+
+# ── Immunological features × pain_scale (Pearson) ────────────────────────────

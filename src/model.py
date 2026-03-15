@@ -223,6 +223,111 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
 
 
+def plot_diagnosis_reduction(df_model, target_col='pain_reduction', min_n=10, figsize=(14, 6)):
+    """
+    Boxplot of pain reduction by diagnosis group using the combined model dataset.
+
+    The model dataset is already one row per patient so no aggregation is needed.
+    Runs one-way ANOVA; if significant, applies Tukey HSD post-hoc and annotates
+    significant pairwise brackets.
+
+    Parameters
+    ----------
+    df_model   : pd.DataFrame  combined model dataset (output of create_model_datasets)
+                               must contain 'diagnosis' and target_col
+    target_col : str           target column to plot (e.g. 'pain_reduction')
+                               do NOT pass the _pct variant
+    min_n      : int           minimum patients per diagnosis group to include
+    figsize    : tuple
+    """
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    from statannotations.Annotator import Annotator
+    from itertools import combinations
+
+    plot_df = df_model[['diagnosis', target_col]].dropna().copy()
+
+    # 1 — Keep only diagnoses with enough patients
+    counts   = plot_df['diagnosis'].value_counts()
+    valid_dx = counts[counts >= min_n].index.tolist()
+    plot_df  = plot_df[plot_df['diagnosis'].isin(valid_dx)].copy()
+
+    print(f"\nDiagnosis groups with n ≥ {min_n}: {valid_dx}")
+
+    # Sort by median descending
+    order = (plot_df.groupby('diagnosis')[target_col]
+                    .median()
+                    .sort_values(ascending=False)
+                    .index.tolist())
+
+    # 2 — One-way ANOVA
+    groups          = [plot_df.loc[plot_df['diagnosis'] == dx, target_col].values
+                       for dx in order]
+    f_stat, p_anova = stats.f_oneway(*groups)
+    print(f"\nOne-way ANOVA — {target_col} by diagnosis")
+    print(f"  F = {f_stat:.3f},  p = {p_anova:.4f}  "
+          f"({'significant' if p_anova < 0.05 else 'not significant'})")
+
+    # 3 — Tukey HSD post-hoc
+    tukey    = pairwise_tukeyhsd(plot_df[target_col], plot_df['diagnosis'])
+    tukey_df = pd.DataFrame(
+        data    = tukey._results_table.data[1:],
+        columns = tukey._results_table.data[0],
+    )
+    pval_map = {}
+    for _, row in tukey_df.iterrows():
+        pval_map[(row['group1'], row['group2'])] = row['p-adj']
+        pval_map[(row['group2'], row['group1'])] = row['p-adj']
+
+    all_pairs = list(combinations(order, 2))
+    sig_pairs = [(a, b) for a, b in all_pairs if pval_map.get((a, b), 1.0) < 0.05]
+    sig_pvals = [pval_map[(a, b)] for a, b in sig_pairs]
+
+    # 4 — Plot
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.boxplot(
+        data=plot_df,
+        x='diagnosis', y=target_col,
+        order=order,
+        palette='mako',
+        width=0.5,
+        flierprops=dict(marker='o', markersize=4, alpha=0.5),
+        ax=ax,
+    )
+    sns.stripplot(
+        data=plot_df,
+        x='diagnosis', y=target_col,
+        order=order,
+        color='black', alpha=0.3, size=3, jitter=True,
+        ax=ax,
+    )
+
+    # 5 — Annotate only significant Tukey pairs
+    if sig_pairs:
+        annotator = Annotator(ax, sig_pairs, data=plot_df,
+                              x='diagnosis', y=target_col, order=order)
+        annotator.configure(text_format='star', loc='inside', verbose=False)
+        annotator.set_pvalues_and_annotate(sig_pvals)
+
+    # 6 — Labels
+    anova_str = f"ANOVA F={f_stat:.2f}, p={p_anova:.3f}"
+    ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
+    ax.set_xlabel('Diagnosis', fontsize=12)
+    ax.set_ylabel(target_col.replace('_', ' ').title(), fontsize=12)
+    ax.set_title(f'{target_col.replace("_", " ").title()} by Diagnosis\n'
+                 f'(n ≥ {min_n} per group; {anova_str}; Tukey HSD brackets = p<0.05)',
+                 fontsize=12)
+    ax.tick_params(axis='x', rotation=35)
+
+    for i, dx in enumerate(order):
+        n = counts[dx]
+        ax.text(i, ax.get_ylim()[0] - 0.15, f'n={n}',
+                ha='center', va='top', fontsize=8, color='gray')
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
 # BASELINE CATBOOST MODEL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -245,6 +350,90 @@ def regression_metrics(y_true, y_pred):
     r2   = r2_score(y_true, y_pred)
     return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
 
+
+
+def feature_target_correlation(df_model, target_cols, num_cols, ex_cols=None, n_top=20):
+    """Pearson (numeric) + PhiK (categorical) correlation between features and each target.
+
+    Parameters
+    ----------
+    df_model    : pd.DataFrame   model dataset (one row per patient)
+    target_cols : list[str]      target columns to correlate against
+    num_cols    : list[str]      numeric/interval columns for phik interval_cols
+    ex_cols     : list[str]      extra columns to exclude from features
+    n_top       : int            top positive + top negative to show for Pearson (default 20)
+    """
+    import phik as _phik
+
+    always_exclude = set(list(target_cols) + ['Patient', 'Timepoint'] + (ex_cols or []))
+
+    num_feat_cols = [c for c in df_model.select_dtypes(include='number').columns
+                     if c not in always_exclude]
+    cat_feat_cols = [c for c in df_model.select_dtypes(include=['category', 'object']).columns
+                     if c not in always_exclude]
+
+    print(f"\nFeature–target correlations  (Pearson: {len(num_feat_cols)} numeric | "
+          f"PhiK: {len(cat_feat_cols)} categorical)\n")
+
+    for target in target_cols:
+        print(f"{'='*60}")
+        print(f"  Target: {target}")
+        print(f"{'='*60}")
+
+        # ── Pearson (numeric) ─────────────────────────────────────
+        sub = df_model[[target] + num_feat_cols].dropna(subset=[target])
+        pearson_records = []
+        for col in num_feat_cols:
+            vals = sub[[target, col]].dropna()
+            if len(vals) < 5:
+                continue
+            r = stats.pearsonr(vals[col], vals[target]).statistic
+            pearson_records.append({'Feature': col, 'r': r})
+
+        pearson_df = (pd.DataFrame(pearson_records)
+                      .sort_values('r', ascending=False)
+                      .reset_index(drop=True))
+
+        top_pos = pearson_df.head(n_top)
+        top_neg = pearson_df.tail(n_top).sort_values('r')
+
+        print(f"\n  Pearson — top {n_top} positive:")
+        print(f"  {'Feature':<40}  {'r':>7}")
+        print("  " + "-" * 50)
+        for _, row in top_pos.iterrows():
+            print(f"  {row['Feature']:<40}  {row['r']:>7.3f}")
+
+        print(f"\n  Pearson — top {n_top} negative:")
+        print(f"  {'Feature':<40}  {'r':>7}")
+        print("  " + "-" * 50)
+        for _, row in top_neg.iterrows():
+            print(f"  {row['Feature']:<40}  {row['r']:>7.3f}")
+
+        # ── PhiK (categorical) ────────────────────────────────────
+        if cat_feat_cols:
+            df_phik = df_model[[target] + cat_feat_cols].copy()
+            for c in df_phik.select_dtypes(['category', 'object']).columns:
+                df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
+
+            interval_cols = [c for c in num_cols if c == target]
+            phik_matrix   = df_phik.phik_matrix(interval_cols=interval_cols)
+
+            phik_df = (phik_matrix[[target]]
+                       .drop(index=target, errors='ignore')
+                       .rename(columns={target: 'phik'})
+                       .reset_index()
+                       .rename(columns={'index': 'Feature'})
+                       .sort_values('phik', ascending=False)
+                       .reset_index(drop=True))
+            phik_df = phik_df[phik_df['phik'] > 0]
+
+            print(f"\n  PhiK — categorical features (all, sorted descending):")
+            print(f"  {'Feature':<40}  {'phik':>6}")
+            print("  " + "-" * 50)
+            for _, row in phik_df.iterrows():
+                print(f"  {row['Feature']:<40}  {row['phik']:>6.3f}")
+
+        print()
 
 
 def run_catboost_regressor(df_model, target_col, name,

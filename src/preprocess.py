@@ -335,7 +335,7 @@ CL_PATIENT_LEVEL_COLS = [
 ]
 
 # Patients irradiated at multiple different body parts — excluded from analysis 
-CL_MULTI_BODY_PATIENTS = [3, 45, 184, 162, 179, 156, 54, 47]
+CL_MULTI_BODY_PATIENTS = [3, 45, 184, 149, 150, 162, 179, 156, 54, 47]
 
 # German to English column rename map
 CL_RENAME_MAP = {
@@ -379,22 +379,30 @@ def extract_numeric(series):
     """Extract numeric value from ordinal questionnaire entries (scale 1–4).
 
     Handles:
-      - comma-separated multi-select  "1,2"               -> average
-      - range                          "2-3"               -> midpoint
-      - number with parenthetical text "3 (tag), 4 (nacht)" -> average of all numbers
-      - leading number with text       "3 left side"       -> 3
+      - k.A./kA/ka                                        → NaN
+      - decimal-encoded pair     "2.3"                    → average(2, 3) = 2.5
+      - comma-separated ratings  "1,2" or "3, 4"         → average
+      - parenthetical notes stripped first:
+            "3 (abends 4)"  → "3"  → 3      (note inside parens, not a rating)
+            "3 (tag), 4 (nacht)" → "3, 4"  → 3.5  (two ratings with context)
+      - leading number with trailing text  "4 re"         → 4
     """
     s = series.astype(str).str.strip()
 
     def parse_entry(val):
-        if val in ('nan', '', 'None'):
+        if val in ('nan', '', 'None', 'k.A.', 'kA', 'ka', 'k.a.'):
             return np.nan
-        if re.match(r'^\d+(\s*,\s*\d+)+$', val):
-            return np.mean([float(x) for x in val.split(',')])
-        m = re.match(r'^(\d+)\s*[-–]\s*(\d+)', val)
-        if m:
-            return (float(m.group(1)) + float(m.group(2))) / 2
-        all_nums = re.findall(r'\b(\d+)\b', val)
+
+        # Strip parenthetical content so descriptive notes don't contribute numbers
+        # e.g. "3 (abends 4)" → "3",  "3 (tag), 4 (nacht)" → "3, 4"
+        val_clean = re.sub(r'\([^)]*\)', '', val).strip()
+
+        # Comma-separated ratings: "1,2" or "3, 4" → average
+        if re.match(r'^\d+(\s*,\s*\d+)+$', val_clean):
+            return np.mean([float(x) for x in val_clean.split(',')])
+
+        # All remaining numbers (handles "2.3" → [2,3] → 2.5, "4 re" → [4] → 4)
+        all_nums = re.findall(r'\b(\d+)\b', val_clean)
         if len(all_nums) > 1:
             return np.mean([float(x) for x in all_nums])
         if len(all_nums) == 1:
@@ -406,23 +414,62 @@ def extract_numeric(series):
 
 def extract_continuous(series):
     """Extract numeric value from continuous scale entries (pain_scale from 0–10).
-    Handles commas, ranges, trailing text, and spesific multiple value entries.
+
+    Priority order:
+      1. MW=  (Mittelwert, pre-calculated midpoint)     -> use directly
+      2. semicolon-separated  ('1,2; 8,6')              -> take first value
+      3. bilateral li/re pair ('5 (li), 8 (re)')        -> average both sides
+      4. range + parenthesised value ('4-7 (6)')        -> use parenthesised value
+      5. pure range ('5,5-7,5', '3-9')                  -> take midpoint
+      6. leading number with trailing text              -> use leading number
     """
     s = series.astype(str).str.strip()
 
     def parse_entry(val):
-        if val in ('nan', '', 'None'):
+        if val in ('nan', '', 'None', '?', 'k.A.', 'kA', 'ka', 'k.a.'):
             return np.nan
-        m_ruhe = re.search(r'(\d+[.,]?\d*)\s*(?:aus\s+der\s+)?[Rr]uhe', val)
-        if m_ruhe:
-            return float(m_ruhe.group(1).replace(',', '.'))
+
+        # Correcting confirmed typo (dash used instead of a decimal point)
+        if val == '3-9':
+            return 3.9
+
+        # 1 — MW= (pre-calculated midpoint already in the entry)
+        mw = re.search(r'MW\s*=\s*(\d+[.,]\d+|\d+)', val, re.IGNORECASE)
+        if mw:
+            return float(mw.group(1).replace(',', '.'))
+
+        # 2 — semicolon-separated: take the first value  ('1,2; 8,6' → 1.2)
+        if ';' in val:
+            first = val.split(';')[0].strip()
+            m = re.match(r'^(\d+[.,]?\d*)', first)
+            if m:
+                return float(m.group(1).replace(',', '.'))
+
+        # 3 — bilateral li/re: average both sides  ('5 (li), 8 (re)' → 6.5)
+        #     \b after li/re ensures 'linke' / 'rechte' are not accidentally matched
+        lr_nums = re.findall(r'(\d+[.,]?\d*)\s*\(?(?:li|re)\b', val, re.IGNORECASE)
+        if lr_nums:
+            nums = [float(n.replace(',', '.')) for n in lr_nums]
+            return sum(nums) / len(nums)
+
+        # 4 — range with parenthesised representative: '4-7 (6)' → 6
+        m = re.match(r'^\d+[.,]?\d*\s*[-–]\s*\d+[.,]?\d*\s*\((\d+[.,]?\d*)\)', val)
+        if m:
+            return float(m.group(1).replace(',', '.'))
+
+        # 5 — pure range: '5,5-7,5', '3-9' → midpoint
         m = re.match(r'^(\d+[.,]?\d*)\s*[-–]\s*(\d+[.,]?\d*)\s*$', val)
         if m:
             return (float(m.group(1).replace(',', '.')) +
                     float(m.group(2).replace(',', '.'))) / 2
+
+        # 6 — leading number with any trailing text
+        #     covers: '6 (long description...)', '8 (m. Schmerzmittel 4)',
+        #             '7,3-dauernd bei Belastung, 10 aus der Ruhe', '1,6', etc.
         m = re.match(r'^(\d+[.,]?\d*)', val)
         if m:
             return float(m.group(1).replace(',', '.'))
+
         return np.nan
 
     return s.apply(parse_entry)
@@ -446,103 +493,6 @@ def split_bmi_column(df, col_name='overweight_bmi'):
     df.insert(col_idx, 'overweight', overweight)
     df.insert(col_idx + 1, 'bmi', bmi)
     return df
-
-
-def parse_symptoms_duration(series, date_series=None):
-    """Convert months since complaints/symtpoms to numeric value in months.
-
-    Handles: "3 Monate", "2 Jahre", "6-12 Mo.", "1,5 J.", "1/2 J.",
-    ranges → midpoint, German decimals, fractions, ~approx, >greater-than.
-    Date entries (2023-04-01, ~02/2022, Okt/Nov 2022) → months from measurement date.
-    Vague entries (Jahre, mehrere, täglich) → NaN.
-    Standalone numbers without unit → assumed months.
-    """
-    month_map = {
-        'jan': 1, 'feb': 2, 'mär': 3, 'mar': 3, 'apr': 4, 'mai': 5,
-        'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'oct': 10,
-        'nov': 11, 'dez': 12, 'dec': 12,
-    }
-
-    def parse_entry(val, meas_date):
-        if pd.isna(val):
-            return pd.NA
-        s = str(val).strip()
-
-        if s.lower() in ('einige jahre', 'einige j.', 'einge j.'):
-            return 12.0
-        if s.lower() in ('jahre', 'jahre ', 'mehrere', 'mehrere jahre',
-                         'mehrere monate', 'mehreren mo.', 'täglich'):
-            return pd.NA
-
-        date_match = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
-        if date_match:
-            if pd.notna(meas_date):
-                symptom_date = pd.Timestamp(
-                    f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}")
-                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
-            return pd.NA
-
-        de_date_match = re.match(r'^~?(\d{1,2})\.(\d{1,2})\.(\d{4})$', s.strip())
-        if de_date_match:
-            if pd.notna(meas_date):
-                symptom_date = pd.Timestamp(
-                    f"{de_date_match.group(3)}-{int(de_date_match.group(2)):02d}"
-                    f"-{int(de_date_match.group(1)):02d}"
-                )
-                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
-            return pd.NA
-
-        my_match = re.match(r'^~?(\d{2})/(\d{4})$', s)
-        if my_match:
-            if pd.notna(meas_date):
-                symptom_date = pd.Timestamp(f"{my_match.group(2)}-{my_match.group(1)}-01")
-                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
-            return pd.NA
-
-        mon_match = re.match(r'^(\w{3})\w*(?:/\w+)?\s+(\d{4})', s, re.IGNORECASE)
-        if mon_match:
-            paren_match = re.search(r'\((\d+)\s*Mo', s)
-            if paren_match:
-                return float(paren_match.group(1))
-            mon_key = mon_match.group(1).lower()
-            year = int(mon_match.group(2))
-            if mon_key in month_map and pd.notna(meas_date):
-                symptom_date = pd.Timestamp(f"{year}-{month_map[mon_key]:02d}-01")
-                return max(0, (pd.Timestamp(meas_date) - symptom_date).days / 30.44)
-            return pd.NA
-
-        s_clean = re.sub(r'\(\?\)', '', s)
-        s_clean = re.sub(r'\([^)]*\)', '', s_clean).strip()
-        s_clean = re.sub(r'^[~><]\s*', '', s_clean)
-        s_clean = re.sub(r'^akut\s+', '', s_clean, flags=re.IGNORECASE)
-
-        is_years = bool(re.search(r'(Jahr\w*|J\.?\b)', s_clean, re.IGNORECASE))
-
-        frac_match = re.match(r'(\d+)/(\d+)', s_clean)
-        if frac_match:
-            number = float(frac_match.group(1)) / float(frac_match.group(2))
-            return number * 12 if is_years else number
-
-        range_match = re.search(r'(\d+[,.]?\d*)\s*-\s*(\d+[,.]?\d*)', s_clean)
-        if range_match:
-            start = float(range_match.group(1).replace(',', '.'))
-            end = float(range_match.group(2).replace(',', '.'))
-            number = (start + end) / 2
-            return number * 12 if is_years else number
-
-        num_match = re.search(r'(\d+[,.]?\d*)', s_clean)
-        if num_match:
-            number = float(num_match.group(1).replace(',', '.'))
-            return number * 12 if is_years else number
-
-        return pd.NA
-
-    if date_series is not None:
-        return pd.Series(
-            [parse_entry(v, d) for v, d in zip(series, date_series)],
-            index=series.index,
-        )
-    return series.apply(lambda v: parse_entry(v, None))
 
 
 def standardize_target_volume(series):
@@ -1060,10 +1010,9 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     4.  cumulative_dose → numeric (Gy)
     5.  gender          → 'w' → 'f'
     6.  overweight_bmi  → overweight (ja/nein) + bmi (float)
-    7.  complaints_since → numeric months
-    8.  previous_therapy→ binary columns previous_therapy_1 … _7
-    9. ordinal columns → extract_numeric values
-    10. pain_scale      → extract_continuous values
+    7.  previous_therapy→ binary columns previous_therapy_1 … _7
+    8.  ordinal columns → extract_numeric values
+    9.  pain_scale      → extract_continuous values
 
     Requires columns already renamed.
 
@@ -1079,20 +1028,28 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     df = df_cl_clean.copy()
 
     # 1 — diagnosis
+    _pt = df.drop_duplicates(subset=['Patient'])
     if verbose:
-        print("\n=== diagnosis (before) ===")
-        print(df['diagnosis'].value_counts(dropna=False).to_string())
+        print("\n--- diagnosis (BEFORE) ---")
+        print(_pt['diagnosis'].value_counts(dropna=False).to_string())
     df['diagnosis'] = standardize_diagnosis(df['diagnosis'])
     if verbose:
-        print("\n=== diagnosis (after) ===")
-        print(df['diagnosis'].value_counts().to_dict())
+        print("\n--- diagnosis (AFTER) ---")
+        print(df.drop_duplicates(subset=['Patient'])['diagnosis'].value_counts().to_dict())
 
     # 2 — target_volume: standardize + merge side into one string
     if verbose:
-        print("\n=== target_volume (before) ===")
-        print(df['target_volume'].value_counts(dropna=False).head(20).to_string())
+        print("\n--- target_volume (BEFORE) ---")
+        print(df.drop_duplicates(subset=['Patient'])['target_volume'].value_counts(dropna=False).head(20).to_string())
     df['target_volume'], df['target_side'] = standardize_target_volume(df['target_volume'])
     df = move_column_after(df, 'target_side', 'target_volume')
+
+    if verbose and 'target_side' in df.columns and 'Patient' in df.columns:
+        pt_side = df.drop_duplicates(subset=['Patient']).set_index('Patient')['target_side']
+        n_single = pt_side.isin(['L', 'R']).sum()
+        n_both   = (pt_side == 'B').sum()
+        print(f"\n  Patients treated at one side (L / R): {n_single}")
+        print(f"  Patients treated at two sides (L&R):  {n_both}")
     df['target_volume'] = df.apply(
         lambda r: f"{r['target_volume']} {r['target_side']}".strip()
                   if pd.notna(r['target_volume']) and pd.notna(r['target_side'])
@@ -1103,104 +1060,86 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     df = df.drop(columns=['target_side'])
 
     if verbose:
-        print("\n=== target_volume (after) ===")
-        print(df['target_volume'].value_counts().to_dict())
+        print("\n--- target_volume (AFTER) ---")
+        print(df.drop_duplicates(subset=['Patient'])['target_volume'].value_counts().to_dict())
 
     # 3 — pain_points
     if verbose:
-        print("\n=== pain_points (before) ===")
+        print("\n--- pain_points (BEFORE) ---")
         print(df['pain_points'].value_counts(dropna=False).head(20).to_string())
     df['pain_points'] = standardize_pain_points(df['pain_points'])
     if verbose:
-        print("\n=== pain_points (after) ===")
+        print("\n--- pain_points (AFTER) ---")
         print(df['pain_points'].value_counts().head(20).to_dict())
 
     # 4 — cumulative_dose
     if 'cumulative_dose' in df.columns:
         if verbose:
-            print("\n=== cumulative_dose (before) ===")
+            print("\n--- cumulative_dose (BEFORE) ---")
             print(df['cumulative_dose'].value_counts(dropna=False).to_string())
         df['cumulative_dose'] = pd.to_numeric(
             df['cumulative_dose'].apply(parse_cumulative_dose), errors='coerce'
         )
         if verbose:
-            print("\n=== cumulative_dose (after) ===")
+            print("\n--- cumulative_dose (AFTER) ---")
             print(sorted(df['cumulative_dose'].dropna().unique()))
 
     # 5 — gender: 'w' → 'f'
     if 'gender' in df.columns:
         if verbose:
-            print("\n=== gender (before) ===")
+            print("\n--- gender (BEFORE) ---")
             print(df['gender'].value_counts(dropna=False).to_string())
         df['gender'] = df['gender'].replace('w', 'f')
         if verbose:
-            print("\n=== gender (after) ===")
+            print("\n--- gender (AFTER) ---")
             print(df['gender'].value_counts().to_dict())
 
     # 6 — overweight_bmi → overweight + bmi
     if 'overweight_bmi' in df.columns:
         if verbose:
-            print("\n=== overweight_bmi (before) ===")
+            print("\n--- overweight_bmi (BEFORE) ---")
             print(df['overweight_bmi'].value_counts(dropna=False).head(20).to_string())
         df = split_bmi_column(df)
         if verbose:
-            print("\n=== overweight / bmi (after) ===")
+            print("\n--- overweight / bmi (AFTER) ---")
             print(f"  overweight: {df['overweight'].value_counts().to_dict()}")
             bmi_valid = df['bmi'].dropna()
             if len(bmi_valid) > 0:
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
 
-    # 7 — complaints_since: parse duration strings to numeric months
-    if 'complaints_since' in df.columns:
-        if verbose:
-            print("\n=== complaints_since (before) ===")
-            print(df['complaints_since'].value_counts(dropna=False).head(20).to_string())
-        date_col = df['date'] if 'date' in df.columns else None
-        df['complaints_since'] = pd.to_numeric(
-            parse_symptoms_duration(df['complaints_since'], date_col), errors='coerce'
-        )
-        if verbose:
-            valid = df['complaints_since'].dropna()
-            if len(valid) > 0:
-                print(f"\n=== complaints_since (after) ===")
-                print(f"  range {valid.min():.0f}–{valid.max():.0f} months, "
-                      f"{df['complaints_since'].isna().sum()} missing")
-
-    # 8 — previous_therapy → binary indicator columns
+    # 7 — previous_therapy → binary indicator columns
     if 'previous_therapy' in df.columns:
         if verbose:
-            print("\n=== previous_therapy (before) ===")
+            print("\n--- previous_therapy (BEFORE) ---")
             print(df['previous_therapy'].value_counts(dropna=False).head(20).to_string())
         df = encode_therapy_columns(df)
         if verbose:
             therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)
                             if f'previous_therapy_{i}' in df.columns]
-            print("\n=== previous_therapy (after: binary columns) ===")
+            print("\n--- previous_therapy (AFTER: binary columns) ---")
             print(df[therapy_cols].sum().to_dict())
 
     # 9 — Ordinal questionnaire columns → extract numeric
     ordinal_cols = ['pain_under_load', 'pain_at_rest', 'pain_daytime',
                     'pain_night', 'morning_stiffness']
-    if verbose:
-        print("\n=== Ordinal questionnaire columns (before extraction) ===")
-        for col in ordinal_cols:
-            if col in df.columns:
-                uniq = df[col].dropna().unique()
-                print(f"\n  {col} ({len(uniq)} unique):")
-                for v in sorted(uniq, key=lambda x: str(x)):
-                    print(f"    {repr(v)}")
-        print("\n=== Extracting ordinal values ===")
     for col in ordinal_cols:
-        if col in df.columns:
-            df[col] = extract_numeric(df[col])
-            if verbose:
-                print(f"  {col}: unique after = {sorted(df[col].dropna().unique())}")
+        if col not in df.columns:
+            continue
+        if verbose:
+            uniq_before = df[col].dropna().unique()
+            print(f"\n--- {col} (BEFORE) ---")
+            for v in sorted(uniq_before, key=lambda x: str(x)):
+                print(f"  {repr(v)}")
+        df[col] = extract_numeric(df[col])
+        if verbose:
+            print(f"--- {col} (AFTER) ---")
+            print(f"  {sorted(df[col].dropna().unique())}")
 
     # 10 — pain_scale (continuous): German decimal comma, ranges → midpoint
     if 'pain_scale' in df.columns:
         if verbose:
-            print("\n=== pain_scale (before extraction) ===")
+            print("\n--- pain_scale (BEFORE) ---")
             uniq_ps = df['pain_scale'].dropna().unique()
             print(f"  pain_scale ({len(uniq_ps)} unique):")
             for v in sorted(uniq_ps, key=lambda x: str(x)):
@@ -1208,7 +1147,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         df['pain_scale'] = extract_continuous(df['pain_scale'])
         if verbose:
             uniq_after = sorted(df['pain_scale'].dropna().unique())
-            print(f"\n=== pain_scale (after extraction) ===")
+            print(f"\n--- pain_scale (AFTER) ---")
             print(f"  pain_scale ({len(uniq_after)} unique): {uniq_after}")
 
     return df
@@ -1243,7 +1182,8 @@ def fix_dtypes_cl(df_cl_clean, verbose=True):
             df[col] = df[col].astype('category')
 
     exclude_for_float = (set(CL_CATEGORICAL_COLS) |
-                         {'Patient', 'Timepoint', 'measurement_timepoint', 'date'})
+                         {'Patient', 'Timepoint', 'measurement_timepoint', 'date',
+                          'complaints_since'})
     cols_to_float = [c for c in df.columns if c not in exclude_for_float]
     df[cols_to_float] = (
         df[cols_to_float]
@@ -1252,7 +1192,7 @@ def fix_dtypes_cl(df_cl_clean, verbose=True):
     )
 
     if verbose:
-        print("\n=== Dtype summary (clinical) ===")
+        print("\n--- Dtype summary (clinical dataset) ---")
         print(df.dtypes.value_counts())
         print(f"Shape: {df.shape}, Patients: {df['Patient'].nunique()}")
 
@@ -1288,11 +1228,11 @@ def clean_cl(df_cl, verbose=True):
     df_cl_vis = df_cl.copy()   # keep the raw input untouched
 
     if verbose:
-        print("\n  [1] Forward-filling patient-level columns + extracting Timepoint")
+        print("\n  [1] Forward-filling patient-level columns + extracting Timepoint column")
     df_cl_vis = forward_fill_clinical(df_cl_vis, verbose=verbose)
 
     if verbose:
-        print("\n  [2] Excluding predetermined patients and columns")
+        print("\n  [2] Excluding pre-determined patients and columns")
     df_cl_vis = exclude_predetermined(df_cl_vis, verbose=verbose)
 
     if verbose:
