@@ -503,8 +503,8 @@ def plot_feature_frequency(feature_freq, name, threshold=0.75, n_outer=20, top_n
     # Color legend
     from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor='#d73027', label=f'Selected in ≥{int(threshold*100)}% folds → final model'),
-        Patch(facecolor='#4575b4', label=f'Selected in <{int(threshold*100)}% folds → excluded'),
+        Patch(facecolor='#d73027', label=f'Selected in ≥{int(threshold*100)}% folds'),
+        Patch(facecolor='#4575b4', label=f'Selected in <{int(threshold*100)}% folds'),
     ]
     ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
 
