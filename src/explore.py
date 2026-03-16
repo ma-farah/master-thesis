@@ -216,6 +216,7 @@ def plot_clinical_distributions(df_cl_vis):
 
 
 
+
 def t_test_pain_reduction(df_cl_vis):
     """
     One-sample t-test for wether the mean pain_scale reduction is significantly
@@ -259,13 +260,15 @@ def t_test_pain_reduction(df_cl_vis):
     widths = {'Comparison': 13, 'n': 6, 'Mean': 8, 'std': 7, 't': 8, 'p-value': 10}
     header = '  '.join(f'{c:>{widths[c]}}' for c in cols)
 
-    print("\nOne-sample t-test: pain_scale reduction vs 0  (H1: reduction > 0)\n")
+    print("\nOne-sample t-test — pain_scale reduction (H0: μ = 0,  H1: μ > 0)\n"
+    "significance level α = 0.05")
     print(header)
     print('_' * 66)
     for _, row in result_df.iterrows():
         print('  '.join(f'{str(row[c]):>{widths[c]}}' for c in cols))
 
     return result_df
+
 
 
 def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 6)):
@@ -461,7 +464,7 @@ def pearson_correlation(df, ex_cols, name, n_top=40):
     return pearson_matrix, pearson_pairs
 
 
-def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
+def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
     """Pearson correlation between each immunological feature and pain_scale.
 
     Merges df_im_vis with pain_scale from df_cl_vis on (Patient, Timepoint),
@@ -520,7 +523,7 @@ def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, n_top=20):
         plt.show()
 
     _bar_plot(results[results['r'] > 0.1],
-              'Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.05)', 'skyblue')
+              'Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.1)', 'skyblue')
     _bar_plot(neg, 'Negative Pearsons Correlations: Immunological Features x pain_scale', 'navy')
 
     return results
