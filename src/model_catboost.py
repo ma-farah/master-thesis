@@ -46,7 +46,7 @@ def run_advanced_catboost_rent(
     """CatBoostRegressor with Optuna-tuned RENT and Model Hyperparameters.
 
     Per outer fold:
-      0. Miceforest imputation on outer fold X_train (used for RENT tuning only)
+      0. Iterative imputer on outer fold X_train (used for RENT tuning only)
       1. Tune RENT HPs (C, l1_ratio, τ₁, τ₂) via Optuna on 75-25 split of imputed X_train.
       2. Re-run RENT on full imputed X_train with best HPs → selected feature subset.
       3. Inner CV (4×5=20) + Optuna (20 trials) tunes CatBoost HPs on raw X_train (NaN intact).

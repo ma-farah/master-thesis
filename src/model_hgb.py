@@ -32,7 +32,7 @@ def _prep_for_hgb(df, cat_cols, encoder=None):
         for c in cats_present:
             out[c] = out[c].astype(object).fillna('__missing__')
         if encoder is None:
-            encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=0)
+            encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=np.nan)
             out[cats_present] = encoder.fit_transform(out[cats_present]).astype(float)
         else:
             out[cats_present] = encoder.transform(out[cats_present]).astype(float)
@@ -61,7 +61,7 @@ def run_advanced_hgb_rent(
     """HistGradientBoostingRegressor with Optuna-tuned RENT and Model Hyperparameters.
 
     Per outer fold:
-      0. MICE imputation on outer fold X_train (used for RENT only).
+      0. Iterative imputer on outer fold X_train (used for RENT only).
       1. Tune RENT HPs (C, l1_ratio, τ₁, τ₂) via Optuna on 75-25 split of imputed X_train.
       2. Re-run RENT on full imputed X_train with best HPs → selected feature subset.
       3. Inner CV (4×5=20) + Optuna (N_TRIALS) tunes HGB HPs on OrdinalEncoded X_train (NaN intact).
