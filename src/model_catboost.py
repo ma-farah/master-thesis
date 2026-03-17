@@ -44,17 +44,12 @@ def run_advanced_catboost_rent(
     tau_3=0.95, target_transformer=None,
 ):
     """CatBoostRegressor with Optuna-tuned RENT and Model Hyperparameters.
-
-    Per outer fold:
-      0. Iterative imputer on outer fold X_train (used for RENT tuning only)
-      1. Tune RENT HPs (C, l1_ratio, τ₁, τ₂) via Optuna on 75-25 split of imputed X_train.
+      Iterative imputer on outer fold X_train (used for RENT tuning only)
+      1. Tune RENT HPs (C, l1_ratio, τ₁, τ₂) via Optuna on 75-25 split of imputed X_train
       2. Re-run RENT on full imputed X_train with best HPs → selected feature subset.
       3. Inner CV (4×5=20) + Optuna (20 trials) tunes CatBoost HPs on raw X_train (NaN intact).
       4. Train final fold model on raw X_train → evaluate on raw X_test (no imputation needed).
       5. Final model: features selected in ≥75% of outer folds, median HPs across outer folds.
-
-    MICE imputation is only used to prepare NaN-free input for RENT (ElasticNet requires this).
-    CatBoost handles missing values natively — X_test is never imputed.
 
     Returns: results_df, final_model, X_final, y_pred, best_model_params_list, feature_freq
     """
@@ -70,7 +65,7 @@ def run_advanced_catboost_rent(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-    N_TRIALS = 20 # prøv 50 etterhvert   
+    N_TRIALS = 50  # satt ned fra 50 til 20 -> 5 timer kjøretid # sett nye navn
 
     y            = df_combined[target_col].copy()
 
@@ -92,8 +87,8 @@ def run_advanced_catboost_rent(
     print(f"  Outer 4×5=20 | Inner 4×5=20 | RENT & Optuna trials={N_TRIALS} | K=100")  
     print(f"{'='*65}")
 
-    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  #
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # TEST with 25 repeats
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # 20 outer 
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # satt nd fra 25 til 5, men teste med 25 repeats
 
     # Storing best parameters
     fold_results = []
@@ -118,7 +113,7 @@ def run_advanced_catboost_rent(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # Prepare CatBoost-ready X_train
+        # Prepare CatBoost-ready X_train: Convert category columns to object dtype 
         X_train_cb = _prep_for_catboost(X_train, cat_cols)
 
         # ---- Iterative Imputer on X_train for Rent Tuning --------
@@ -126,7 +121,7 @@ def run_advanced_catboost_rent(
             X_train, ex_cols=None, iterations=10, 
             random_state=42, verbose=False)
 
-        # Ordinal-encode imputed X_train to a fully numeric dataframe; free imputed copy
+        # Ordinal-encode imputed X_train to a fully numeric dataframe (for rent)
         X_train_rent = _prep_for_rent(X_train_imp, cat_cols)
         del X_train_imp
 
@@ -135,19 +130,18 @@ def run_advanced_catboost_rent(
         X_tr_rent, X_val_rent, y_tr, y_val = train_test_split(
             X_train_rent, y_train_fit, test_size=0.25, random_state=random_state)
 
-        # Slice the already-prepared CatBoost matrix — no extra conversion needed
+        # Slice the already-prepared CatBoost matrix to get the original indexes 
         X_tr_cb  = X_train_cb.loc[X_tr_rent.index]
         X_val_cb = X_train_cb.loc[X_val_rent.index]
-
-        # Precompute reset index once instead of repeating inside every Optuna trial
+        # Pre-compute reset index
         X_tr_rent_reset = X_tr_rent.reset_index(drop=True)
+
 
         # Suggested Rent Parameters for tuning
         def rent_objective(trial):
             c_val    = trial.suggest_float('C',        1e-3, 10,  log=True)
             l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
-            tau_1    = trial.suggest_float('tau_1',    0.7,  0.95)
-            tau_2    = trial.suggest_float('tau_2',    0.7,  0.95)
+            tau_1    = trial.suggest_float('tau_1',    0,    1.0)
 
             # Running RENT on imputed+encoded data to select features
             rent_t = RENT.RENT_Regression(
@@ -156,34 +150,39 @@ def run_advanced_catboost_rent(
                 C=[c_val], l1_ratios=[l1_ratio], autoEnetParSel=False,
                 poly='OFF', testsize_range=(0.25, 0.25), K=100,  
                 random_state=random_state, verbose=0)
-            with contextlib.redirect_stderr(io.StringIO()):
+            
+            with contextlib.redirect_stderr(io.StringIO()):  # block warning outprints 
                 rent_t.train()
             sel_idx = rent_t.select_features(
-                tau_1_cutoff=tau_1, tau_2_cutoff=tau_2, tau_3_cutoff=tau_3)
+                tau_1_cutoff=tau_1, tau_2_cutoff=tau_1, tau_3_cutoff=tau_3)
             # penalize over selection
             if len(sel_idx) == 0:
                 return 1e6
             if len(sel_idx) > 45:
                 return 1e6
+            
+            # selected columns
             sel_cols    = [feature_cols[i] for i in sel_idx]
             cat_sel     = [c for c in cat_cols if c in sel_cols]
 
-            # Baseline CatBoost on nan-intact data to score the selected features
+            # Baseline CatBoost on data including nan - to score the selected features
             probe = CatBoostRegressor(
                 iterations=500, depth=6, random_seed=random_state, loss_function='RMSE',  
                 cat_features=cat_sel,
                 task_type='CPU', thread_count=-1, logging_level='Silent')
+            
             with contextlib.redirect_stderr(io.StringIO()):
                 probe.fit(X_tr_cb[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_cb[sel_cols])))
 
         rent_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
-            rent_study.optimize(rent_objective, n_trials=50, n_jobs=1, show_progress_bar=False)
+            rent_study.optimize(rent_objective, n_trials=N_TRIALS, n_jobs=1, show_progress_bar=False) # 50 trials 
 
         # Store best parameters and RMSE score (in transformed space!)
         best_rent = rent_study.best_params
         print(f"  Best RENT RMSE: {rent_study.best_value:.4f} Best Parameters: {best_rent}")
+
 
         # -- Step 2: Re-run RENT on full imputed X_train with best HPs ─────────
         rent_full = RENT.RENT_Regression(
@@ -197,7 +196,7 @@ def run_advanced_catboost_rent(
             rent_full.train()
         sel_idx_outer = rent_full.select_features(
             tau_1_cutoff=best_rent['tau_1'],
-            tau_2_cutoff=best_rent['tau_2'],
+            tau_2_cutoff=best_rent['tau_1'],
             tau_3_cutoff=tau_3)
 
         # Selected Features for this Outer Fold
@@ -212,13 +211,13 @@ def run_advanced_catboost_rent(
 
 
         # ── Step 3: Inner CV CatBoost Hyperparameter tuning with Optuna  ─────────────────────────
-        # CatBoost handles NaN, no imputation needed, using nan-dataset
    
         inner_splits = list(inner_cv.split(X_train_cb))
+
         def _fit_inner(itr, ival, params):
             # Train and evaluate one inner-fold CatBoost model on dataset (with nan)
             m = CatBoostRegressor(
-                iterations=500, **params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST
+                iterations=500, **params, cat_features=cat_cols_inner, loss_function='RMSE',   # satt ned fra 1000 til 500
                 random_seed=random_state, task_type='CPU', thread_count=-1,
                 logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
@@ -247,7 +246,7 @@ def run_advanced_catboost_rent(
         model_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS,
-                                 callbacks=[_cb], show_progress_bar=False) #check n jobs
+                                 callbacks=[_cb], show_progress_bar=False)   
         
         # Get the best parameters for the best trial
         best_model_params = model_study.best_params
@@ -257,10 +256,10 @@ def run_advanced_catboost_rent(
 
         # ── Step 4: Train on full X_train --> evaluate on X_test ───────────────
         # conserve category types:
-        X_test_cb  = _prep_for_catboost(X_test, cat_cols)
+        X_test_cb  = _prep_for_catboost(X_test, cat_cols) # convert categorical/obejct types to cat type
 
         fold_model = CatBoostRegressor(
-            iterations=1000, **best_model_params, cat_features=cat_cols_inner, loss_function='RMSE',  # TEST: 100 (production: 1000)
+            iterations=1000, **best_model_params, cat_features=cat_cols_inner, loss_function='RMSE', 
             random_seed=random_state, task_type='CPU', thread_count=-1, logging_level='Silent')
         with contextlib.redirect_stderr(io.StringIO()):
             fold_model.fit(X_train_cb[selected_cols], y_train_fit)
@@ -308,6 +307,7 @@ def run_advanced_catboost_rent(
 
     if not [f for f, cnt in freq.items() if cnt / n_outer >= 0.75]:
         print("   Warning: No features met ≥75% threshold - falling back to top 10 selected features for final model.")
+
 
 
     # ── Final model ───────────────────────────────────────────────────────────
