@@ -561,21 +561,20 @@ def standardize_diagnosis(series):
     Combined diagnoses are mapped as 'Name1, Name2'.
     """
     diagnosis_map = [
-        ('Achillodynia',          ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis']),
-        ('Calcaneodynia',         ['calcaneodynie', 'calcaneodynia', 'heel calcaneodynia']),
-        ('Heel Spur',             ['heel spur', 'fersensporn']),
+        ('Achillodynia',          ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis', ]),
+        ('Calcaneodynia',         ['calcaneodynie', 'calcaneodynia', 'heel calcaneodynia','heel spur', 'fersensporn']),
         ('Elbow Syndrome',        ['ellbow', 'elbow', 'ellenbogen', 'epicondylitis', 'epiconilitis']),
         ('Rhizarthrosis',         ['rhizarthros', 'rizarthros', 'daumensattelgelenk', 'thumb cmc', 'carpometacarpal']),
         ('Gonarthrosis',          ['gonarthros', 'kniegelenk']),
-        ('Finger Arthritis',      ['fingergelenk', 'fingerpolyarth', 'finger joint arthritis', 'finger arthritis']),
-        ('Shoulder Syndrome',     ['shouldersyndrom', 'shoulder syndrom', 'schulter']),
+        ('Finger Arthritis',      ['fingergelenk', 'fingerpolyarth', 'finger joint arthritis', 'finger arthritis', "Dupuytren's disease"]),
+        ('Shoulder Syndrome',     ['shouldersyndrom', 'shoulder syndrom', 'schulter','omarthrosis']),
         ('Ankle Arthrosis',       ['sprunggelenk', 'ankle', 'arthrosis upper ankle']),
-        ('Midfoot Arthrosis',     ['mittelfuß', 'midfoot', 'forefoot']),
+        ('Midfoot Arthrosis',     ['mittelfuß', 'midfoot', 'forefoot', 'Arthrosis right foot']),
         ('Plantar Fasciitis',     ['plantarfasz', 'plantar']),
         ('Trochanter Tendopathy', ['trochanter']),
         ('Toe Arthrosis',         ['zehenarthros', 'zehengrundgelenk']),
         ('Rheumatoid Arthritis',  ['rheumatoid', 'rheumatoide']),
-        ('Wrist Arthrosis',       ['wrist arthritis', 'wrist arthrosis', 'handgelenk']),
+        ('Wrist Arthrosis',       ['wrist arthritis', 'wrist arthrosis', 'handgelenk', 'painful  tendon sheath right (wrist)']),
     ]
 
     def match_diagnosis(s):
