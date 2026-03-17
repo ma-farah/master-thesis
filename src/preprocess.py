@@ -130,11 +130,11 @@ IM_EXCLUDED_COLUMNS = [
     "mDC-1_CD86+",
     "mDC-2_CD86+",
     "pDC_CD86+",
-    "Basophils.1",  # duplicate column, high correlation
+    "Basophils.1",   # duplicate column
 ]
 
 # Empty rows at the bottom of dataset
-IM_EMPTY_ROW_INDICES = list(range(823, 829)) #+ [78]
+IM_EMPTY_ROW_INDICES = list(range(823, 829)) 
 
 
 def drop_rename_cols_im(df_im_vis, verbose=True):
@@ -163,17 +163,21 @@ def drop_empty_rows_im(df_im_vis, verbose=True):
         print("Verifying found empty rows:")
 
     for i in rows_present:
-        n_filled = df_im_vis.loc[i, feat_cols].notna().sum()
-        patient  = df_im_vis.loc[i, 'Patient']
-        status   = "OK — all NaN" if n_filled == 0 else f"WARNING — {n_filled} non-NaN values!"
-        if verbose:
-            print(f"  Row {i}  Patient={patient}  {status}")
+        filled  = df_im_vis.loc[i, feat_cols].dropna()
+        patient = df_im_vis.loc[i, 'Patient']
+        if len(filled) == 0:
+            if verbose:
+                print(f"  Row {i}  Patient={patient}  OK — all NaN")
+        else:
+            if verbose:
+                print(f"  Row {i}  Patient={patient}  WARNING — {len(filled)} non-NaN values:")
+                print(filled.to_string())
    
     to_drop_pts = df_im_vis.loc[rows_present, 'Patient'].dropna().unique().tolist()
     df_im_vis   = df_im_vis.drop(index=rows_present).reset_index(drop=True)
     
     if verbose:
-        print(f"\nDropped {len(rows_present)} rows. Patient IDs in dropped rows: {sorted(to_drop_pts)}")
+        print(f"\nDropped {len(rows_present)}")
 
     # Rows where all features (PMN - last) are NaN
     if 'PMN' in df_im_vis.columns:
@@ -256,8 +260,11 @@ def fix_dtypes_im(df_im_vis, verbose=True):
 
     _id_cols   = ['Date', 'Patient', 'Timepoint']
     _feat_cols = [c for c in df_im_vis.columns if c not in _id_cols]
-    for col in _feat_cols:
-        df_im_vis[col] = pd.to_numeric(df_im_vis[col], errors='coerce')
+    df_im_vis[_feat_cols] = (
+        df_im_vis[_feat_cols]
+        .apply(lambda s: pd.to_numeric(s, errors='coerce'))
+        .astype('float64')
+    )
     
     if verbose:
         print(f"\nData types after cleaning:")
@@ -278,8 +285,8 @@ IM_CONFIRMED_OUTLIERS = [
     (159, 2),
     (109, 5),
     (266, 4),
-    (255, 1),  #add more-
-    (229, 2)]
+    (255, 1),  
+    (229, 2)] 
 
 
 
@@ -313,7 +320,7 @@ def remove_outlier_observations(df, outliers=None, verbose=True):
             found = ((df['Patient' ] == patient) & (df['Timepoint'] == timepoint)).sum()
             status = "removed" if found else "not found"
             print(f"    Patient {patient}  T{timepoint}  ({status})")
-        print(f"  Shape before: {df.shape}  →  after: {result.shape}")
+        print(f"  Shape before: {df.shape}  Shape after: {result.shape}")
         print(f"  Rows removed: {df.shape[0] - result.shape[0]}")
 
     return result
@@ -357,8 +364,8 @@ CL_RENAME_MAP = {
 }
 
 CL_CATEGORICAL_COLS = [
-    'gender', 'overweight', 'pain_points', 'diagnosis',
-    'target_volume',
+    'gender', 'overweight', 'complaints_since', 'pain_points', 'diagnosis',
+    'target_volume', 'target_volume_side',
     'response']
 
 # Pain questionnaire ordinal columns 
@@ -561,20 +568,17 @@ def standardize_diagnosis(series):
     Combined diagnoses are mapped as 'Name1, Name2'.
     """
     diagnosis_map = [
-        ('Achillodynia',          ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis', ]),
-        ('Calcaneodynia',         ['calcaneodynie', 'calcaneodynia', 'heel calcaneodynia','heel spur', 'fersensporn']),
-        ('Elbow Syndrome',        ['ellbow', 'elbow', 'ellenbogen', 'epicondylitis', 'epiconilitis']),
-        ('Rhizarthrosis',         ['rhizarthros', 'rizarthros', 'daumensattelgelenk', 'thumb cmc', 'carpometacarpal']),
-        ('Gonarthrosis',          ['gonarthros', 'kniegelenk']),
-        ('Finger Arthritis',      ['fingergelenk', 'fingerpolyarth', 'finger joint arthritis', 'finger arthritis', "Dupuytren's disease"]),
-        ('Shoulder Syndrome',     ['shouldersyndrom', 'shoulder syndrom', 'schulter','omarthrosis']),
-        ('Ankle Arthrosis',       ['sprunggelenk', 'ankle', 'arthrosis upper ankle']),
-        ('Midfoot Arthrosis',     ['mittelfuß', 'midfoot', 'forefoot', 'Arthrosis right foot']),
-        ('Plantar Fasciitis',     ['plantarfasz', 'plantar']),
-        ('Trochanter Tendopathy', ['trochanter']),
-        ('Toe Arthrosis',         ['zehenarthros', 'zehengrundgelenk']),
-        ('Rheumatoid Arthritis',  ['rheumatoid', 'rheumatoide']),
-        ('Wrist Arthrosis',       ['wrist arthritis', 'wrist arthrosis', 'handgelenk', 'painful  tendon sheath right (wrist)']),
+        ('Achillodynia',            ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis']),
+        ('Heel/Plantar',            ['calcaneodynie', 'calcaneodynia', 'heel calcaneodynia', 'heel spur', 'fersensporn', 'plantarfasz', 'plantar']),
+        ('Foot/Ankle',              ['sprunggelenk', 'ankle', 'arthrosis upper ankle', 'mittelfuß', 'midfoot', 'forefoot', 'arthrosis right foot', 'zehenarthros', 'zehengrundgelenk']),
+        ('Hand/Wrist',              ['rhizarthros', 'rizarthros', 'daumensattelgelenk', 'thumb cmc', 'carpometacarpal',
+                                     'fingergelenk', 'fingerpolyarth', 'finger joint arthritis', 'finger arthritis', "dupuytren's disease",
+                                     'wrist arthritis', 'wrist arthrosis', 'handgelenk', 'painful  tendon sheath right (wrist)']),
+        ('Elbow Syndrome',          ['ellbow', 'elbow', 'ellenbogen', 'epicondylitis', 'epiconilitis']),
+        ('Shoulder Syndrome',       ['shouldersyndrom', 'shoulder syndrom', 'schulter', 'omarthrosis']),
+        ('Gonarthrosis',            ['gonarthros', 'kniegelenk']),
+        ('Trochanter Tendopathy',   ['trochanter']),
+        ('Rheumatoid Arthritis',    ['rheumatoid', 'rheumatoide']),
     ]
 
     def match_diagnosis(s):
@@ -599,9 +603,9 @@ def standardize_diagnosis(series):
 
 
 def standardize_pain_points(series):
-    """Standardize pain_points: map German body parts to English, extract side (L/R/B).
+    """Standardize pain_points: map German body parts to English.
 
-    Pure number entries become NaN. Returns standardized 'BodyPart Side, BodyPart Side' format.
+    Pure number entries become NaN. Returns 'BodyPart, BodyPart' format (side stripped).
     """
     body_part_keywords = [
         ('Achilles Tendon', ['achillessehne']),
@@ -631,16 +635,6 @@ def standardize_pain_points(series):
         ('Finger',          ['finger']),
     ]
 
-    def find_side(seg):
-        s = seg.lower().strip()
-        if re.search(r'beide|bds|li\s*[+&/]\s*re|re\s*[+&/]\s*li|li\s+u\.?\s+re|re\s+u\.?\s+li|li\s+und\s+re|re\s+und\s+li', s):
-            return 'B'
-        if re.search(r'\bli\b|\blinks\b|\blinke[rns]?\b', s):
-            return 'L'
-        if re.search(r'\bre\b|\brechts\b|\brechte[rns]?\b|\brecht\b', s):
-            return 'R'
-        return ''
-
     def find_body_part(seg):
         s = seg.lower().strip()
         for name, keywords in body_part_keywords:
@@ -659,50 +653,16 @@ def standardize_pain_points(series):
         s_clean = re.sub(r'(\D)\d+\b', r'\1', s_clean)
         segments = re.split(r'[,;]', s_clean)
         results = []
-        last_body_part = None
-
         for seg in segments:
             seg = seg.strip()
             if not seg:
                 continue
             body = find_body_part(seg)
-            side = find_side(seg)
-            if body is None and side and last_body_part:
-                body = last_body_part
-            if body:
-                entry = f"{body} {side}".strip()
-                if entry not in results:
-                    results.append(entry)
-                last_body_part = body
-
+            if body and body not in results:
+                results.append(body)
         if not results:
             return s.strip()
-
-        sides_by_part = defaultdict(set)
-        order = []
-        for entry in results:
-            parts = entry.rsplit(' ', 1)
-            if len(parts) == 2 and parts[1] in ('L', 'R', 'B'):
-                part, side = parts
-            else:
-                part, side = entry, ''
-            if part not in order:
-                order.append(part)
-            sides_by_part[part].add(side)
-
-        merged = []
-        for part in order:
-            sides = sides_by_part[part]
-            if 'B' in sides or ('L' in sides and 'R' in sides):
-                merged.append(f"{part} B")
-            elif 'L' in sides:
-                merged.append(f"{part} L")
-            elif 'R' in sides:
-                merged.append(f"{part} R")
-            else:
-                merged.append(part)
-
-        return ', '.join(merged)
+        return ', '.join(results)
 
     return series.apply(parse_entry)
 
@@ -804,7 +764,7 @@ def exclude_predetermined(df_cl_clean, multi_body_patients=None, verbose=True):
 
     # 2 — Multi-body-part exclusion
     if verbose:
-        print(f"\n  Verifying multi-body-part patients (to be excluded):")
+        print(f"\n  Verifying multi-body-part patients:")
         for pid in multi_body_patients:
             rows = df[df['Patient'] == pid]
             if len(rows) > 0:
@@ -1029,47 +989,52 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     # 1 — diagnosis
     _pt = df.drop_duplicates(subset=['Patient'])
     if verbose:
+        print('Parsing and Transforming Clinical columns: \nUnique Value Counts before and after')
         print("\n--- diagnosis (BEFORE) ---")
         print(_pt['diagnosis'].value_counts(dropna=False).to_string())
     df['diagnosis'] = standardize_diagnosis(df['diagnosis'])
     if verbose:
+        _pt_after = df.drop_duplicates(subset=['Patient'])
         print("\n--- diagnosis (AFTER) ---")
-        print(df.drop_duplicates(subset=['Patient'])['diagnosis'].value_counts().to_dict())
+        print(_pt_after['diagnosis'].value_counts().to_dict())
+        print(f"  unique values: {sorted(_pt_after['diagnosis'].dropna().unique().tolist())}")
 
-    # 2 — target_volume: standardize + merge side into one string
+    # 2 — target_volume: standardize body part; keep side as separate column
     if verbose:
+        _tv_pt = df.drop_duplicates(subset=['Patient'])
         print("\n--- target_volume (BEFORE) ---")
-        print(df.drop_duplicates(subset=['Patient'])['target_volume'].value_counts(dropna=False).head(20).to_string())
-    df['target_volume'], df['target_side'] = standardize_target_volume(df['target_volume'])
-    df = move_column_after(df, 'target_side', 'target_volume')
+        print(_tv_pt['target_volume'].value_counts(dropna=False).head(20).to_string())
+        print(f"  unique values: {sorted(_tv_pt['target_volume'].dropna().unique().tolist())}")
+    df['target_volume'], df['target_volume_side'] = standardize_target_volume(df['target_volume'])
+    df = move_column_after(df, 'target_volume_side', 'target_volume')
 
-    if verbose and 'target_side' in df.columns and 'Patient' in df.columns:
-        pt_side = df.drop_duplicates(subset=['Patient']).set_index('Patient')['target_side']
+    if verbose and 'target_volume_side' in df.columns and 'Patient' in df.columns:
+        pt_side = df.drop_duplicates(subset=['Patient']).set_index('Patient')['target_volume_side']
         n_single = pt_side.isin(['L', 'R']).sum()
         n_both   = (pt_side == 'B').sum()
         print(f"\n  Patients treated at one side (L / R): {n_single}")
         print(f"  Patients treated at two sides (L&R):  {n_both}")
-    df['target_volume'] = df.apply(
-        lambda r: f"{r['target_volume']} {r['target_side']}".strip()
-                  if pd.notna(r['target_volume']) and pd.notna(r['target_side'])
-                     and r['target_side'] != ''
-                  else r['target_volume'],
-        axis=1,
-    )
-    df = df.drop(columns=['target_side'])
+        counts = pt_side.value_counts(dropna=False)
+        l = counts.get('L', 0); r = counts.get('R', 0); b = counts.get('B', 0)
+        print(f"\n--- target_volume_side (AFTER) ---")
+        print(f"  L: {l}   R: {r}   B: {b}")
 
     if verbose:
+        _tv_after = df.drop_duplicates(subset=['Patient'])['target_volume']
         print("\n--- target_volume (AFTER) ---")
-        print(df.drop_duplicates(subset=['Patient'])['target_volume'].value_counts().to_dict())
+        print(_tv_after.value_counts().to_dict())
+        print(f"  unique values: {sorted(_tv_after.dropna().unique().tolist())}")
 
     # 3 — pain_points
     if verbose:
         print("\n--- pain_points (BEFORE) ---")
         print(df['pain_points'].value_counts(dropna=False).head(20).to_string())
+        print(f"  unique values: {sorted(df['pain_points'].dropna().unique().tolist())}")
     df['pain_points'] = standardize_pain_points(df['pain_points'])
     if verbose:
         print("\n--- pain_points (AFTER) ---")
         print(df['pain_points'].value_counts().head(20).to_dict())
+        print(f"  unique values: {sorted(df['pain_points'].dropna().unique().tolist())}")
 
     # 4 — cumulative_dose
     if 'cumulative_dose' in df.columns:
@@ -1092,6 +1057,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         if verbose:
             print("\n--- gender (AFTER) ---")
             print(df['gender'].value_counts().to_dict())
+            print(f"  unique values: {sorted(df['gender'].dropna().unique().tolist())}")
 
     # 6 — overweight_bmi → overweight + bmi
     if 'overweight_bmi' in df.columns:
@@ -1102,10 +1068,12 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         if verbose:
             print("\n--- overweight / bmi (AFTER) ---")
             print(f"  overweight: {df['overweight'].value_counts().to_dict()}")
+            print(f"  overweight unique values: {sorted(df['overweight'].dropna().unique().tolist())}")
             bmi_valid = df['bmi'].dropna()
             if len(bmi_valid) > 0:
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
+                print(f"  bmi unique values (sample): {sorted(bmi_valid.unique().tolist())[:10]}")
 
     # 7 — previous_therapy → binary indicator columns
     if 'previous_therapy' in df.columns:
@@ -1162,11 +1130,9 @@ def fix_dtypes_cl(df_cl_clean, verbose=True):
     n_before  = len(df)
     _bad_rows = df[df[['Patient', 'Timepoint']].isna().any(axis=1)]
     if len(_bad_rows) > 0 and verbose:
-        print(f"  Rows with unparseable Patient or Timepoint (dropping):")
+        print(f"  Dropping rows with unknown Patient or Timepoint:")
         print(_bad_rows[['Patient', 'Timepoint']].to_string())
     df = df.dropna(subset=['Patient', 'Timepoint']).copy()
-    if verbose and (n_before - len(df)) > 0:
-        print(f"  Dropped {n_before - len(df)} rows with unparseable Patient/Timepoint")
 
     df['Patient']   = df['Patient'].astype('int64')
     df['Timepoint'] = df['Timepoint'].astype('int64')

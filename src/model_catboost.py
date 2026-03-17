@@ -45,10 +45,10 @@ def run_advanced_catboost_rent(
 ):
     """CatBoostRegressor with Optuna-tuned RENT and Model Hyperparameters.
       Iterative imputer on outer fold X_train (used for RENT tuning only)
-      1. Tune RENT HPs (C, l1_ratio, τ₁, τ₂) via Optuna on 75-25 split of imputed X_train
-      2. Re-run RENT on full imputed X_train with best HPs → selected feature subset.
-      3. Inner CV (4×5=20) + Optuna (20 trials) tunes CatBoost HPs on raw X_train (NaN intact).
-      4. Train final fold model on raw X_train → evaluate on raw X_test (no imputation needed).
+      1. Tune RENT HPs (C, l1_ratio, τ₁) via Optuna on 75-25 split of imputed X_train
+      2. Re-run RENT on full imputed X_train with best HPs -> selected feature subset.
+      3. Inner CV (4×5=20) + Optuna (50 trials) tunes CatBoost HPs on  X_train (Not imputed).
+      4. Train final fold model on raw X_train -> evaluate on raw X_test (no imputation).
       5. Final model: features selected in ≥75% of outer folds, median HPs across outer folds.
 
     Returns: results_df, final_model, X_final, y_pred, best_model_params_list, feature_freq
@@ -65,7 +65,8 @@ def run_advanced_catboost_rent(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-    N_TRIALS = 50  # satt ned fra 50 til 20 -> 5 timer kjøretid # sett nye navn
+    N_TRIALS_RENT  = 20   # RENT: 3 params (C, l1_ratio, τ₁)
+    N_TRIALS_MODEL = 50   # CatBoost: 4 params, evaluated across 20 inner folds
 
     y            = df_combined[target_col].copy()
 
@@ -84,7 +85,7 @@ def run_advanced_catboost_rent(
     print(f"\n{'='*65}")
     print(f"  CatBoost + Optuna + RENT — {target_col}")
     print(f"  n={len(X)}, p={len(feature_cols)}, τ₃={tau_3}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | RENT & Optuna trials={N_TRIALS} | K=100")  
+    print(f"  Outer 4×5=20 | Inner 4×5=20 | RENT trials={N_TRIALS_RENT} | Model trials={N_TRIALS_MODEL} | K=100")  
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # 20 outer 
@@ -177,7 +178,7 @@ def run_advanced_catboost_rent(
 
         rent_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
-            rent_study.optimize(rent_objective, n_trials=N_TRIALS, n_jobs=1, show_progress_bar=False) # 50 trials 
+            rent_study.optimize(rent_objective, n_trials=N_TRIALS_RENT, n_jobs=1, show_progress_bar=False)
 
         # Store best parameters and RMSE score (in transformed space!)
         best_rent = rent_study.best_params
@@ -240,12 +241,12 @@ def run_advanced_catboost_rent(
 
         def _cb(study, trial):
             if trial.state.name == 'COMPLETE':
-                print(f"    Trial {trial.number+1:>3}/{N_TRIALS}: "
+                print(f"    Trial {trial.number+1:>3}/{N_TRIALS_MODEL}: "
                       f"RMSE={trial.value:.4f}  {trial.params}")
 
         model_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
-            model_study.optimize(model_objective, n_trials=N_TRIALS,
+            model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                                  callbacks=[_cb], show_progress_bar=False)   
         
         # Get the best parameters for the best trial
