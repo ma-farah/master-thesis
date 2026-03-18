@@ -78,6 +78,7 @@ def run_advanced_catboost_rent(
 
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+    patient_id_map = df_combined.loc[valid, 'Patient'].reset_index(drop=True)
 
     # Identify categorical columns and  keep as category dtype throughout pipeline!
     cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
@@ -89,11 +90,12 @@ def run_advanced_catboost_rent(
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # 20 outer 
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # satt nd fra 25 til 5, men teste med 25 repeats
+    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)  # satt ned til 5
 
     # Storing best parameters
     fold_results = []
     best_model_params_list, selected_features_per_fold = [], []
+    patient_errors = []   # (patient_idx, abs_error) across all outer folds
     start = time.time()
 
     # Splitting into outer folds
@@ -156,11 +158,10 @@ def run_advanced_catboost_rent(
                 rent_t.train()
             sel_idx = rent_t.select_features(
                 tau_1_cutoff=tau_1, tau_2_cutoff=tau_1, tau_3_cutoff=tau_3)
+            
             # penalize over selection
-            if len(sel_idx) == 0:
+            if len(sel_idx) == 0:        # selecting all features is penalized
                 return 1e6
-           # if len(sel_idx) > 45:
-            #    return 1e6
             
             # selected columns
             sel_cols    = [feature_cols[i] for i in sel_idx]
@@ -218,8 +219,8 @@ def run_advanced_catboost_rent(
         def _fit_inner(itr, ival, params):
             # Train and evaluate one inner-fold CatBoost model on dataset (with nan)
             m = CatBoostRegressor(
-                iterations=500, **params, cat_features=cat_cols_inner, loss_function='RMSE',   # satt ned fra 1000 til 500
-                random_seed=random_state, task_type='CPU', thread_count=-1,
+                iterations=500, **params, cat_features=cat_cols_inner, loss_function='RMSE',
+                random_seed=random_state, task_type='CPU', thread_count=1,
                 logging_level='Silent')
             with contextlib.redirect_stderr(io.StringIO()):
                 m.fit(X_train_cb.iloc[itr][selected_cols], y_train_fit.iloc[itr])
@@ -273,10 +274,23 @@ def run_advanced_catboost_rent(
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         r2   = r2_score(y_test, preds)
         fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
+
+        for idx, true_val, pred_val in zip(test_idx, y_test.values, preds):
+            patient_errors.append({
+                'Patient':   patient_id_map[idx],
+                'abs_error': abs(true_val - pred_val),
+            })
         print(f"  Outer Fold {outer_fold} |  Features={len(selected_cols)}: {selected_cols}")
         print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
+
+
+    # ── Calulcting Per-patient difficulty (mean absolute error across outer folds) ────────
+    patient_err_df = (pd.DataFrame(patient_errors)
+                        .groupby('Patient')['abs_error']
+                        .agg(mean_mae='mean', n_folds='count')
+                        .sort_values('mean_mae', ascending=False))
 
 
     # ── RESULTS SUMMARY ───────────────────────────────────────────────────────
@@ -350,5 +364,5 @@ def run_advanced_catboost_rent(
                   if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            best_model_params_list, feature_freq)
+            best_model_params_list, feature_freq, patient_err_df)
 
