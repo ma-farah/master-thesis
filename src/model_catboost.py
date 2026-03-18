@@ -159,8 +159,8 @@ def run_advanced_catboost_rent(
             # penalize over selection
             if len(sel_idx) == 0:
                 return 1e6
-            if len(sel_idx) > 45:
-                return 1e6
+           # if len(sel_idx) > 45:
+            #    return 1e6
             
             # selected columns
             sel_cols    = [feature_cols[i] for i in sel_idx]
@@ -323,7 +323,7 @@ def run_advanced_catboost_rent(
     cat_cols_final = [c for c in cat_cols if c in final_cols]
 
     if target_transformer is not None:
-        pt_final    = clone(target_transformer)
+        pt_final    = clone(target_transformer) # ok å klone?
         y_final_fit = pd.Series(
             pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
     else:
@@ -337,12 +337,12 @@ def run_advanced_catboost_rent(
     print(f"  Final model HPs (median): {hp_final}")
 
     final_model = CatBoostRegressor(
-        iterations=1000, loss_function='RMSE', custom_metric=['MAE', 'R2'],  # TEST: 100 (production: 1000)
+        iterations=1000, loss_function='RMSE', custom_metric=['MAE', 'R2'],  
         cat_features=cat_cols_final, random_seed=random_state,
         task_type='CPU', thread_count=-1, logging_level='Silent',
         **hp_final)
     with contextlib.redirect_stderr(io.StringIO()):
-        final_model.fit(X_final, y_final_fit)
+        final_model.fit(X_final, y_final_fit) # i transformert space 
 
     y_pred_raw = pd.Series(final_model.predict(X_final), index=range(len(X_final)), dtype='float64')
     y_pred     = (pd.Series(pt_final.inverse_transform(y_pred_raw.values.reshape(-1, 1)).ravel(),
