@@ -63,16 +63,17 @@ def get_mrmr_frequency(
     print(f"  Outer CV: RepeatedKFold(n_splits=4, n_repeats=5) = 20 folds")
     print(f"{'='*60}")
 
-    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    selected_features_per_fold = []
+    import joblib
 
-    for fold, (train_idx, _) in enumerate(outer_cv.split(X), start=1):
+    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
+    splits = list(outer_cv.split(X))
+
+    def _run_fold(fold, train_idx):
+        from feature_engine.selection import MRMR as _MRMR
         X_train = X.iloc[train_idx]
         y_train = y.iloc[train_idx]
-
         X_train_mrmr = _prep_for_mrmr(X_train, cat_cols, random_state)
-
-        mrmr_sel = MRMR(
+        mrmr_sel = _MRMR(
             method='RFCQ',
             max_features=K,
             scoring='neg_mean_squared_error',
@@ -81,14 +82,18 @@ def get_mrmr_frequency(
             cv=5,
             regression=True,
             random_state=random_state,
-            n_jobs=-1,
+            n_jobs=1,
         )
         mrmr_sel.fit(X_train_mrmr, y_train)
         selected_cols = list(mrmr_sel.transform(X_train_mrmr).columns)
-        selected_features_per_fold.append(selected_cols)
-
         print(f" Outer Fold {fold:>2}/20 — {len(selected_cols)} features: {selected_cols[:6]}"
               f"{'...' if len(selected_cols) > 6 else ''}")
+        return selected_cols
+
+    selected_features_per_fold = joblib.Parallel(n_jobs=-1, prefer='processes')(
+        joblib.delayed(_run_fold)(fold, train_idx)
+        for fold, (train_idx, _) in enumerate(splits, start=1)
+    )
 
     n_folds = len(selected_features_per_fold)
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
