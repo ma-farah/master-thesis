@@ -121,31 +121,35 @@ def get_mrmr_frequency(
 
 
 def _prep_for_enet(X_train, X_test, cat_cols, random_state=42):
-    """Impute + OrdinalEncode + StandardScale for ElasticNet.
+    """OrdinalEncode → Impute → StandardScale for ElasticNet.
 
-    ElasticNet requires a fully numeric, NaN-free, scaled matrix.
-    Encoder and scaler are fit on X_train only, applied to both.
+    Order matters: OrdinalEncode first so IterativeImputer sees only numeric values.
+    All transformers are fit on X_train only, applied to both.
     """
+    X_train = X_train.copy()
+    X_test  = X_test.copy()
+
+    # 1. OrdinalEncode categoricals first (imputer needs numeric input)
+    cats = [c for c in cat_cols if c in X_train.columns]
+    if cats:
+        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        X_train[cats] = oe.fit_transform(X_train[cats].astype(str))
+        X_test[cats]  = oe.transform(X_test[cats].astype(str))
+
+    # 2. Impute — fit on X_train, transform X_test
     X_train_imp, imputer = preprocess.impute_iterative(
-        X_train, ex_cols=None, iterations=10, random_state=random_state, verbose=False)
+        X_train.astype(float), ex_cols=None, iterations=10,
+        random_state=random_state, verbose=False)
     X_test_imp = pd.DataFrame(
-        imputer.transform(X_test), columns=X_test.columns, index=X_test.index) 
+        imputer.transform(X_test.astype(float)),
+        columns=X_test.columns, index=X_test.index)
 
-    if cat_cols:
-        cats = [c for c in cat_cols if c in X_train_imp.columns]
-        if cats:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_imp[cats] = oe.fit_transform(X_train_imp[cats].astype(str))
-            X_test_imp[cats]  = oe.transform(X_test_imp[cats].astype(str))
-
-    X_train_out = X_train_imp.astype(float)
-    X_test_out  = X_test_imp.astype(float)
-
+    # 3. Scale — fit on X_train, transform X_test
     scaler      = StandardScaler()
     X_train_out = pd.DataFrame(
-        scaler.fit_transform(X_train_out), columns=X_train_out.columns)
+        scaler.fit_transform(X_train_imp), columns=X_train_imp.columns)
     X_test_out  = pd.DataFrame(
-        scaler.transform(X_test_out), columns=X_test_out.columns)
+        scaler.transform(X_test_imp), columns=X_test_imp.columns)
 
     return X_train_out, X_test_out
 
