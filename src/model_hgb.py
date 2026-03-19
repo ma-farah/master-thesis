@@ -153,11 +153,11 @@ def run_hgb_threshold_sweep(
 
             def model_objective(trial):
                 params = dict(
-                    max_iter          = trial.suggest_int(  'max_iter',           100,  500),
-                    max_depth         = trial.suggest_int(  'max_depth',             3,   10),
-                    learning_rate     = trial.suggest_float('learning_rate',     1e-3,  0.3, log=True),
-                    l2_regularization = trial.suggest_float('l2_regularization',  0.0, 10.0),
-                    min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',     5,   50),
+                    max_depth         = trial.suggest_int(  'max_depth',          2,   8),
+                    learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                    min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',   5,  30),
+                    l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
+                    max_iter          = 300,
                 )
                 rmses = joblib.Parallel(n_jobs=-1, prefer='threads')(
                     joblib.delayed(_fit_inner)(itr, ival, params, selected_cols, cat_mask_sel)
