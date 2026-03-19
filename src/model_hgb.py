@@ -72,9 +72,10 @@ def run_hgb_threshold_sweep(
     warnings.filterwarnings('ignore', category=RuntimeWarning)
 
     N_TRIALS   = 50
-    # derive thresholds from unique values in the frequency list + 0.0 for all features
-    unique_freqs = sorted(feature_freq[feature_freq > 0].unique())
-    THRESHOLDS   = [0.0] + unique_freqs
+    # 0.0 (all features), then >=10%, then 9 evenly-spaced thresholds up to max frequency
+    unique_freqs = sorted(feature_freq[feature_freq >= 0.10].unique())
+    indices      = np.linspace(0, len(unique_freqs) - 1, 9, dtype=int)
+    THRESHOLDS   = [0.0, 0.10] + [unique_freqs[i] for i in indices if unique_freqs[i] > 0.10]
 
     y = df_combined[target_col].copy()
     exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
