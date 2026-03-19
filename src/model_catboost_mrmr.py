@@ -127,9 +127,18 @@ def run_advanced_catboost_mrmr(
         # ── Step 1: MRMR feature selection on X_train ─────────────────────────
         # Iterative-impute + encode for MRMR only — no data from X_test used
         X_train_mrmr = _prep_for_mrmr(X_train, cat_cols, random_state)
-        mrmr_sel = MRMR(method='rf_importance', max_features=K, n_jobs=-1)
+        mrmr_sel = MRMR(
+            method='RFCQ',
+            max_features=K,
+            scoring='neg_mean_squared_error',
+            param_grid={'n_estimators': [50, 100, 150, 200], 'max_depth': [2, 4, 6, 8]},
+            cv=5,
+            regression=True,
+            random_state=random_state,
+            n_jobs=-1,
+        )
         mrmr_sel.fit(X_train_mrmr, y_train_fit)
-        selected_cols = mrmr_sel.selected_features_
+        selected_cols = list(mrmr_sel.transform(X_train_mrmr).columns)
 
         cat_cols_inner = [c for c in cat_cols if c in selected_cols]
         selected_features_per_fold.append(selected_cols)
