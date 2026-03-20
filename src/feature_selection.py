@@ -121,11 +121,13 @@ def get_mrmr_frequency(
 
 
 def _prep_for_enet(X_train, X_test, cat_cols, random_state=42):
-    """OrdinalEncode → Impute → StandardScale for ElasticNet.
+    """OrdinalEncode → Impute → PowerTransform → StandardScale for ElasticNet.
 
     Order matters: OrdinalEncode first so IterativeImputer sees only numeric values.
     All transformers are fit on X_train only, applied to both.
     """
+    from sklearn.preprocessing import PowerTransformer
+
     X_train = X_train.copy()
     X_test  = X_test.copy()
 
@@ -275,14 +277,9 @@ def run_enet_threshold(
                     for itr, ival in inner_splits_fold)
                 return np.mean(rmses)
 
-            def _cb(study, trial):
-                if trial.state.name == 'COMPLETE':
-                    print(f"    Trial {trial.number+1:>2}/{N_TRIALS}: "
-                          f"RMSE={trial.value:.4f}  {trial.params}")
-
             model_study = optuna.create_study(direction='minimize')
             model_study.optimize(model_objective, n_trials=N_TRIALS,
-                                 callbacks=[_cb], show_progress_bar=False)
+                                 show_progress_bar=False)
 
             best_params = model_study.best_params
             best_model_params_list.append(best_params)

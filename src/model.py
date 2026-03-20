@@ -439,26 +439,26 @@ def run_catboost_regressor(df_model, target_col, name,
 
 
 
-def plot_shap_regressor(model, X, name):
+def plot_shap_catboost(model, X):
     """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
     import shap
-    print(f"\n=== SHAP Analysis: {name} ===")
+    print(f"\n=== SHAP Analysis: CatBoost ===")
     explainer   = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
 
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
-    plt.title(f"SHAP Feature Importance — {name}")
+    plt.title(f"SHAP Feature Importance  CatBoost")
     plt.tight_layout()
     plt.show()
 
     shap.summary_plot(shap_values, X, show=False, max_display=20)
-    plt.title(f"SHAP Beeswarm — {name}")
+    plt.title(f"SHAP Beeswarm  CatBoost")
     plt.tight_layout()
     plt.show()
 
     return shap_values
 
-def plot_shap_elasticnet(model, X, name, scaler=None):
+def plot_shap_elasticnet(model, X):
     """SHAP bar + beeswarm for a fitted ElasticNet.
 
     If scaler is provided, SHAP values are divided by scaler.scale_ to convert
@@ -466,70 +466,64 @@ def plot_shap_elasticnet(model, X, name, scaler=None):
     """
     import shap
 
-    print(f"\n=== SHAP Analysis: {name} ===")
+    print(f"\n=== SHAP Analysis: Elasticnet ===")
     explainer   = shap.LinearExplainer(model, X, feature_perturbation="correlation_dependent")
     shap_values = explainer.shap_values(X)
 
-    if scaler is not None:
-        shap_values = shap_values / scaler.scale_
-
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
-    plt.title(f"SHAP Feature Importance — {name}")
+    plt.title(f"SHAP Feature Importance Elasticnet")
     plt.tight_layout()
     plt.show()
     shap.summary_plot(shap_values, X, show=False, max_display=20)
-    plt.title(f"SHAP Beeswarm — {name}")
+    plt.title(f"SHAP Beeswarm Elasticnet")
     plt.tight_layout()
     plt.show()
 
     return shap_values
 
-def plot_pls_importance(model, X, name):
-    """VIP scores + coefficients plot for a fitted PLSRegression."""
-    import matplotlib.pyplot as plt
 
-    # ── VIP scores ────────────────────────────────────────────────────────
-    t = model.x_scores_
-    w = model.x_weights_
-    q = model.y_loadings_
-    p, h     = w.shape
-    vip      = np.zeros(p)
-    s        = np.diag(t.T @ t @ q.T @ q)
-    for i in range(p):
-        weight = np.array([
-            (w[i, j] / np.linalg.norm(w[:, j]))**2 for j in range(h)])
-        vip[i] = np.sqrt(p * (s @ weight) / np.sum(s))
+def plot_shap_svr(model, X, n_background=20):
+    """KernelExplainer SHAP for SVR. Uses kmeans background to speed up."""
+    import shap
+    print(f"\n=== SHAP Analysis: SVR ===")
+    background = shap.kmeans(X, n_background)
+    explainer  = shap.KernelExplainer(model.predict, background)
+    shap_values = explainer.shap_values(X, nsamples=100)
 
-    # ── Coefficients for direction ────────────────────────────────────────
-    coefs = model.coef_.ravel()
-
-    importance_df = pd.DataFrame({
-        'feature':     X.columns,
-        'vip':         vip,
-        'coefficient': coefs,
-        'signed_vip':  vip * np.sign(coefs)   # direction from coefficient
-    }).sort_values('vip', ascending=True)
-
-    # Only show VIP > 0.8
-    importance_df = importance_df[importance_df['vip'] > 0.8]
-
-    colors = ['#d73027' if s > 0 else '#4575b4'
-              for s in importance_df['signed_vip']]
-
-    fig, ax = plt.subplots(figsize=(8, max(4, len(importance_df) * 0.4 + 2)))
-    ax.barh(importance_df['feature'], importance_df['signed_vip'],
-            color=colors, edgecolor='white', height=0.7)
-    ax.axvline(x=0,    color='black', linewidth=0.8)
-    ax.axvline(x=1.0,  color='gray',  linewidth=0.8,
-               linestyle='--', label='VIP=1.0 threshold')
-    ax.axvline(x=-1.0, color='gray',  linewidth=0.8, linestyle='--')
-    ax.set_xlabel('VIP Score (signed by coefficient direction)')
-    ax.set_title(f'PLS Feature Importance\n{name}\n'
-                 f'(+) = higher marker → more pain reduction')
-    ax.legend()
+    shap.summary_plot(shap_values, X, plot_type='bar', show=False, max_display=20)
+    plt.title(f'SHAP Feature Importance  SVR ')
     plt.tight_layout()
     plt.show()
-    return importance_df
+
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title(f'SHAP Beeswarm  SVR')
+    plt.tight_layout()
+    plt.show()
+
+    return shap_values
+
+
+
+def plot_shap_pls(model, X, n_background=20):
+    """KernelExplainer SHAP for PLSRegression (scaled units)."""
+    import shap
+
+    print(f"\n=== SHAP Analysis: PLS ===")
+    background  = shap.kmeans(X, n_background)
+    explainer   = shap.KernelExplainer(model.predict, background)
+    shap_values = explainer.shap_values(X)
+
+    shap.summary_plot(shap_values, X, plot_type='bar', show=False, max_display=20)
+    plt.title(f'SHAP Feature Importance  PLS ')
+    plt.tight_layout()
+    plt.show()
+
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title(f'SHAP Beeswarm  PLS')
+    plt.tight_layout()
+    plt.show()
+
+    return shap_values
 
 
 
