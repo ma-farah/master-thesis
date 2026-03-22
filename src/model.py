@@ -413,85 +413,114 @@ def plot_shap_catboost(model, X):
     return shap_values
 
 
-def plot_shap_elasticnet(model, X):
+def plot_shap_elasticnet(model, X, scaler):
     """SHAP bar + beeswarm for a fitted ElasticNet.
-
-    If scaler is provided, SHAP values are divided by scaler.scale_ to convert
-    from scaled units back to original feature units.
+    Divides SHAP values by scaler.scale_ to convert from scaled to original units
     """
     import shap
-
     print(f"\n=== SHAP Analysis: Elasticnet ===")
+
+    # Inverse transform X
+    X_original = pd.DataFrame(
+        scaler.inverse_transform(X),
+        columns=X.columns, index=X.index)
+
     explainer   = shap.LinearExplainer(model, X, feature_perturbation="correlation_dependent")
     shap_values = explainer.shap_values(X)
 
-    shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
+    # Convert SHAP values to original units
+    shap_values = shap_values / scaler.scale_
+
+    shap.summary_plot(shap_values, X_original, plot_type="bar", show=False, max_display=20)
     plt.title(f"SHAP Feature Importance Elasticnet")
     plt.tight_layout()
     plt.show()
-    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    shap.summary_plot(shap_values, X_original, show=False, max_display=20)
     plt.title(f"SHAP Beeswarm Elasticnet")
     plt.tight_layout()
     plt.show()
-
+    
     return shap_values
 
 
-def plot_shap_svr(model, X, n_background=20):
-    """KernelExplainer SHAP for SVR. Uses kmeans background to speed up."""
+def plot_shap_svr(model, X, scaler, n_background=20):
+    """KernelExplainer SHAP for SVR (RBF).
+    Works in original feature units by inverse transforming X
+    and wrapping predict to handle scaling internally.
+    """
     import shap
+
     print(f"\n=== SHAP Analysis: SVR ===")
-    background = shap.kmeans(X, n_background)
-    explainer  = shap.KernelExplainer(model.predict, background)
-    shap_values = explainer.shap_values(X, nsamples=100)
 
-    shap.summary_plot(shap_values, X, plot_type='bar', show=False, max_display=20)
-    plt.title(f'SHAP Feature Importance  SVR ')
+    # Inverse transform X to original units
+    X_original = pd.DataFrame(
+        scaler.inverse_transform(X),
+        columns=X.columns,
+        index=X.index
+    )
+
+    # Wrapping predicter
+    def predict_fn(X_org):
+        X_s = scaler.transform(X_org)
+        return model.predict(X_s)
+
+    background  = shap.kmeans(X_original, n_background)
+    explainer   = shap.KernelExplainer(predict_fn, background)
+    shap_values = explainer.shap_values(X_original, nsamples=100)
+
+    shap.summary_plot(shap_values, X_original, plot_type='bar', show=False, max_display=20)
+    plt.title('SHAP Feature Importance  SVR')
     plt.tight_layout()
     plt.show()
 
-    shap.summary_plot(shap_values, X, show=False, max_display=20)
-    plt.title(f'SHAP Beeswarm  SVR')
+    shap.summary_plot(shap_values, X_original, show=False, max_display=20)
+    plt.title('SHAP Beeswarm  SVR')
     plt.tight_layout()
     plt.show()
 
-    return shap_values
+    return shap_values 
 
 
-
-def plot_shap_pls(model, X, n_background=20):
-    """KernelExplainer SHAP for PLSRegression (scaled units)."""
+def plot_shap_pls(model, X, scaler, n_background=20):
+    """KernelExplainer SHAP for PLSRegression.
+    """
     import shap
-
     print(f"\n=== SHAP Analysis: PLS ===")
-    background  = shap.kmeans(X, n_background)
-    explainer   = shap.KernelExplainer(model.predict, background)
-    shap_values = explainer.shap_values(X)
 
-    shap.summary_plot(shap_values, X, plot_type='bar', show=False, max_display=20)
-    plt.title(f'SHAP Feature Importance  PLS ')
+    # Inverse transform X to original units
+    X_original = pd.DataFrame(
+        scaler.inverse_transform(X),
+        columns=X.columns, index=X.index)
+
+    def predict_fn(X_org):
+        X_s = scaler.transform(X_org)
+        return model.predict(X_s).ravel()
+
+    background  = shap.kmeans(X_original, n_background)
+    explainer   = shap.KernelExplainer(predict_fn, background)
+    shap_values = explainer.shap_values(X_original)
+
+    shap.summary_plot(shap_values, X_original, plot_type='bar', show=False, max_display=20)
+    plt.title(f'SHAP Feature Importance  PLS')
     plt.tight_layout()
     plt.show()
-
-    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    shap.summary_plot(shap_values, X_original, show=False, max_display=20)
     plt.title(f'SHAP Beeswarm  PLS')
     plt.tight_layout()
     plt.show()
-
+    
     return shap_values
 
 
+def plot_feature_frequency(feature_freq, name, top_n=30, n_outer=20, threshold=0.50):
+    """Bar plot of feature selection frequency across outer folds.
 
-# not used
-def plot_feature_frequency(feature_freq, name, threshold=0.75, n_outer=20, top_n=30):
-    """Bar plot of RENT feature selection frequency across outer folds.
-    
     Parameters:
-        feature_freq : pd.Series  — selection counts per feature (from run_* functions)
+        feature_freq : pd.Series  — selection counts per feature 
         name         : str        — plot title suffix
-        threshold    : float      — frequency threshold used for final model (default 0.75)
-        n_outer      : int        — total number of outer folds (default 20)
         top_n        : int        — max features to display (default 30)
+        n_outer      : int        — total number of outer folds (default 20)
+        threshold    : float      — frequency threshold to highlight (default 0.50)
     """
     import matplotlib.pyplot as plt
 
@@ -503,41 +532,30 @@ def plot_feature_frequency(feature_freq, name, threshold=0.75, n_outer=20, top_n
                  .sort_values(ascending=True))  # ascending → highest bar at top
 
     if freq_plot.empty:
-        print("   Warning: No features were selected in any fold!")
+        print("  Warning: No features were selected in any fold!")
         return
 
-    # Red = met threshold, blue = did not
-    colors = ['#d73027' if v >= threshold_count else '#4575b4'
+    fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.4)))
+
+    colors = ['steelblue' if v >= threshold_count else 'lightsteelblue'
               for v in freq_plot.values]
 
-    fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.4 + 2)))
-
-    ax.barh(freq_plot.index, freq_plot.values,
-            color=colors, edgecolor='white', height=0.7)
+    bars = ax.barh(freq_plot.index, freq_plot.values, color=colors, edgecolor='white')
 
     # Threshold line
-    ax.axvline(x=threshold_count, color='black', linewidth=1.2,
-               linestyle='--',
-               label=f'≥{int(threshold*100)}% threshold '
-                     f'({int(threshold_count)}/{n_outer} folds)')
+    ax.axvline(x=threshold_count, color='tomato', linestyle='--', linewidth=1.5,
+               label=f'≥{int(threshold*100)}% threshold ({int(threshold_count)}/{n_outer} folds)')
 
-    # Annotate count on each bar
-    for i, (feat, val) in enumerate(freq_plot.items()):
-        ax.text(val + 0.1, i, f'{int(val)}/{n_outer}',
-                va='center', fontsize=8, color='black')
+    # Value labels on bars
+    for bar, val in zip(bars, freq_plot.values):
+        ax.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
+                f'{int(val)}/{n_outer}',
+                va='center', ha='left', fontsize=9)
 
+    ax.set_xlabel('Number of outer folds selected')
     ax.set_xlim(0, n_outer + 2)
-    ax.set_xlabel(f'Selection count (out of {n_outer} outer folds)')
-    ax.set_title(f'RENT Feature Selection Frequency\n{name}')
+    ax.set_xticks(range(0, n_outer + 1, 4))
+    ax.set_title(f'MRMR Feature Selection Frequency — {name}')
     ax.legend(loc='lower right')
-
-    # Color legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#d73027', label=f'Selected in ≥{int(threshold*100)}% folds'),
-        Patch(facecolor='#4575b4', label=f'Selected in <{int(threshold*100)}% folds'),
-    ]
-    ax.legend(handles=legend_elements, loc='lower right', fontsize=9)
-
     plt.tight_layout()
     plt.show()
