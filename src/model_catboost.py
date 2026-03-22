@@ -201,7 +201,7 @@ def run_tuned_catboost(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            best_model_params_list, patient_err_df)
+            patient_err_df)
 
 
 
@@ -432,4 +432,4 @@ def run_tuned_catboost_mrmr(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            best_model_params_list, feature_freq, patient_err_df)
+            feature_freq, patient_err_df)
