@@ -963,15 +963,15 @@ def parse_transform_cl(df_cl_clean, verbose=True):
 
     Steps
     -----
-    1.  diagnosis       → standardized English names
-    2.  target_volume   → body part + side combined string
-    3.  pain_points     → standardized English body parts + side
-    4.  cumulative_dose → numeric (Gy)
-    5.  gender          → 'w' → 'f'
-    6.  overweight_bmi  → overweight (ja/nein) + bmi (float)
-    7.  previous_therapy→ binary columns previous_therapy_1 … _7
-    8.  ordinal columns → extract_numeric values
-    9.  pain_scale      → extract_continuous values
+    1.  diagnosis       -> standardized English names
+    2.  target_volume   -> body part + side combined string
+    3.  pain_points     -> standardized English body parts + side
+    4.  cumulative_dose -> numeric (Gy)
+    5.  gender          -> 'w' -> 'f'
+    6.  overweight_bmi  -> overweight (ja/nein) + bmi (float)
+    7.  previous_therapy-> binary columns previous_therapy_1 … _7
+    8.  ordinal columns -> extract_numeric values
+    9.  pain_scale      -> extract_continuous values
 
     Requires columns already renamed.
 
@@ -997,14 +997,13 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         _pt_after = df.drop_duplicates(subset=['Patient'])
         print("\n--- diagnosis (AFTER) ---")
         print(_pt_after['diagnosis'].value_counts().to_dict())
-        print(f"  unique values: {sorted(_pt_after['diagnosis'].dropna().unique().tolist())}")
+      
 
     # 2 — target_volume: standardize body part; keep side as separate column
     if verbose:
         _tv_pt = df.drop_duplicates(subset=['Patient'])
         print("\n--- target_volume (BEFORE) ---")
         print(_tv_pt['target_volume'].value_counts(dropna=False).head(20).to_string())
-        print(f"  unique values: {sorted(_tv_pt['target_volume'].dropna().unique().tolist())}")
     df['target_volume'], df['target_volume_side'] = standardize_target_volume(df['target_volume'])
     df = move_column_after(df, 'target_volume_side', 'target_volume')
 
@@ -1029,12 +1028,10 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     if verbose:
         print("\n--- pain_points (BEFORE) ---")
         print(df['pain_points'].value_counts(dropna=False).head(20).to_string())
-        print(f"  unique values: {sorted(df['pain_points'].dropna().unique().tolist())}")
     df['pain_points'] = standardize_pain_points(df['pain_points'])
     if verbose:
         print("\n--- pain_points (AFTER) ---")
         print(df['pain_points'].value_counts().head(20).to_dict())
-        print(f"  unique values: {sorted(df['pain_points'].dropna().unique().tolist())}")
 
     # 4 — cumulative_dose
     if 'cumulative_dose' in df.columns:
@@ -1048,7 +1045,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n--- cumulative_dose (AFTER) ---")
             print(sorted(df['cumulative_dose'].dropna().unique()))
 
-    # 5 — gender: 'w' → 'f'
+    # 5 — gender: 'w' -> 'f'
     if 'gender' in df.columns:
         if verbose:
             print("\n--- gender (BEFORE) ---")
@@ -1057,9 +1054,8 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         if verbose:
             print("\n--- gender (AFTER) ---")
             print(df['gender'].value_counts().to_dict())
-            print(f"  unique values: {sorted(df['gender'].dropna().unique().tolist())}")
 
-    # 6 — overweight_bmi → overweight + bmi
+    # 6 — overweight_bmi -> overweight + bmi
     if 'overweight_bmi' in df.columns:
         if verbose:
             print("\n--- overweight_bmi (BEFORE) ---")
@@ -1068,14 +1064,13 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         if verbose:
             print("\n--- overweight / bmi (AFTER) ---")
             print(f"  overweight: {df['overweight'].value_counts().to_dict()}")
-            print(f"  overweight unique values: {sorted(df['overweight'].dropna().unique().tolist())}")
             bmi_valid = df['bmi'].dropna()
             if len(bmi_valid) > 0:
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
                 print(f"  bmi unique values (sample): {sorted(bmi_valid.unique().tolist())[:10]}")
 
-    # 7 — previous_therapy → binary indicator columns
+    # 7 — previous_therapy -> binary indicator columns
     if 'previous_therapy' in df.columns:
         if verbose:
             print("\n--- previous_therapy (BEFORE) ---")
@@ -1087,7 +1082,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n--- previous_therapy (AFTER: binary columns) ---")
             print(df[therapy_cols].sum().to_dict())
 
-    # 9 — Ordinal questionnaire columns → extract numeric
+    # 9 — Ordinal questionnaire columns -> extract numeric
     ordinal_cols = ['pain_under_load', 'pain_at_rest', 'pain_daytime',
                     'pain_night', 'morning_stiffness']
     for col in ordinal_cols:
@@ -1103,19 +1098,17 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print(f"--- {col} (AFTER) ---")
             print(f"  {sorted(df[col].dropna().unique())}")
 
-    # 10 — pain_scale (continuous): German decimal comma, ranges → midpoint
+    # 10 — pain_scale (continuous): German decimal comma, ranges -> midpoint
     if 'pain_scale' in df.columns:
         if verbose:
             print("\n--- pain_scale (BEFORE) ---")
             uniq_ps = df['pain_scale'].dropna().unique()
-            print(f"  pain_scale ({len(uniq_ps)} unique):")
             for v in sorted(uniq_ps, key=lambda x: str(x)):
                 print(f"    {repr(v)}")
         df['pain_scale'] = extract_continuous(df['pain_scale'])
         if verbose:
-            uniq_after = sorted(df['pain_scale'].dropna().unique())
             print(f"\n--- pain_scale (AFTER) ---")
-            print(f"  pain_scale ({len(uniq_after)} unique): {uniq_after}")
+            print(f"  range: {df['pain_scale'].min():.1f} – {df['pain_scale'].max():.1f}")
 
     return df
 
@@ -1190,7 +1183,7 @@ def clean_cl(df_cl, verbose=True):
     df_cl_vis : full cleaned dataset
     """
 
-    df_cl_vis = df_cl.copy()   # keep the raw input untouched
+    df_cl_vis = df_cl.copy()   # keep the raw input untouched!1
 
     if verbose:
         print("\n  [1] Forward-filling patient-level columns + extracting Timepoint column")
