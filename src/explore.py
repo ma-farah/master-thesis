@@ -394,94 +394,66 @@ def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 
 
     return fig
 
-
-
-# ── Pearson correlation ───────────────────────────────────────────────────────
+# ── Spearman correlation ──────────────────────────────────────────────────────
 # immunological x immunological
-def pearson_correlation(df, ex_cols, name, n_top=40):
-    """Compute pairwise Pearson r on only numeric columns, print top pairs, and plot heatmaps.
-
-    Parameters
-    ----------
-    df      : pd.DataFrame  dataframe (not imputed) 
-    ex_cols : list[str]     columns to exclude
-    name    : str           label used in titles and print headers
-    n_top   : int           number of top pairs to print (default is set to 40)
-
-    Returns
-    -------
-    pearson_matrix : pd.DataFrame  symmetric correlation matrix
-    pearson_pairs  : pd.DataFrame  upper-triangle pairs sorted by |r| descending
+def spearman_correlation(df, ex_cols, name, n_top=40):
+    """Compute pairwise Spearman rho on numeric columns.
     """
-    print(f"\nPearson Correlation ({name} dataset)")
+    print(f"\nSpearman Correlation ({name} dataset)")
 
-    feat_cols      = [c for c in df.select_dtypes(include='number').columns
-                      if c not in ex_cols]
-    pearson_matrix = df[feat_cols].corr(method='pearson')
+    feat_cols       = [c for c in df.select_dtypes(include='number').columns
+                       if c not in ex_cols]
+    spearman_matrix = df[feat_cols].corr(method='spearman')
 
-    upper_tri = pearson_matrix.where(
-        np.triu(np.ones(pearson_matrix.shape), k=1).astype(bool))
-    pearson_pairs = (
+    upper_tri = spearman_matrix.where(
+        np.triu(np.ones(spearman_matrix.shape), k=1).astype(bool))
+    spearman_pairs = (
         upper_tri.stack()
         .reset_index()
-        .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'Pearson_r'})
-        .assign(Abs_r=lambda x: x['Pearson_r'].abs())
-        .sort_values('Abs_r', ascending=False)
-        .drop(columns='Abs_r')
+        .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'Spearman_rho'})
+        .assign(Abs_rho=lambda x: x['Spearman_rho'].abs())
+        .sort_values('Abs_rho', ascending=False)
+        .drop(columns='Abs_rho')
         .reset_index(drop=True)
     )
 
-    print(f"\nTop {n_top} Most Correlated Feature Pairs (Pearson r):")
+    print(f"\nTop {n_top} Most Correlated Feature Pairs (Spearman rho):")
     print("=" * 80)
-    print(pearson_pairs.head(n_top).to_string(index=False))
+    print(spearman_pairs.head(n_top).to_string(index=False))
 
-    print(f"\nTop {n_top} Most Negatively Correlated Feature Pairs (Pearson r):")
+    print(f"\nTop {n_top} Most Negatively Correlated Feature Pairs (Spearman rho):")
     print("=" * 80)
     print(upper_tri.stack()
           .reset_index()
-          .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'Pearson_r'})
-          .sort_values('Pearson_r', ascending=True)
+          .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'Spearman_rho'})
+          .sort_values('Spearman_rho', ascending=True)
           .head(n_top)
           .reset_index(drop=True)
           .to_string(index=False))
 
-    # Full heatmap plot showing lower triangle only:
-    mask_full = np.triu(np.ones_like(pearson_matrix, dtype=bool))
+    # Heatmap — lower triangle only
+    mask_full = np.triu(np.ones_like(spearman_matrix, dtype=bool))
     fig, ax   = plt.subplots(figsize=(18, 16))
     sns.heatmap(
-        pearson_matrix, mask=mask_full,
+        spearman_matrix, mask=mask_full,
         cmap='mako', center=0, vmin=-1, vmax=1,
         square=True, linewidths=0.2,
-        cbar_kws={'label': 'Pearson r', 'shrink': 0.8}, ax=ax,
+        cbar_kws={'label': 'Spearman rho', 'shrink': 0.8}, ax=ax,
     )
-    ax.set_title(f'Pearson Correlation ({name} Dataset)',
+    ax.set_title(f'Spearman Correlation ({name} Dataset)',
                  fontsize=14, fontweight='bold')
     ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=7)
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=7)
     plt.tight_layout()
     plt.show()
 
-    return pearson_matrix, pearson_pairs
+    return spearman_matrix, spearman_pairs
 
 
-def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
-    """Pearson correlation between each immunological feature and pain_scale.
-
-    Merges df_im_vis with pain_scale from df_cl_vis on (Patient, Timepoint),
-    keeping only rows present in both datasets.
-
-    Parameters
-    ----------
-    df_cl_vis  : pd.DataFrame   clinical dataset (must contain Patient, Timepoint, pain_scale)
-    df_im_vis  : pd.DataFrame   immunological dataset
-    ex_cols_im : list[str]      non-feature columns in df_im_vis (e.g. ['Patient','Timepoint','Date'])
-    n_top      : int            number of top/bottom correlations to print and plot 
-
-    Returns
-    -------
-    results : pd.DataFrame  columns: Feature, 
+def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
+    """Spearman correlation between each immunological feature and pain_scale.
     """
-    print("\nPearson Correlations - Immunological Features × pain_scale")
+    print("\nSpearman Correlations - Immunological Features × pain_scale")
 
     pain   = df_cl_vis[['Patient', 'Timepoint', 'pain_scale']].dropna(subset=['pain_scale'])
     merged = df_im_vis.merge(pain, on=['Patient', 'Timepoint'], how='inner')
@@ -494,66 +466,51 @@ def pearson_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
         sub = merged[['pain_scale', col]].dropna()
         if len(sub) < 5:
             continue
-        r = stats.pearsonr(sub[col], sub['pain_scale']).statistic
-        records.append({'Feature': col, 'r': r})
+        rho = stats.spearmanr(sub[col], sub['pain_scale']).statistic
+        records.append({'Feature': col, 'rho': rho})
 
     results = (pd.DataFrame(records)
-               .sort_values('r', ascending=False)
+               .sort_values('rho', ascending=False)
                .reset_index(drop=True))
 
-    pos = results[results['r'] > 0.05].copy()
-    neg = results[results['r'] < 0].sort_values('r').copy()
+    pos = results[results['rho'] > 0.05].copy()
+    neg = results[results['rho'] < 0].sort_values('rho').copy()
 
     def _print_table(df, label):
         print(f"\n{label}:")
-        print(f"  {'Feature':<35}  {'r':>7}")
+        print(f"  {'Feature':<35}  {'rho':>7}")
         print("  " + "-" * 45)
         for _, row in df.iterrows():
-            print(f"  {row['Feature']:<35}  {row['r']:>7.3f}")
+            print(f"  {row['Feature']:<35}  {row['rho']:>7.3f}")
 
-    _print_table(pos, "Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.05)")
-    _print_table(neg, "Negative Pearsons Correlations: Immunological Features x pain_scale")
+    _print_table(pos, "Positive Spearman Correlations: Immunological Features x pain_scale (rho > 0.05)")
+    _print_table(neg, "Negative Spearman Correlations: Immunological Features x pain_scale")
 
     def _bar_plot(df, title, color):
         fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
-        ax.barh(df['Feature'][::-1], df['r'][::-1], color=color)
-        ax.set_xlabel('Pearson r')
+        ax.barh(df['Feature'][::-1], df['rho'][::-1], color=color)
+        ax.set_xlabel('Spearman rho')
         ax.set_title(title)
         plt.tight_layout()
         plt.show()
 
-    _bar_plot(results[results['r'] > 0.1],
-              'Positive Pearsons Correlations: Immunological Features x pain_scale (r > 0.1)', 'skyblue')
-    _bar_plot(neg, 'Negative Pearsons Correlations: Immunological Features x pain_scale', 'navy')
+    _bar_plot(results[results['rho'] > 0.1],
+              'Positive Spearman Correlations: Immunological Features x pain_scale (rho > 0.1)', 'skyblue')
+    _bar_plot(neg,
+              'Negative Spearman Correlations: Immunological Features x pain_scale', 'navy')
 
     return results
 
 
-# ── Phik correlation  complete clinical dataset ────────────────────────────────────────────────────────
-
+# ── Phik correlation — clinical dataset ──────────────────────────────
 def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
-    """Compute phik correlation matrix (can use on data with mixed feature types)
-
-    Parameters
-    ----------
-    df       : pd.DataFrame  dataframe
-    ex_cols  : list[str]     columns to exclude 
-    num_cols : list[str]     numeric columns (needed for phik interval_cols)
-    name     : str           label used in titles
-    n_top    : int           number of top pairs to print, standard is top 40.
-
-    Returns
-    -------
-    phik_matrix : pd.DataFrame
-    phik_pairs  : pd.DataFrame  sorted by phik descending
+    """Suited for combined or clinical datasets with categorical and numeric features.
     """
-    print(f"\nPhik Correlation ({name} Dataset) ")
+    print(f"\nPhik Correlation ({name} Dataset)")
 
     feat_cols = [c for c in df.columns if c not in ex_cols]
     df_phik   = df[feat_cols].copy()
 
-    # phik requires categorical columns to be string-typed (not category dtype);
-    # also ensure no literal 'nan' strings slip through as valid categories:
     for c in df_phik.select_dtypes(['category', 'object']).columns:
         df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
 
@@ -570,7 +527,6 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
         .reset_index(drop=True)
     )
     nonzero_pairs = phik_pairs[phik_pairs['phik'] > 0].reset_index(drop=True)
-    zero_pairs    = phik_pairs[phik_pairs['phik'] == 0].reset_index(drop=True)
 
     print(f"\nTop {n_top} Most Strongly Associated Feature Pairs (phik):")
     print("=" * 80)
@@ -580,8 +536,7 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     print("=" * 80)
     print(nonzero_pairs.tail(n_top).sort_values('phik').reset_index(drop=True).to_string(index=False))
 
-
-    # Full heatmap
+    # Heatmap — lower triangle only
     mask_full = np.triu(np.ones_like(phik_matrix, dtype=bool))
     fig, ax   = plt.subplots(figsize=(16, 14))
     sns.heatmap(
@@ -600,27 +555,10 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     return phik_matrix, phik_pairs
 
 
-
 # between clinical features and pain_scale
 def phik_correlation_pain(df, target, ex_cols, name, num_cols):
-    """PhiK correlation between every feature and a single target column.
+    """PhiK correlation between every feature and a single column."""
 
-    Computes the full phik_matrix and extracts the target column, so all
-    pairwise statistics (including significance) are consistent with the
-    matrix computation. PhiK is [0,1] with no direction.
-
-    Parameters
-    ----------
-    df       : pd.DataFrame  dataframe (must contain target column)
-    target   : str           name of the target column (e.g. 'pain_scale')
-    ex_cols  : list[str]     columns to exclude (target must NOT be in ex_cols)
-    name     : str           label used in titles
-    num_cols : list[str]     numeric/interval columns for phik
-
-    Returns
-    -------
-    result : pd.DataFrame  columns: Feature, phik  (sorted descending, target excluded)
-    """
     print(f"\nPhiK — Features × {target} ({name} Dataset)")
 
     feat_cols = [c for c in df.columns if c not in ex_cols]
@@ -645,10 +583,10 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     nonzero = result[result['phik'] > 0].reset_index(drop=True)
     zero_n  = (result['phik'] == 0).sum()
 
-    print(f"  Features: {len(result)}  |  computable (phik > 0): {len(nonzero)}  "
-          f"|  skipped (phik = 0): {zero_n}")
+    print(f"  Features: {len(result)}     computable (phik > 0): {len(nonzero)}  "
+          f"   skipped (phik = 0): {zero_n}")
 
-    print(f"\nPhik Correlations: All Clinical features × '{target}'")
+    print(f"\nPhik Correlations: All Clinical features x  '{target}'")
     print(f"  {'Feature':<35}  {'phik':>6}")
     print("  " + "-" * 45)
     for _, row in nonzero.iterrows():
@@ -658,11 +596,64 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     ax.barh(nonzero['Feature'][::-1], nonzero['phik'][::-1], color='turquoise')
     ax.set_xlabel('PhiK')
     ax.set_xlim(0, 1)
-    ax.set_title(f'Phik Correlations: Clinical Dataset × {target}')
+    ax.set_title(f'Phik Correlations: Clinical Dataset x  {target}')
     plt.tight_layout()
     plt.show()
 
     return result
+
+
+def target_correlation(df, target_col, ex_cols, name, num_cols=None, n_top=40):
+    """Feature vs target. Spearman for numeric, Phik for categorical (if num_cols provided)."""
+
+    print(f"\nTarget Correlation ({name})    Target: {target_col}")
+
+    feat_cols = [c for c in df.columns if c not in ex_cols and c != target_col]
+    num_feat  = df[feat_cols].select_dtypes(include='number').columns.tolist()
+    cat_feat  = df[feat_cols].select_dtypes(include=['category','object']).columns.tolist()
+    sub       = df[feat_cols + [target_col]].copy()
+    for c in cat_feat:
+        sub[c] = sub[c].astype(str).replace('nan', np.nan)
+
+    records = []
+    for col in num_feat:
+        pair = sub[[col, target_col]].dropna()
+        if len(pair) < 5: continue
+        rho, pval = stats.spearmanr(pair[col], pair[target_col])
+        records.append({'Feature': col, 'Method': 'Spearman',
+                        'Correlation': round(rho, 4), 'Abs_correlation': round(abs(rho), 4),
+                        'p_value': round(pval, 4)})
+
+    if cat_feat and num_cols is not None:
+        pm = sub[cat_feat + [target_col]].phik_matrix(interval_cols=[target_col])
+        for col in cat_feat:
+            if col in pm.index:
+                phi = pm.loc[col, target_col]
+                records.append({'Feature': col, 'Method': 'Phik',
+                                'Correlation': round(phi, 4), 'Abs_correlation': round(phi, 4),
+                                'p_value': np.nan})
+
+    results = pd.DataFrame(records).sort_values('Abs_correlation', ascending=False).reset_index(drop=True)
+
+    print(f"\n  {'Feature':<45} {'Method':<10} {'Correlation':>12} {'p_value':>10}\n  {'-'*80}")
+    for _, r in results.head(n_top).iterrows():
+        pv = f"{r['p_value']:.4f}" if not np.isnan(r['p_value']) else "   N/A"
+        print(f"  {r['Feature']:<45} {r['Method']:<10} {r['Correlation']:>12.4f} {pv:>10}")
+
+    pos = results[results['Correlation'] >  0.05]
+    neg = results[results['Correlation'] < -0.05]
+    print(f"\n  Positive (> 0.05): {len(pos)}   Negative (< -0.05): {len(neg)}")
+
+    plot_df = results.head(n_top)
+    colors  = ['steelblue' if v >= 0 else 'tomato' for v in plot_df['Correlation']]
+    fig, ax = plt.subplots(figsize=(9, 0.45 * len(plot_df) + 1.5))
+    ax.barh(plot_df['Feature'][::-1], plot_df['Correlation'][::-1], color=colors[::-1], edgecolor='white')
+    ax.axvline(0, color='black', linewidth=0.8)
+    ax.set_xlabel('Correlation (Spearman rho / Phik)')
+    ax.set_title(f'Feature Correlations with {target_col} — {name}')
+    plt.tight_layout(); plt.show()
+    return results
+
 
 
 # ── RV2 matrix ────────────────────────────────────────────────────────────────
