@@ -417,19 +417,13 @@ def spearman_correlation(df, ex_cols, name, n_top=40):
         .reset_index(drop=True)
     )
 
-    print(f"\nTop {n_top} Most Correlated Feature Pairs (Spearman rho):")
+    print(f"\nTop {n_top} Most Positively Correlated Feature Pairs:")
     print("=" * 80)
-    print(spearman_pairs.head(n_top).to_string(index=False))
+    print(spearman_pairs[spearman_pairs['Spearman_rho'] > 0].head(n_top).to_string(index=False))
 
-    print(f"\nTop {n_top} Most Negatively Correlated Feature Pairs (Spearman rho):")
+    print(f"\nTop {n_top} Most Negatively Correlated Feature Pairs:")
     print("=" * 80)
-    print(upper_tri.stack()
-          .reset_index()
-          .rename(columns={'level_0': 'Feature_1', 'level_1': 'Feature_2', 0: 'Spearman_rho'})
-          .sort_values('Spearman_rho', ascending=True)
-          .head(n_top)
-          .reset_index(drop=True)
-          .to_string(index=False))
+    print(spearman_pairs[spearman_pairs['Spearman_rho'] < 0].tail(n_top).sort_values('Spearman_rho').to_string(index=False))
 
     # Heatmap — lower triangle only
     mask_full = np.triu(np.ones_like(spearman_matrix, dtype=bool))
@@ -442,8 +436,8 @@ def spearman_correlation(df, ex_cols, name, n_top=40):
     )
     ax.set_title(f'Spearman Correlation ({name} Dataset)',
                  fontsize=14, fontweight='bold')
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=7)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=7)
+    plt.setp(ax.get_xticklabels(), rotation=90, fontsize=7)
+    plt.setp(ax.get_yticklabels(), rotation=0, fontsize=7)
     plt.tight_layout()
     plt.show()
 
@@ -453,7 +447,7 @@ def spearman_correlation(df, ex_cols, name, n_top=40):
 def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
     """Spearman correlation between each immunological feature and pain_scale.
     """
-    print("\nSpearman Correlations - Immunological Features × pain_scale")
+    print("\nSpearman Correlations - Immunological Features x pain_scale")
 
     pain   = df_cl_vis[['Patient', 'Timepoint', 'pain_scale']].dropna(subset=['pain_scale'])
     merged = df_im_vis.merge(pain, on=['Patient', 'Timepoint'], how='inner')
@@ -483,7 +477,7 @@ def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
         for _, row in df.iterrows():
             print(f"  {row['Feature']:<35}  {row['rho']:>7.3f}")
 
-    _print_table(pos, "Positive Spearman Correlations: Immunological Features x pain_scale (rho > 0.05)")
+    _print_table(pos, "Positive Spearman Correlations: Immunological Features x pain_scale")
     _print_table(neg, "Negative Spearman Correlations: Immunological Features x pain_scale")
 
     def _bar_plot(df, title, color):
@@ -503,7 +497,7 @@ def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
 
 
 # ── Phik correlation — clinical dataset ──────────────────────────────
-def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
+def phik_correlation(df, ex_cols, num_cols, name, n_top=30):
     """Suited for combined or clinical datasets with categorical and numeric features.
     """
     print(f"\nPhik Correlation ({name} Dataset)")
@@ -528,7 +522,7 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
     )
     nonzero_pairs = phik_pairs[phik_pairs['phik'] > 0].reset_index(drop=True)
 
-    print(f"\nTop {n_top} Most Strongly Associated Feature Pairs (phik):")
+    print(f"\nTop {n_top} Most Strongly Associated Feature Pairs:")
     print("=" * 80)
     print(nonzero_pairs.head(n_top).to_string(index=False))
 
@@ -545,10 +539,10 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=40):
         square=True, linewidths=0.2,
         cbar_kws={'label': 'phik', 'shrink': 0.8}, ax=ax,
     )
-    ax.set_title(f'Phik Correlation ({name} Dataset)',
+    ax.set_title(f'Phik Correlations ({name} Dataset)',
                  fontsize=14, fontweight='bold')
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=90, fontsize=8)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=8)
+    plt.setp(ax.get_xticklabels(), rotation=90, fontsize=8)
+    plt.setp(ax.get_yticklabels(), rotation=0, fontsize=8)
     plt.tight_layout()
     plt.show()
 
@@ -603,8 +597,8 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     return result
 
 
-def target_correlation(df, target_col, ex_cols, name, num_cols=None, n_top=40):
-    """Feature vs target. Spearman for numeric, Phik for categorical (if num_cols provided)."""
+def target_correlation(df, target_col, ex_cols, name, use_phik=False, n_top=40):
+    """Feature vs target. Spearman for numeric, Phik for categorical (if use_phik=True)."""
 
     print(f"\nTarget Correlation ({name})    Target: {target_col}")
 
@@ -624,7 +618,7 @@ def target_correlation(df, target_col, ex_cols, name, num_cols=None, n_top=40):
                         'Correlation': round(rho, 4), 'Abs_correlation': round(abs(rho), 4),
                         'p_value': round(pval, 4)})
 
-    if cat_feat and num_cols is not None:
+    if cat_feat and use_phik:
         pm = sub[cat_feat + [target_col]].phik_matrix(interval_cols=[target_col])
         for col in cat_feat:
             if col in pm.index:
@@ -635,22 +629,27 @@ def target_correlation(df, target_col, ex_cols, name, num_cols=None, n_top=40):
 
     results = pd.DataFrame(records).sort_values('Abs_correlation', ascending=False).reset_index(drop=True)
 
-    print(f"\n  {'Feature':<45} {'Method':<10} {'Correlation':>12} {'p_value':>10}\n  {'-'*80}")
-    for _, r in results.head(n_top).iterrows():
-        pv = f"{r['p_value']:.4f}" if not np.isnan(r['p_value']) else "   N/A"
-        print(f"  {r['Feature']:<45} {r['Method']:<10} {r['Correlation']:>12.4f} {pv:>10}")
+    def _print_corr_table(df, label):
+        print(f"\n{label}:")
+        print(f"  {'Feature':<45} {'Method':<10} {'Correlation':>12} {'p_value':>10}\n  {'-'*80}")
+        for _, r in df.iterrows():
+            pv = f"{r['p_value']:.4f}" if not np.isnan(r['p_value']) else "   N/A"
+            print(f"  {r['Feature']:<45} {r['Method']:<10} {r['Correlation']:>12.4f} {pv:>10}")
 
-    pos = results[results['Correlation'] >  0.05]
-    neg = results[results['Correlation'] < -0.05]
-    print(f"\n  Positive (> 0.05): {len(pos)}   Negative (< -0.05): {len(neg)}")
+    pos = results[results['Correlation'] >  0.05].head(n_top)
+    neg = results[results['Correlation'] < -0.05].sort_values('Correlation').head(n_top)
+    _print_corr_table(pos, f"Positive Correlations with {target_col} (> 0.05)")
+    _print_corr_table(neg, f"Negative Correlations with {target_col} (< -0.05)")
 
     plot_df = results.head(n_top)
-    colors  = ['steelblue' if v >= 0 else 'tomato' for v in plot_df['Correlation']]
+    colors  = ['darkorange' if m == 'Phik' else ('steelblue' if v >= 0 else 'tomato')
+               for v, m in zip(plot_df['Correlation'], plot_df['Method'])]
     fig, ax = plt.subplots(figsize=(9, 0.45 * len(plot_df) + 1.5))
     ax.barh(plot_df['Feature'][::-1], plot_df['Correlation'][::-1], color=colors[::-1], edgecolor='white')
     ax.axvline(0, color='black', linewidth=0.8)
     ax.set_xlabel('Correlation (Spearman rho / Phik)')
-    ax.set_title(f'Feature Correlations with {target_col} — {name}')
+    ax.set_title(f'Feature Correlations with {target_col} — {name}  '
+                 f'[blue=Spearman+, red=Spearman−, orange=Phik]')
     plt.tight_layout(); plt.show()
     return results
 

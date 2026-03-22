@@ -1022,7 +1022,6 @@ def parse_transform_cl(df_cl_clean, verbose=True):
         _tv_after = df.drop_duplicates(subset=['Patient'])['target_volume']
         print("\n--- target_volume (AFTER) ---")
         print(_tv_after.value_counts().to_dict())
-        print(f"  unique values: {sorted(_tv_after.dropna().unique().tolist())}")
 
     # 3 — pain_points
     if verbose:
@@ -1068,7 +1067,6 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             if len(bmi_valid) > 0:
                 print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
                       f"{df['bmi'].isna().sum()} missing")
-                print(f"  bmi unique values (sample): {sorted(bmi_valid.unique().tolist())[:10]}")
 
     # 7 — previous_therapy -> binary indicator columns
     if 'previous_therapy' in df.columns:
