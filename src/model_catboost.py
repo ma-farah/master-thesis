@@ -211,13 +211,13 @@ def run_tuned_catboost_mrmr(
 ):
     """CatBoostRegressor with MRMR feature selection (K features) inside each outer CV fold.
 
-      1. MRMR on X_train → select K features per outer fold
-      2. Inner CV (4×5=20) + Optuna (50 trials) tunes CatBoost HPs on X_train.
-      3. Train final fold model on X_train → evaluate on X_test (no imputation).
-      4. Final model: top K most frequently selected features, median HPs across outer folds.
+      1. MRMR on X_train, select K features per outer fold
+      2. Inner CV (4×5=20) + Optuna (50 trials) tunes CatBoost hyperparams on X_train
+      3. Train final fold model on X_train,  evaluate on X_test
+      4. Final model: top K most frequently selected features, median hyper params across outer folds
 
     Returns: results_df, final_model, X_final, y_pred,
-             best_model_params_list, feature_freq, patient_err_df
+            feature_freq, patient_err_df
     """
     from catboost import CatBoostRegressor
     from feature_engine.selection import MRMR
@@ -255,7 +255,7 @@ def run_tuned_catboost_mrmr(
 
     fold_results               = []
     best_model_params_list     = []
-    selected_features_per_fold = []  # ← NEW
+    selected_features_per_fold = []  
     patient_errors             = []
     start = time.time()
 
@@ -275,7 +275,7 @@ def run_tuned_catboost_mrmr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # ── MRMR feature selection — fitted on X_train only ──────────────────
+        #  MRMR feature selection (fitted on X_train only)
         X_train_mrmr = feature_selection.prep_for_mrmr(X_train, cat_cols, random_state)
 
         mrmr_sel = MRMR(
@@ -384,7 +384,7 @@ def run_tuned_catboost_mrmr(
         ci = t_crit * sv / np.sqrt(n_outer)
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}   (95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
 
-    # ── Feature frequency ─────────────────────────────────────────────────────
+    # Feature frequency list
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
@@ -397,8 +397,8 @@ def run_tuned_catboost_mrmr(
         marker = '  (top K)' if feat in [f for f, _ in freq.most_common(K)] else ''
         print(f"    {feat:<45} {cnt:>2}/{n_outer}{marker}")
 
-    # ── Final model ───────────────────────────────────────────────────────────
-    # Top K=11 most frequently selected features across all outer folds
+    #  Final model
+    # use top K=11 most frequently selected features across all outer folds
     final_cols   = [f for f, _ in freq.most_common(K)]
     cat_cols_final = [c for c in cat_cols if c in final_cols]
     print(f"\n  Final model: {len(final_cols)} features (top {K} by frequency): {final_cols}")
@@ -416,7 +416,7 @@ def run_tuned_catboost_mrmr(
                     if isinstance(best_model_params_list[0][k], int)
                     else statistics.median([p[k] for p in best_model_params_list]))
                 for k in best_model_params_list[0]}
-    print(f"  Final model HPs (median): {hp_final}")
+    print(f"  Final model hyperparameters: {hp_final}")
 
     final_model = CatBoostRegressor(
         iterations=1000, loss_function='RMSE', custom_metric=['MAE', 'R2'],
