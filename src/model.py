@@ -1,4 +1,4 @@
-# Modeling functions — baseline and advanced regressors
+# Modeling functions for merging datasets, create targets, baseline modeling, shap plotting
 import time
 import optuna
 import pandas as pd
@@ -11,35 +11,23 @@ from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from sklearn.ensemble import HistGradientBoostingRegressor
 from catboost import CatBoostRegressor, Pool
-# shap is imported lazily inside plot_shap_regressor / plot_shap_pipeline
-# to avoid kernel crashes on Windows with restricted execution policies.
 import joblib, os
 import contextlib, io
 import preprocess
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
 # Leaky Columns (ignored during modeling)
 cl_leaky_columns= ['response', 'improvement_percent', 'pain_scale', 'pain_under_load',
                     'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness']
-
 
 # path to save models
 MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+#_________________________________________________________________________________________
 
 def construct_datasets_targets(df1, column_name, timepoints):
-    """Compute per-patient regression targets from a clinical column across two timepoints.
-
-    For column_name and timepoints [t_a, t_b], computes per patient:
-      - {col}_t{ta}            : raw baseline value (T_a)
-      - {col}_t{tb}            : raw post-treatment value (T_b)  ← leaky, for reference only
-      - {col}_reduction        : absolute reduction  = value_ta - value_tb
-      - {col}_reduction_pct    : percent reduction   = reduction / value_ta × 100
-
+    """Computing per-patient regression targets from a clinical column across two timepoints.
     Only patients that :
       - have a non-NaN measurement at T_a
       - have a non-NaN measurement at T_b
@@ -56,23 +44,17 @@ def construct_datasets_targets(df1, column_name, timepoints):
 
     Returns
     -------
-    targets : pd.DataFrame
-        One row per eligible patient with columns:
-          Patient, {col}_t{ta}, {col}_t{tb}, {prefix}_reduction, {prefix}_reduction_pct
-        where prefix = column_name with '_scale' stripped (e.g. 'pain_scale' → 'pain').
-        Patients with NaN in any computed target column are excluded.
+    targets : pd.DataFrame    (patient ids, and target values)
     """
     t_a, t_b = timepoints[0], timepoints[1]
     col_ta  = f'{column_name}_t{t_a}'
     col_tb  = f'{column_name}_t{t_b}'
 
-    # Strip '_scale' from the prefix so 'pain_scale' becomes 'pain_reduction'
-    # and 'pain_reduction_pct' rather than 'pain_scale_reduction[_pct]'.
     prefix  = column_name.replace('_scale', '')
     col_red = f'{prefix}_reduction'
     col_pct = f'{prefix}_reduction_pct'
 
-    # Extract the column at each timepoint (one row per patient, drop duplicates)
+    # Extract the column at each timepoint (one row per patient, dropping duplicates)
     ta_vals = (
         df1[df1['Timepoint'] == t_a][['Patient', column_name]]
         .rename(columns={column_name: col_ta})
@@ -86,21 +68,21 @@ def construct_datasets_targets(df1, column_name, timepoints):
         .reset_index(drop=True)
     )
 
-    # Inner join: keep only patients present at BOTH timepoints with non-NaN values
+    # Inner join on patient id,
     targets = ta_vals.merge(tb_vals, on='Patient', how='inner')
     targets = targets.dropna(subset=[col_ta, col_tb]).reset_index(drop=True)
 
-    # Absolute reduction (positive = improvement)
+    # Calcularing reduction 
     targets[col_red] = targets[col_ta] - targets[col_tb]
 
-    # Percent reduction: set to NaN when baseline is 0 to avoid division-by-zero
+    # Percent reduction,  set to NaN when baseline is 0 to avoid division-by-zero
     targets[col_pct] = np.where(
         targets[col_ta] != 0,
         (targets[col_ta] - targets[col_tb]) / targets[col_ta] * 100,
         np.nan,
     )
 
-    # Drop any patient whose computed target columns contain NaN
+    # drop any patient whose computed target columns contain nan
     targets = targets.dropna(subset=[col_red, col_pct]).reset_index(drop=True)
 
     print(f"\n  Target distributions:")
@@ -116,18 +98,15 @@ def construct_datasets_targets(df1, column_name, timepoints):
 def create_model_datasets(df_cl, df_im, targets, timepoints):
     """Create wide-format modeling datasets from clinical and immunological data.
 
-    Patients with NaN in all target columns after merging are excluded 
-
     Parameters
     ----------
     df_cl      : pd.DataFrame  Cleaned clinical dataset 
-                               Must contain 'Patient', 'Timepoint', and clinical features.
+                               
     df_im      : pd.DataFrame  Cleaned Immunological dataset 
-                               Must contain 'Patient', 'Timepoint', and immu features.
+                          
     targets    : pd.DataFrame  Output from construct_datasets_targets().
-                               Must contain 'Patient' + target columns.
-    timepoints : list[int]     [t_a, t_b] to define the immunological difference direction.
-                               Typically [1, 2].
+                               
+    timepoints : list[int]     two timepoints
 
     Returns
     -------
@@ -138,20 +117,18 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     t_a, t_b = timepoints[0], timepoints[1]
     id_cols  = {'Patient', 'Timepoint'}
 
-    # ── IMMUNOLOGICAL: T_a − T_b differences only (one row per patient) ────────
-
     # Restrict to the two timepoints of interest
     df_im_tp = df_im[df_im['Timepoint'].isin([t_a, t_b])].copy()
 
-    # Identify patients that have measurements at BOTH timepoints
+    # Identify patients that have measurements at both timepoints
     tp_counts     = df_im_tp.groupby('Patient')['Timepoint'].nunique()
     patients_both = tp_counts[tp_counts == 2].index
     df_im_tp      = df_im_tp[df_im_tp['Patient'].isin(patients_both)]
 
-    # Feature columns = everything except ID columns
+    # Feature colums
     im_feat_cols = [c for c in df_im_tp.columns if c not in id_cols]
 
-    # Extract T_a and T_b separately; rename columns with timepoint suffix (temporary)
+    # Extract timepoint 1 and timpoint 2 separately
     df_im_ta = (
         df_im_tp[df_im_tp['Timepoint'] == t_a][['Patient'] + im_feat_cols]
         .rename(columns={c: f'{c}_t{t_a}' for c in im_feat_cols})
@@ -163,7 +140,7 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
         .reset_index(drop=True)
     )
 
-    # Merge to align T_a and T_b rows; compute difference; drop raw T_a and T_b columns
+    # Merge, compute difference, drop baseline columns for t1 and t2
     df_im_merged = df_im_ta.merge(df_im_tb, on='Patient', how='inner')
     diff_cols = {}
     for c in im_feat_cols:
@@ -171,10 +148,10 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
         diff_cols[c]     = col_name
         df_im_merged[col_name] = df_im_merged[f'{c}_t{t_b}'] - df_im_merged[f'{c}_t{t_a}']
 
-    # Keep only Patient + difference columns (discard raw T_a and T_b feature columns)
+    # Keep only Patient + difference columns 
     df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
 
-    # ── CLINICAL: T_a baseline rows only ─────────────────────────────────────────
+    # clinical features
     
     cl_feat_cols = [c for c in df_cl.columns if c not in id_cols]
     df_cl_t1 = (
@@ -185,14 +162,14 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
 
     print(f"\nTotal Number of Clinical features: {len(cl_feat_cols)}")
 
-    # ── TARGETS: exclude leaky post-treatment columns
+    # targets, excluding leaky columns and post-treatment columns
     post_tm_cols = [c for c in targets.columns if c.endswith(f'_t{t_b}')] # drop leaky columns
     target_merge  = ['Patient'] + [c for c in targets.columns
                                    if c != 'Patient' and c not in post_tm_cols]
 
-    # ── MERGE into final dataset ──────────────────────────────────────────────
+    # Merging datasets
 
-    # Combined: immu difference features + clinical T_a baseline + target columns
+    # Combined dataset becomes: immu difference features + clinical baseline features + target columns
     df_combined = (
         df_im_wide
         .merge(df_cl_t1, on='Patient', how='inner')
@@ -200,15 +177,12 @@ def create_model_datasets(df_cl, df_im, targets, timepoints):
     )
 
     baseline_cols = [c for c in target_merge if c.endswith(f'_t{t_a}')]
-
-    # Drop columns
     drop_cols = set(cl_leaky_columns)
     drop = {c for c in df_combined.columns if c in drop_cols}
     if drop:
         print(f"  Dropping {len(drop)} Columns before modeling: {sorted(drop)}")
         df_combined = df_combined.drop(columns=list(drop), errors='ignore')
 
-    # Drop baseline target values (e.g. pain_scale_t1) — regression-to-mean confound
     baseline_present = [c for c in baseline_cols if c in df_combined.columns]
     if baseline_present:
         df_combined = df_combined.drop(columns=baseline_present)
@@ -304,29 +278,9 @@ def feature_target_correlation(df_model, target_cols, num_cols, ex_cols=None, n_
 
         print()
 
+
 # BASELINE CATBOOST MODEL
-# ══════════════════════════════════════════════════════════════════════════════
-
-def regression_metrics(y_true, y_pred):
-    """Compute standard regression metrics for a single prediction array.
-
-    Parameters
-    ----------
-    y_true : array-like   Ground-truth target values.
-    y_pred : array-like   Model-predicted values, same length as y_true.
-
-    Returns
-    -------
-    dict with keys 'MAE', 'MSE', 'RMSE', 'R2' (float values).
-    """
-    # Compute each metric individually so callers can inspect any subset
-    mae  = mean_absolute_error(y_true, y_pred)
-    mse  = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    r2   = r2_score(y_true, y_pred)
-    return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
-
-
+# ___________________________
 
 def run_catboost_regressor(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42,
@@ -440,7 +394,7 @@ def run_catboost_regressor(df_model, target_col, name,
 
 
 def plot_shap_catboost(model, X):
-    """SHAP bar + beeswarm plots for a fitted CatBoostRegressor."""
+    """SHAP bar + beeswarm plots for a catboost model."""
     import shap
     print(f"\n=== SHAP Analysis: CatBoost ===")
     explainer   = shap.TreeExplainer(model)
@@ -457,6 +411,7 @@ def plot_shap_catboost(model, X):
     plt.show()
 
     return shap_values
+
 
 def plot_shap_elasticnet(model, X):
     """SHAP bar + beeswarm for a fitted ElasticNet.
@@ -527,6 +482,7 @@ def plot_shap_pls(model, X, n_background=20):
 
 
 
+# not used
 def plot_feature_frequency(feature_freq, name, threshold=0.75, n_outer=20, top_n=30):
     """Bar plot of RENT feature selection frequency across outer folds.
     

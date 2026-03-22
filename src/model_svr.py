@@ -17,11 +17,11 @@ def run_tuned_svr(
     df_combined, feature_list, target_col='pain_reduction', random_state=42,
     target_transformer=None,
 ):
-    """SVR (RBF kernel) with Optuna nested CV.
+    """SVR (with RBF kernel) + Optuna nested CV
 
-      1. Inner CV (4×5=20) + Optuna (50 trials) tunes C, epsilon, gamma on X_train.
-      2. Train final fold model on X_train → evaluate on X_test.
-      3. Final model: median HPs across outer folds, trained on full X.
+      1. Inner CV (4×5=20) + Optuna (50 trials) tunes hyp.parameters C, epsilon, gamma
+      2. Train final fold model on X_train,  evaluate on X_test
+      3. Final model: median HPs across outer folds, trained on full X
 
     Returns: results_df, final_model, X_final, y_pred, best_model_params_list, patient_err_df
     """
@@ -73,7 +73,7 @@ def run_tuned_svr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # 1. Encode — fit on X_train only, transform X_test
+        # 1. Encode 
         if cat_cols:
             oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
             X_train[cat_cols] = oe.fit_transform(X_train[cat_cols].astype(str))
@@ -81,7 +81,7 @@ def run_tuned_svr(
         X_train = X_train.astype(float)
         X_test  = X_test.astype(float)
 
-        # 2. Impute — fit on X_train only, transform X_test
+        # 2. Impute
         X_train_imp, imputer = preprocess.impute_iterative(
             X_train, ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
@@ -91,7 +91,7 @@ def run_tuned_svr(
             imputer.transform(X_test),
             columns=selected_cols, index=X_test.index)
 
-        # 3. Scale — fit on X_train only, transform X_test
+        # 3. Scale 
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
@@ -108,7 +108,8 @@ def run_tuned_svr(
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
                 m.predict(X_train_scaled.iloc[ival])))
-
+        
+        # tune models hyperparameters
         def model_objective(trial):
             params = dict(
                 C       = trial.suggest_float('C',       1e-2, 1e2, log=True),
@@ -180,23 +181,27 @@ def run_tuned_svr(
         ci = t_crit * sv / np.sqrt(n_outer)
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}   (95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
 
-    # Final model — fit all transformers on full X, no test set
+    # Final mode
     X_final = X.copy()
     if cat_cols:
+        # encode
         oe_final = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
         X_final[cat_cols] = oe_final.fit_transform(X_final[cat_cols].astype(str))
     X_final = X_final.astype(float)
 
+    # impute
     X_final_imp, _ = preprocess.impute_iterative(
         X_final, ex_cols=None, iterations=10,
         random_state=random_state, verbose=False)
     X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final.index)
 
+    # scale
     scaler_final = StandardScaler()
     X_final = pd.DataFrame(
         scaler_final.fit_transform(X_final_imp),
         columns=selected_cols, index=X_final_imp.index)
-
+    
+    # reverse transform predictions to original space
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
@@ -204,7 +209,6 @@ def run_tuned_svr(
     else:
         pt_final, y_final_fit = None, y
 
-    # All SVR params are floats — no int rounding needed
     hp_final = {
         k: statistics.median([p[k] for p in best_model_params_list])
         for k in best_model_params_list[0]}

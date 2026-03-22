@@ -98,7 +98,7 @@ def run_tuned_catboost(
 
         def model_objective(trial):
             params = dict(
-                depth               = trial.suggest_int(  'depth',               3,   10),
+                depth               = trial.suggest_int(  'depth',               3,   8),
                 learning_rate       = trial.suggest_float('learning_rate',       1e-3, 0.3,  log=True),
                 l2_leaf_reg         = trial.suggest_float('l2_leaf_reg',         1.0,  10.0, log=True),
                 bagging_temperature = trial.suggest_float('bagging_temperature', 0.0,  1.0),

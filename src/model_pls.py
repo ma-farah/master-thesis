@@ -73,7 +73,7 @@ def run_tuned_pls(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # 1. Encode — fit on X_train only, transform X_test
+        # 1. Encode
         if cat_cols:
             oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
             X_train[cat_cols] = oe.fit_transform(X_train[cat_cols].astype(str))
@@ -81,7 +81,7 @@ def run_tuned_pls(
         X_train = X_train.astype(float)
         X_test  = X_test.astype(float)
 
-        # 2. Impute — fit on X_train only, transform X_test
+        # 2. Impute
         X_train_imp, imputer = preprocess.impute_iterative(
             X_train, ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
@@ -91,7 +91,7 @@ def run_tuned_pls(
             imputer.transform(X_test),
             columns=selected_cols, index=X_test.index)
 
-        # 3. Scale — fit on X_train only, transform X_test
+        # 3. Scale 
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
