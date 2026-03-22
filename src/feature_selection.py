@@ -18,40 +18,39 @@ import joblib
 import preprocess
 
 
-def _prep_for_mrmr(X_train, cat_cols, random_state=42):
-    """IterativeImpute + OrdinalEncode for MRMR.
-    MRMR requires a fully numeric, NaN-free matrix."""
-    X_imp, _ = preprocess.impute_iterative(
-        X_train, ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    out = X_imp.copy()
-    if cat_cols:
-        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        out[cat_cols] = oe.fit_transform(out[cat_cols].astype(str))
-    return out.astype(float)
+def prep_for_mrmr(X_train, cat_cols, random_state=42):
+    """OrdinalEncode + IterativeImpute for MRMR."""
+    out = X_train.copy()
 
+    # Encode, iterative imputer needs numeric imput only
+    cats = [c for c in cat_cols if c in out.columns]
+    if cats:
+        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        out[cats] = oe.fit_transform(out[cats].astype(str))
+    # impute
+    out, _ = preprocess.impute_iterative(
+        out.astype(float), ex_cols=None, iterations=10,
+        random_state=random_state, verbose=False)
+    return out
 
 
 def get_mrmr_frequency(
-    df_combined, target_col='pain_reduction', random_state=42, K=15,
-):
-    """Run MRMR feature selection across 20 outer folds and return selection frequencies.
-
-    No model training — purely feature selection to produce a model-agnostic
-    frequency list for use across CatBoost, ElasticNet, PLS, and Random Forest.
+    df_combined, target_col='pain_reduction', random_state=42, K=20):
+    """Running MRMR feature selection across 20 outer folds and return selection 
+    frequences in a list.
+    List will be used for an analysis of performance based on selected features,
+    and finally a set of features will be used for regression modeling.
 
     Parameters
     ----------
-    df_combined : pd.DataFrame
+    df_combined : pandas dataframe 
     target_col  : str
     random_state: int
-    K           : int   — max features to select per fold (default 15)
+    K           : int     max features to select per fold, default as 20.
 
     Returns
     -------
-    feature_freq : pd.Series
-        Index = feature name, values = selection frequency [0.0, 1.0],
-        sorted descending. Same format as RENT feature_freq output.
+    feature_freq : pd.Series   (index: feature name, values= selection frequency from 0 to 1.0)
     """
     from feature_engine.selection import MRMR
 
@@ -80,10 +79,10 @@ def get_mrmr_frequency(
         X_train = X.iloc[train_idx]
         y_train = y.iloc[train_idx]
 
-        X_train_mrmr = _prep_for_mrmr(X_train, cat_cols, random_state)
+        X_train_mrmr = prep_for_mrmr(X_train, cat_cols, random_state)
 
         mrmr_sel = MRMR(
-            method='RFCQ',
+            method='RFCQ',   # using random forest
             max_features=K,
             scoring='neg_mean_squared_error',
             param_grid={'n_estimators': [50, 100, 200, 300, 400, 500], 'max_depth': [2, 3, 4, 5, 6, 7],
@@ -120,25 +119,21 @@ def get_mrmr_frequency(
 
 
 
-def _prep_for_enet(X_train, X_test, cat_cols, random_state=42):
-    """OrdinalEncode → Impute → PowerTransform → StandardScale for ElasticNet.
-
-    Order matters: OrdinalEncode first so IterativeImputer sees only numeric values.
-    All transformers are fit on X_train only, applied to both.
+def prep_for_enet(X_train, X_test, cat_cols, random_state=42):
+    """OrdinalEncode, Impute, StandardScale for ElasticNet.
+    Fitted on X_train only, transforming on x_test
     """
-    from sklearn.preprocessing import PowerTransformer
-
     X_train = X_train.copy()
     X_test  = X_test.copy()
 
-    # 1. OrdinalEncode categoricals first (imputer needs numeric input)
+    # encode categoricals first (iterative imputer needs numeric input)
     cats = [c for c in cat_cols if c in X_train.columns]
     if cats:
         oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
         X_train[cats] = oe.fit_transform(X_train[cats].astype(str))
         X_test[cats]  = oe.transform(X_test[cats].astype(str))
 
-    # 2. Impute — fit on X_train, transform X_test
+    # Impute
     X_train_imp, imputer = preprocess.impute_iterative(
         X_train.astype(float), ex_cols=None, iterations=10,
         random_state=random_state, verbose=False)
@@ -146,7 +141,7 @@ def _prep_for_enet(X_train, X_test, cat_cols, random_state=42):
         imputer.transform(X_test.astype(float)),
         columns=X_test.columns, index=X_test.index)
 
-    # 3. Scale — fit on X_train, transform X_test
+    # Scale
     scaler      = StandardScaler()
     X_train_out = pd.DataFrame(
         scaler.fit_transform(X_train_imp), columns=X_train_imp.columns)
@@ -156,47 +151,48 @@ def _prep_for_enet(X_train, X_test, cat_cols, random_state=42):
     return X_train_out, X_test_out
 
 
-# _____________________________________________________________________________
-# ElasticNet threshold sweep — MRMR feature frequency list + Optuna nested CV
-# ══════════════════════════════════════════════════════════════════════════════
+# _________________________________________________________________________________
+# ElasticNet + MRMR feature frequency list + Optuna nested CV for feature threshold analysis
+# _____________________________________________________________________________________
 
 def run_enet_threshold(
     df_combined, feature_freq, target_col='pain_reduction',
     random_state=42, target_transformer=None,
 ):
-    """Sweep over MRMR frequency thresholds using ElasticNet + Optuna nested CV.
+    """ Runs trhough MRMR frequency thresholds with ElasticNet + Optuna nested CV.
 
-    For each threshold (all features, >=10%, evenly spaced to max frequency):
-      - Select features with selection_freq >= threshold from feature_freq
-      - Outer 4x5=20 folds, Inner 4x5=20 folds, 50 Optuna trials per outer fold
-      - Report mean MAE, RMSE, R2 +/- std and 95% CI across outer folds
+    For different thresholds of feature frequencies:
+      - Use the feature subset based on features at 10%, 20%, 30% selected in featutre frequency list,
+      - Outer 4x5=20 folds, Inner 4x5=20 folds with 50 Optuna trials to tune model hyperparameters,
+      - Report mean MAE, RMSE, R2  with std from all outer folds
 
     Parameters
     ----------
-    df_combined        : pd.DataFrame
-    feature_freq       : pd.Series  — output of get_mrmr_frequency()
-    target_col         : str
+    df_combined        : pandas dataframe
+    feature_freq       : panda series  (output from get_mrmr_frequency function)
+    target_col         : str  
     random_state       : int
-    target_transformer : sklearn transformer or None  (e.g. PowerTransformer)
+    target_transformer : sklearn transformer or None for no transforming of target
 
     Returns
     -------
-    sweep_df      : pd.DataFrame  — one row per threshold, summary metrics
-    sweep_results : list of dict  — includes per-fold results for plotting
+    sweep_results : list of dict  
+    sweep_df      : pandas dataframe  (of summary)
     """
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-    N_TRIALS = 50
+    N_TRIALS = 50    # optuna trials
 
-    # 0.0 (all features), then >=10%, then 9 evenly-spaced thresholds up to max frequency
+    # starts at 0.0%, then 10%, with 10 evenly spaced jumps 
     unique_freqs = sorted(feature_freq[feature_freq >= 0.10].unique())
     indices      = np.linspace(0, len(unique_freqs) - 1, 9, dtype=int)
     THRESHOLDS   = [0.0, 0.10] + [unique_freqs[i] for i in indices if unique_freqs[i] > 0.10]
 
     y = df_combined[target_col].copy()
+
     exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
                'pain_reduction_pct', 'pain_under_load_reduction',
                'pain_under_load_reduction_pct'}
@@ -225,22 +221,21 @@ def run_enet_threshold(
             folds_equiv   = int(threshold * 20)
 
         if len(selected_cols) == 0:
-            print(f"\n  Threshold {thresh_label} — no features, skipping.")
+            print(f"\n  Threshold {thresh_label}:  no features, skipped.")
             continue
 
         n_features = len(selected_cols)
 
         print(f"\n{'='*65}")
         if threshold == 0.0:
-            print(f"  Threshold: ALL features — {n_features} features")
+            print(f"  Threshold 0% (all features):   {n_features} features")
         else:
-            print(f"  Features selected in >={folds_equiv}/20 outer folds: {thresh_label}"
-                  f" — Number of features: {n_features}")
+            print(f"  Features selected in >={folds_equiv}/ 20 outer folds: {thresh_label}"
+                  f"  Number of features: {n_features}")
         print(f"  {selected_cols[:8]}{'...' if n_features > 8 else ''}")
         print(f"{'='*65}")
 
         fold_results           = []
-        best_model_params_list = []
         thresh_start           = time.time()
 
         for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
@@ -255,7 +250,7 @@ def run_enet_threshold(
             else:
                 pt_fold, y_train_fit = None, y_train
 
-            X_train_enc, X_test_enc = _prep_for_enet(
+            X_train_enc, X_test_enc = prep_for_enet(
                 X_train[selected_cols], X_test[selected_cols], cat_cols, random_state)
 
             inner_splits_fold = list(inner_cv.split(X_train_enc))
@@ -266,7 +261,8 @@ def run_enet_threshold(
                 return np.sqrt(mean_squared_error(
                     y_train_fit.iloc[ival],
                     m.predict(X_train_enc.iloc[ival])))
-
+            
+            # Tuning Elasticnet hyp.parameters:
             def model_objective(trial):
                 params = dict(
                     alpha    = trial.suggest_float('alpha',    1e-4, 10.0, log=True),
@@ -280,10 +276,10 @@ def run_enet_threshold(
             model_study = optuna.create_study(direction='minimize')
             model_study.optimize(model_objective, n_trials=N_TRIALS,
                                  show_progress_bar=False)
-
+            
+            # Reporting results from the best inner trial
             best_params = model_study.best_params
-            best_model_params_list.append(best_params)
-            print(f"  Outer Fold {outer_fold:>2}/20 | "
+            print(f"  Outer Fold {outer_fold:>2}/20:   "
                   f"Best Trial {model_study.best_trial.number+1:>2}/{N_TRIALS}  "
                   f"RMSE={model_study.best_value:.4f}  {best_params}")
 
@@ -291,6 +287,8 @@ def run_enet_threshold(
             fold_model.fit(X_train_enc, y_train_fit)
 
             preds_raw = fold_model.predict(X_test_enc)
+
+            # reverse transforming predictions to the original space 
             preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                      if pt_fold is not None else preds_raw)
 
@@ -299,7 +297,7 @@ def run_enet_threshold(
             r2   = r2_score(y_test, preds)
             fold_results.append({'Fold': outer_fold, 'MAE': mae, 'RMSE': rmse, 'R2': r2})
 
-        # ── Threshold summary ─────────────────────────────────────────────────
+        # Summary
         res     = pd.DataFrame(fold_results)
         n_outer = len(fold_results)
         t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
@@ -313,7 +311,7 @@ def run_enet_threshold(
         ci_r2   = t_crit * std_r2   / np.sqrt(n_outer)
 
         elapsed = (time.time() - thresh_start) / 60
-        print(f"\n  ── {thresh_label} | {n_features} features | {elapsed:.1f} min ──")
+        print(f"\n  {thresh_label}   {n_features} features    {elapsed:.1f} min ──")
         print(f"    MAE:  {mean_mae:.3f} +/- {std_mae:.4f}  "
               f"(95% CI [{mean_mae-ci_mae:.3f}, {mean_mae+ci_mae:.3f}])")
         print(f"    RMSE: {mean_rmse:.3f} +/- {std_rmse:.4f}  "
