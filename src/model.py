@@ -95,105 +95,63 @@ def construct_datasets_targets(df1, column_name, timepoints):
 
 
 
-def create_model_datasets(df_cl, df_im, targets, timepoints):
-    """Create wide-format modeling datasets from clinical and immunological data.
-
-    Parameters
-    ----------
-    df_cl      : pd.DataFrame  Cleaned clinical dataset 
-                               
-    df_im      : pd.DataFrame  Cleaned Immunological dataset 
-                          
-    targets    : pd.DataFrame  Output from construct_datasets_targets().
-                               
-    timepoints : list[int]     two timepoints
-
+def create_model_datasets(df1, df2, targets, timepoints, single_dataset=False):
+    """Create wide-format modeling datasets from clinical and/or immunological data.
     Returns
     -------
     df_combined : pd.DataFrame
-        One row per patient: immunological T_b−T_a difference features
-        + clinical T_a baseline features + target columns.
+        One row per patient: features + target columns.
     """
-    t_a, t_b = timepoints[0], timepoints[1]
-    id_cols  = {'Patient', 'Timepoint'}
+    t_a     = timepoints[0]
+    t_b     = timepoints[1] if len(timepoints) == 2 else None
+    id_cols = {'Patient', 'Timepoint'}
 
-    # Restrict to the two timepoints of interest
-    df_im_tp = df_im[df_im['Timepoint'].isin([t_a, t_b])].copy()
+    feat_cols_1 = [c for c in df1.columns if c not in id_cols]
 
-    # Identify patients that have measurements at both timepoints
-    tp_counts     = df_im_tp.groupby('Patient')['Timepoint'].nunique()
-    patients_both = tp_counts[tp_counts == 2].index
-    df_im_tp      = df_im_tp[df_im_tp['Patient'].isin(patients_both)]
+    def _at(tp):
+        return (df1[df1['Timepoint'] == tp][['Patient'] + feat_cols_1]
+                .rename(columns={c: f'{c}_t{tp}' for c in feat_cols_1})
+                .reset_index(drop=True))
 
-    # Feature colums
-    im_feat_cols = [c for c in df_im_tp.columns if c not in id_cols]
+    if t_b is not None:
+        df_m = _at(t_a).merge(_at(t_b), on='Patient', how='inner')
+        for c in feat_cols_1:
+            df_m[f'{c}_t{t_b}_minus_t{t_a}'] = df_m[f'{c}_t{t_b}'] - df_m[f'{c}_t{t_a}']
+        df1_wide = df_m[['Patient'] + [f'{c}_t{t_b}_minus_t{t_a}' for c in feat_cols_1]]
+        desc     = f"T{t_a}–T{t_b} difference features"
+    else:
+        df1_wide = _at(t_a)
+        desc     = f"T{t_a} features"
 
-    # Extract timepoint 1 and timpoint 2 separately
-    df_im_ta = (
-        df_im_tp[df_im_tp['Timepoint'] == t_a][['Patient'] + im_feat_cols]
-        .rename(columns={c: f'{c}_t{t_a}' for c in im_feat_cols})
-        .reset_index(drop=True)
-    )
-    df_im_tb = (
-        df_im_tp[df_im_tp['Timepoint'] == t_b][['Patient'] + im_feat_cols]
-        .rename(columns={c: f'{c}_t{t_b}' for c in im_feat_cols})
-        .reset_index(drop=True)
-    )
+    # Targets — exclude leaky post-treatment columns when using two timepoints
+    post_tm_cols = [c for c in targets.columns if t_b and c.endswith(f'_t{t_b}')]
+    target_merge = ['Patient'] + [c for c in targets.columns
+                                  if c != 'Patient' and c not in post_tm_cols]
 
-    # Merge, compute difference, drop baseline columns for t1 and t2
-    df_im_merged = df_im_ta.merge(df_im_tb, on='Patient', how='inner')
-    diff_cols = {}
-    for c in im_feat_cols:
-        col_name         = f'{c}_t{t_b}_minus_t{t_a}'
-        diff_cols[c]     = col_name
-        df_im_merged[col_name] = df_im_merged[f'{c}_t{t_b}'] - df_im_merged[f'{c}_t{t_a}']
+    if single_dataset:
+        df_combined = df1_wide.merge(targets[target_merge], on='Patient', how='inner')
+    else:
+        feat_cols_2 = [c for c in df2.columns if c not in id_cols]
+        df2_ta      = (df2[df2['Timepoint'] == t_a][['Patient'] + feat_cols_2]
+                       .drop_duplicates('Patient').reset_index(drop=True))
+        df_combined = (df1_wide
+                       .merge(df2_ta,               on='Patient', how='inner')
+                       .merge(targets[target_merge], on='Patient', how='inner'))
+        desc += " + clinical features"
 
-    # Keep only Patient + difference columns 
-    df_im_wide = df_im_merged[['Patient'] + list(diff_cols.values())].copy()
-
-    # clinical features
-    
-    cl_feat_cols = [c for c in df_cl.columns if c not in id_cols]
-    df_cl_t1 = (
-        df_cl[df_cl['Timepoint'] == t_a][['Patient'] + cl_feat_cols]
-        .drop_duplicates('Patient')
-        .reset_index(drop=True)
-    )
-
-    print(f"\nTotal Number of Clinical features: {len(cl_feat_cols)}")
-
-    # targets, excluding leaky columns and post-treatment columns
-    post_tm_cols = [c for c in targets.columns if c.endswith(f'_t{t_b}')] # drop leaky columns
-    target_merge  = ['Patient'] + [c for c in targets.columns
-                                   if c != 'Patient' and c not in post_tm_cols]
-
-    # Merging datasets
-
-    # Combined dataset becomes: immu difference features + clinical baseline features + target columns
-    df_combined = (
-        df_im_wide
-        .merge(df_cl_t1, on='Patient', how='inner')
-        .merge(targets[target_merge], on='Patient', how='inner')
-    )
-
-    baseline_cols = [c for c in target_merge if c.endswith(f'_t{t_a}')]
-    drop_cols = set(cl_leaky_columns)
-    drop = {c for c in df_combined.columns if c in drop_cols}
+    drop = {c for c in df_combined.columns if c in set(cl_leaky_columns)}
     if drop:
-        print(f"  Dropping {len(drop)} Columns before modeling: {sorted(drop)}")
         df_combined = df_combined.drop(columns=list(drop), errors='ignore')
 
-    baseline_present = [c for c in baseline_cols if c in df_combined.columns]
+    baseline_present = [c for c in target_merge
+                        if c.endswith(f'_t{t_a}') and c in df_combined.columns]
     if baseline_present:
         df_combined = df_combined.drop(columns=baseline_present)
-        print(f"  Dropped baseline target cols : {baseline_present}")
 
-    print(f"\nModeling datasets ready: (T{t_a}–T{t_b} immunological data + clinical baseline variables:")
-
-    print(f"Shape of Combined Dataset: {df_combined.shape}, "
-          f"Number of Patients: {df_combined['Patient'].nunique()}")
-
+    print(f"\nModeling dataset ready: {desc}")
+    print(f"Shape: {df_combined.shape},  Patients: {df_combined['Patient'].nunique()}")
     return df_combined
+
 
 
 def feature_target_correlation(df_model, target_cols, num_cols, ex_cols=None, n_top=20):
@@ -362,7 +320,7 @@ def run_baseline_catboost(df_model, target_col, name,
         ci = t_crit * sv / np.sqrt(n_folds)
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
 
-    return results_df, model, X, y_pred
+    return results_df
 
 
 

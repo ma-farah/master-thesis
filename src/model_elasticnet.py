@@ -92,9 +92,9 @@ def elasticnet_mrmr(
     # only include values smaller than p
     p = len(feature_cols)
     print(f"\n{'='*65}")
-    print(f"  ElasticNet + MRMR (K tuned by Optuna) — {target_col}")
+    print(f" Nested CV - ElasticNet + MRMR + Optuna — {target_col}")
     print(f"  n={len(X)}, p={p}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Model trials={N_TRIALS_MODEL}")
+    print(f"  Outer 4×5=20   Inner 4×5=20   Optuna trials Model ={N_TRIALS_MODEL}   Optuna trials MRMR ={N_TRIALS_MRMR}")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -152,7 +152,7 @@ def elasticnet_mrmr(
             if len(sel_cols) == 0:
                 return 1e6
 
-            probe = ElasticNet(max_iter=5000, random_state=random_state)
+            probe = ElasticNet(max_iter=5000, random_state=random_state) 
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
@@ -301,7 +301,7 @@ def elasticnet_mrmr(
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
-    print(f"\n  Complete Feature selection frequency (out of {n_outer} outer folds):")
+    print(f"\n  Complete Feature selection frequency list (out of {n_outer} outer folds):")
     for feat, cnt in feature_freq.items():
             print(f"    {cnt:>2}/{n_outer}  ({cnt/n_outer*100:5.1f}%)  {feat}")
 
