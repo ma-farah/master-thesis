@@ -284,9 +284,9 @@ def run_baseline_catboost(df_model, target_col, name,
             pt_fold, y_train_fit = None, y_train
 
         model = CatBoostRegressor(
-            iterations=1000, loss_function='RMSE',
+            iterations=500, loss_function='RMSE',
             random_seed=random_state, task_type='CPU',
-            thread_count=-1, verbose=0)
+            thread_count=8, verbose=0)
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
 
         preds_raw = model.predict(X_test)
@@ -311,14 +311,11 @@ def run_baseline_catboost(df_model, target_col, name,
     std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
     results_df  = pd.concat([results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    n_folds = n_splits * n_repeats
-    t_crit  = stats.t.ppf(0.975, df=n_folds - 1)
-    print(f"\n  Summary ({n_splits}x{n_repeats} CV, 95% CI):")
+    print(f"\n  Summary ({n_splits}x{n_repeats} CV:")
     for m in metric_cols:
         mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
         sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
-        ci = t_crit * sv / np.sqrt(n_folds)
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
     return results_df
 
