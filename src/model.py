@@ -281,44 +281,26 @@ def feature_target_correlation(df_model, target_cols, num_cols, ex_cols=None, n_
 
 # BASELINE CATBOOST MODEL
 # ___________________________
-
-def run_catboost_regressor(df_model, target_col, name,
+def run_baseline_catboost(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42,
                            target_transformer=None):
-    """Run a baseline CatBoostRegressor with RepeatedKFold cross-validation.
-    Parameters uses CPU as task type
-    ----------
-    df_model     : pd.DataFrame   Dataset containing features and target column.
-    target_col   : str            Name of the regression target column.
-    name         : str            Label used in printed output and summaries.
-    n_splits     : int            Number of CV folds (default 5).
-    n_repeats    : int            Number of CV repetitions (default 5).
-    random_state : int            Seed for RepeatedKFold and CatBoost (default 42).
+    """Baseline CatBoostRegressor with RepeatedKFold cross-validation.
 
-    Returns
-    -------
-    results_df : pd.DataFrame       Per-fold MAE/MSE/RMSE/R2 plus Mean and Std rows.
-    model      : CatBoostRegressor  Model trained on the final CV fold.
-    X          : pd.DataFrame       Feature matrix used (rows with non-NaN target).
-    y_pred     : pd.Series          Out-of-fold predictions aligned to X's index.
     """
-    # Build the exclusion set: ID columns + target_col.
-
-    y = df_model[target_col].copy() # target
-    # exlude id features and other targets
-    exclude = ['Patient', 'Timepoint', target_col, 'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction', 'pain_under_load_reduction_pct']
+    y = df_model[target_col].copy()
+    exclude      = ['Patient', 'Timepoint', target_col, 'pain_reduction',
+                    'pain_reduction_pct', 'pain_under_load_reduction',
+                    'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_model.columns if c not in exclude]
-    X = df_model[feature_cols].copy()
+    X            = df_model[feature_cols].copy()
 
     valid = y.notna()
-    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+    X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    # Convert category dtype to str so CatBoost treats them as categorical features
     for col in X.select_dtypes(include=['category', 'object']).columns:
-        X[col] = X[col].astype(str)
+        X[col] = X[col].astype(object).fillna('missing')
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
 
-    # Print run header with dataset dimensions and CV configuration
     print(f"\n{'='*65}")
     print(f"  CatBoost Regressor Baseline — {name}")
     print(f"  Target : {target_col}")
@@ -326,12 +308,11 @@ def run_catboost_regressor(df_model, target_col, name,
     print(f"  CV     : {n_splits}-fold × {n_repeats} repeats = {n_splits * n_repeats} fits")
     print(f"{'='*65}")
 
-    # Initialise CV splitter and containers for per-fold results and predictions
-    rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
+    rkf          = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
     fold_results = []
-    y_pred = pd.Series(np.nan, index=range(len(X)), dtype='float64')
+    y_pred_sum   = pd.Series(0.0, index=range(len(X)))
+    y_pred_count = pd.Series(0,   index=range(len(X)))
 
-    # Train one CatBoostRegressor per fold, collect metrics, and store predictions
     for fold, (train_idx, test_idx) in enumerate(rkf.split(X)):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
@@ -340,54 +321,46 @@ def run_catboost_regressor(df_model, target_col, name,
             pt_fold     = clone(target_transformer)
             y_train_fit = pd.Series(
                 pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
-                index=y_train.index,
-            )
+                index=y_train.index)
         else:
-            pt_fold     = None
-            y_train_fit = y_train
+            pt_fold, y_train_fit = None, y_train
 
         model = CatBoostRegressor(
-            iterations=1000,
-            loss_function='RMSE',
-            random_seed=random_state,
-            task_type='CPU', 
-            thread_count=-1, #using all cores in paralell
-            verbose=0,
-        )
+            iterations=1000, loss_function='RMSE',
+            random_seed=random_state, task_type='CPU',
+            thread_count=-1, verbose=0)
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
 
         preds_raw = model.predict(X_test)
-        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
-                 if pt_fold is not None else preds_raw)
-        y_pred.iloc[test_idx] = preds
+        preds     = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
+                     if pt_fold is not None else preds_raw)
 
-        # Metrics computed in original-space (inverse-transformed if transformer provided)
+        # Average predictions across repeats
+        y_pred_sum.iloc[test_idx]   += preds
+        y_pred_count.iloc[test_idx] += 1
+
         mae  = mean_absolute_error(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
-        mse  = rmse ** 2
         r2   = r2_score(y_test, preds)
-        m = {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
-        fold_results.append({'Fold': fold + 1, **m})
-        print(f"  Fold {fold+1:>2}: MAE={m['MAE']:.3f}  MSE={m['MSE']:.3f}  "
-              f"RMSE={m['RMSE']:.3f}  R²={m['R2']:.3f}")
+        fold_results.append({'Fold': fold + 1, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
+        print(f"  Fold {fold+1:>2}: MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
-    # Append Mean and Std summary rows to the per-fold results DataFrame
-    results_df = pd.DataFrame(fold_results)
+    y_pred = y_pred_sum / y_pred_count  # averaged across repeats
+
+    results_df  = pd.DataFrame(fold_results)
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    mean_row = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
-    std_row  = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
-    results_df = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+    mean_row    = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
+    std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
+    results_df  = pd.concat([results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    # Print the mean ± std ± 95% CI summary for each metric
     n_folds = n_splits * n_repeats
     t_crit  = stats.t.ppf(0.975, df=n_folds - 1)
     print(f"\n  Summary ({n_splits}x{n_repeats} CV, 95% CI):")
     for m in metric_cols:
-        mv  = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
-        sv  = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
-        ci  = t_crit * sv / np.sqrt(n_folds)
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv - ci:.3f}, {mv + ci:.3f}])")
+        mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
+        sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
+        ci = t_crit * sv / np.sqrt(n_folds)
+        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}  (95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
 
     return results_df, model, X, y_pred
 
