@@ -485,39 +485,71 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     return shap_values
 
 
-def plot_feature_frequency(feature_freq, name, top_n=30, n_outer=20, threshold=0.50):
+def plot_sweep(sweep_dfs, title='Feature Selection'):
+    """Plot RMSE, MAE, R2 vs number of features for one or more models.
+
+    Parameters
+    ----------
+    sweep_dfs : pd.DataFrame  or  dict {model_name: sweep_df}
+        A single sweep_df or a dict mapping model names to their sweep_dfs.
+        Each sweep_df must have columns: n_features, threshold_label,
+        mean_RMSE, std_RMSE, mean_MAE, std_MAE, mean_R2, std_R2.
+    title : str
+    """
+    if isinstance(sweep_dfs, pd.DataFrame):
+        sweep_dfs = {'Model': sweep_dfs}
+
+    colors  = ['steelblue', 'darkorange', 'seagreen', 'firebrick',
+               'mediumpurple', 'saddlebrown', 'deeppink', 'teal']
+    metrics = ['RMSE', 'MAE', 'R2']
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+    for ax, metric in zip(axes, metrics):
+        for (name, sweep_df), color in zip(sweep_dfs.items(), colors):
+            x    = sweep_df['n_features']
+            mean = sweep_df[f'mean_{metric}']
+            std  = sweep_df[f'std_{metric}']
+            ax.plot(x, mean, marker='o', color=color, label=name)
+            ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
+        ax.set_ylabel(metric)
+        ax.legend(loc='upper right')
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+    # x-tick labels from the first sweep_df
+    first_df = next(iter(sweep_dfs.values()))
+    x_vals   = first_df['n_features']
+    x_labels = first_df['threshold_label']
+    axes[-1].set_xlabel('Number of features')
+    axes[-1].set_xticks(x_vals)
+    axes[-1].set_xticklabels(
+        [f"{n}\n({t})" for n, t in zip(x_vals, x_labels)], fontsize=8)
+
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_feature_frequency(feature_freq, name):
     """Bar plot of feature selection frequency across outer folds.
+    Plots all features selected in at least 1 fold.
 
     Parameters:
-        feature_freq : pd.Series  — selection counts per feature 
+        feature_freq : pd.Series  — selection counts per feature
         name         : str        — plot title suffix
-        top_n        : int        — max features to display (default 30)
-        n_outer      : int        — total number of outer folds (default 20)
-        threshold    : float      — frequency threshold to highlight (default 0.50)
     """
     import matplotlib.pyplot as plt
+    n_outer = 20  # outer folds
 
-    threshold_count = threshold * n_outer
-
-    # Filter to features selected at least once, take top_n
-    freq_plot = (feature_freq[feature_freq > 0]
-                 .nlargest(top_n)
-                 .sort_values(ascending=True))  # ascending → highest bar at top
+    # All features selected in at least 1 fold, highest bar at top
+    freq_plot = feature_freq[feature_freq > 0].sort_values(ascending=True)
 
     if freq_plot.empty:
         print("  Warning: No features were selected in any fold!")
         return
 
     fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.4)))
-
-    colors = ['steelblue' if v >= threshold_count else 'lightsteelblue'
-              for v in freq_plot.values]
-
-    bars = ax.barh(freq_plot.index, freq_plot.values, color=colors, edgecolor='white')
-
-    # Threshold line
-    ax.axvline(x=threshold_count, color='tomato', linestyle='--', linewidth=1.5,
-               label=f'≥{int(threshold*100)}% threshold ({int(threshold_count)}/{n_outer} folds)')
+    bars = ax.barh(freq_plot.index, freq_plot.values, color='lightsteelblue', edgecolor='white')
 
     # Value labels on bars
     for bar, val in zip(bars, freq_plot.values):
