@@ -464,7 +464,7 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     
     return shap_values
 
-def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features'):
+def plot_sweep(sweep_dfs, name='Performance Metrics against Selected Features'):
     """
     Example on Multiple Model plots usage:
     plot_sweep({
@@ -502,7 +502,7 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
         [f"{t}\n({n})" for t, n in zip(x_labels, n_vals)],
         fontsize=8, rotation=45, ha='right')
 
-    plt.suptitle(title, fontsize=12)
+    plt.suptitle(name, fontsize=12)
     plt.tight_layout()
     plt.show()
 
