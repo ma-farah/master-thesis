@@ -8,7 +8,7 @@ from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 import joblib
 import contextlib, io
-import feature_selection
+import docs.feature_selection as feature_selection
 import preprocess
 
 
@@ -223,7 +223,7 @@ def run_tuned_catboost_mrmr(
     from feature_engine.selection import MRMR
     from collections import Counter
     import optuna, warnings, statistics
-    import feature_selection
+    import docs.feature_selection as feature_selection
 
     for pat in ['.*less than 75% GPU memory.*', '.*joblib.*', '.*loky.*']:
         warnings.filterwarnings('ignore', message=pat)
