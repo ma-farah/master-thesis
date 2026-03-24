@@ -61,7 +61,7 @@ def elasticnet_mrmr(
       3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters
       Returns results dataframe with metrics, and a feature frequency list
 
-    Returns: results_df, feature_freq,
+    Returns: results_df, feature_freq, selected_features_per_fold
     """
     from sklearn.linear_model import ElasticNet
     from feature_engine.selection import MRMR
@@ -287,7 +287,7 @@ def elasticnet_mrmr(
     for feat, cnt in feature_freq.items():
             print(f"    {cnt:>2}/{n_outer}  {cnt/n_outer*100:4.1f}%  {feat}")
 
-    return results_df, feature_freq
+    return results_df, feature_freq, selected_features_per_fold
 
 
 #_________________________________________________________________________________________________

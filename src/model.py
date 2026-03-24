@@ -542,3 +542,65 @@ def plot_feature_frequency(feature_freq, name, top=20):
     ax.legend(loc='lower right')
     plt.tight_layout()
     plt.show()
+
+
+def jaccard_scores(selected_features_per_fold, name=''):
+    """Compute pairwise Jaccard similarity across all outer fold feature sets.
+
+    Parameters
+    ----------
+    selected_features_per_fold : list of lists   feature sets from each outer fold
+    name                       : str              label for print output
+
+    Returns
+    -------
+    jaccard_matrix : pd.DataFrame   n_folds × n_folds pairwise Jaccard matrix
+    mean_jaccard   : float          mean pairwise Jaccard (excluding diagonal)
+    std_jaccard    : float          std of pairwise Jaccard values
+    """
+    from itertools import combinations
+
+    n_folds = len(selected_features_per_fold)
+    sets    = [set(fold) for fold in selected_features_per_fold]
+
+    matrix = np.ones((n_folds, n_folds))
+    values = []
+
+    for i, j in combinations(range(n_folds), 2):
+        intersection = len(sets[i] & sets[j])
+        union        = len(sets[i] | sets[j])
+        jac          = intersection / union if union > 0 else 0.0
+        matrix[i, j] = jac
+        matrix[j, i] = jac
+        values.append(jac)
+
+    labels = [f'F{i+1}' for i in range(n_folds)]
+    jaccard_matrix = pd.DataFrame(matrix, index=labels, columns=labels)
+
+    mean_jac = np.mean(values)
+    std_jac  = np.std(values)
+    min_jac  = np.min(values)
+    max_jac  = np.max(values)
+
+    print(f"\n{'='*55}")
+    print(f"  Jaccard Scores — {name}")
+    print(f"  Folds: {n_folds}   Pairs evaluated: {len(values)}")
+    print(f"{'='*55}")
+    print(f"  Mean Jaccard : {mean_jac:.3f} ± {std_jac:.3f}")
+    print(f"  Min  Jaccard : {min_jac:.3f}")
+    print(f"  Max  Jaccard : {max_jac:.3f}")
+
+    # upper triangle mask — keeps only lower triangle (no duplicate pairs)
+    mask = np.triu(np.ones((n_folds, n_folds), dtype=bool))
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(jaccard_matrix, mask=mask, annot=True, fmt='.2f',
+                cmap='mako', vmin=0, vmax=1,
+                linewidths=0.5, ax=ax)
+    ax.set_title(f'Jaccard Scores: Outer Fold Feature Selections — {name}\n'
+                 f'Mean={mean_jac:.3f} ± {std_jac:.3f}',
+                 fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+    return jaccard_matrix
