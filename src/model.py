@@ -484,8 +484,8 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
 
     for ax_idx, (ax, metric) in enumerate(zip(axes, metrics)):
         for model_idx, (name, sweep_df) in enumerate(sweep_dfs.items()):
-            color = model_colors
-            x     = sweep_df['n_features']
+            color = tuple(model_colors[model_idx])
+            x     = sweep_df['threshold']          # fixed across all models
             mean  = sweep_df[f'mean_{metric}']
             ax.plot(x, mean, marker='o', color=color, label=name)
         ax.set_ylabel(metric)
@@ -493,12 +493,13 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
         ax.grid(True, linestyle='--', alpha=0.5)
 
     first_df = next(iter(sweep_dfs.values()))
-    x_vals   = first_df['n_features']
+    x_vals   = first_df['threshold']
     x_labels = first_df['threshold_label']
-    axes[-1].set_xlabel('Number of features')
+    n_vals   = first_df['n_features']
+    axes[-1].set_xlabel('Threshold')
     axes[-1].set_xticks(x_vals)
     axes[-1].set_xticklabels(
-        [f"{n}\n({t})" for n, t in zip(x_vals, x_labels)],
+        [f"{t}\n({n})" for t, n in zip(x_labels, n_vals)],
         fontsize=8, rotation=45, ha='right')
 
     plt.suptitle(title, fontsize=12)

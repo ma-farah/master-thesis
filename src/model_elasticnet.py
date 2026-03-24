@@ -130,7 +130,7 @@ def elasticnet_mrmr(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
         def mrmr_objective(trial):
-            k                = trial.suggest_categorical('K',                [40, 30, 20, 10])
+            k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
             n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
             max_depth        = trial.suggest_categorical('max_depth',        [2, 4, 6, 8])
             min_samples_leaf = trial.suggest_categorical('min_samples_leaf', [3, 5, 8])
@@ -215,7 +215,7 @@ def elasticnet_mrmr(
         X_test_scaled = pd.DataFrame(
             scaler.transform(X_test_imp),
             columns=selected_cols, index=X_test_sel.index)
-        print('  Running 20 Inner Folds, 50 Optuna Trials...')
+        print('     Running 20 Inner Folds, 50 Optuna Trials...')
         # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
         inner_splits = list(inner_cv.split(X_train_scaled))
 
@@ -243,8 +243,8 @@ def elasticnet_mrmr(
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
-        print(f"     Best Trial: {model_study.best_trial.number}/{N_TRIALS_MODEL}" 
-              f" RMSE={model_study.best_value:.4f}  {best_model_params}")
+        print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}" 
+              f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
@@ -258,8 +258,7 @@ def elasticnet_mrmr(
         r2   = r2_score(y_test, preds)
         fold_results.append({
             'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-        print(f"     Outer Fold {outer_fold}   K={best_k}   Features={len(selected_cols)}: {selected_cols}")
-        print(f"     MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        print(f"  MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
 
@@ -318,16 +317,7 @@ def elasticnet_threshold_analysis(
 
     N_TRIALS = 50
 
-    # Convert selection counts to frequencies, build threshold grid
-    freq_norm    = feature_freq / 20
-    unique_freqs = sorted(freq_norm[freq_norm >= 0.10].unique())
-    indices      = np.linspace(0, len(unique_freqs) - 1, 9, dtype=int)
-    THRESHOLDS   = sorted(set(
-        [0.0, 0.10] + [unique_freqs[i] for i in indices if unique_freqs[i] > 0.10]
-    ))
-
     y = df_combined[target_col].copy()
-
     exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
                'pain_reduction_pct', 'pain_under_load_reduction',
                'pain_under_load_reduction_pct'}
@@ -345,21 +335,35 @@ def elasticnet_threshold_analysis(
     sweep_results = []
     total_start   = time.time()
 
-    for threshold in THRESHOLDS:
-        if threshold == 0.0:
+     # steps to run threshold-analysis
+    steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+    for step in steps:
+        if step == 0:
             selected_cols = feature_cols.copy()
             thresh_label  = 'all'
+            pct_str = ' '
         else:
-            selected_cols = freq_norm[freq_norm >= threshold].index.tolist()
-            thresh_label  = f'>={threshold*100:.0f}%'
+            selected_cols = feature_freq[feature_freq >= step].index.tolist()
+            thresh_label  = f'>={step}/20'
+            pct_str = f'{step/20*100:.0f}%'
 
         if len(selected_cols) == 0:
-            print(f"\n  Threshold {thresh_label}: no features, skipped.")
-            continue
+            last_count = feature_freq[feature_freq > 0].max()
+            if sweep_results and sweep_results[-1]['threshold'] == int(last_count):
+                print(f"\n  No new features beyond >={int(last_count)}/20. Stopping computations.")
+                break
+            selected_cols = feature_freq[feature_freq >= last_count].index.tolist()
+            thresh_label  = f'>={int(last_count)}/20'
+            print(f"\n  No features at {thresh_label}. Using last valid count: {int(last_count)}/20.")
+            is_last = True
+            pct_str = f'{int(last_count)/20*100:.0f}%'
+        else:
+            is_last = False
 
         n_features = len(selected_cols)
-        print(f"\n{'='*65}")
-        print(f"  Threshold {thresh_label}:  {n_features} features")
+        print(f"\n{'='*65}") 
+        print(f"  Threshold  {thresh_label} ({pct_str}):  {n_features} features")
         print(f"  {selected_cols[:8]}{'...' if n_features > 8 else ''}")
         print(f"{'='*65}")
 
@@ -381,11 +385,13 @@ def elasticnet_threshold_analysis(
             # Encode
             X_train_sel = X_train[selected_cols].copy()
             X_test_sel  = X_test[selected_cols].copy()
+
             cats_sel = [c for c in cat_cols if c in selected_cols]
             if cats_sel:
                 oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
                 X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
                 X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
+
             X_train_sel = X_train_sel.astype(float)
             X_test_sel  = X_test_sel.astype(float)
 
@@ -449,27 +455,26 @@ def elasticnet_threshold_analysis(
             fold_results.append({'Fold': outer_fold, 'MAE': mae, 'RMSE': rmse, 'R2': r2})
 
         res     = pd.DataFrame(fold_results)
-        n_folds = len(fold_results)
-
         mean_mae,  std_mae  = res['MAE'].mean(),  res['MAE'].std()
         mean_rmse, std_rmse = res['RMSE'].mean(), res['RMSE'].std()
         mean_r2,   std_r2   = res['R2'].mean(),   res['R2'].std()
 
-        elapsed = (time.time() - thresh_start) / 60
-        print(f"\n  {thresh_label}  {n_features} features  {elapsed:.1f} min")
+        print(f"\n  {thresh_label}  {n_features} features ")
         for label, mv, sv in [('MAE', mean_mae, std_mae),
                                ('RMSE', mean_rmse, std_rmse),
                                ('R2', mean_r2, std_r2)]:
             print(f"    {label}: {mv:.3f} ± {sv:.4f}  ")
 
         sweep_results.append({
-            'threshold':       threshold,
+            'threshold':       step,
             'threshold_label': thresh_label,
             'n_features':      n_features,
             'mean_MAE':        mean_mae,  'std_MAE':  std_mae,
             'mean_RMSE':       mean_rmse, 'std_RMSE': std_rmse,
             'mean_R2':         mean_r2,   'std_R2':   std_r2,
         })
+        if is_last:
+            break
 
     total_elapsed = (time.time() - total_start) / 60
     print(f"\n{'='*65}")
