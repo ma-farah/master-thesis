@@ -246,7 +246,7 @@ def run_tuned_svr_mrmr(
     import optuna, warnings, statistics
     from feature_engine.selection import MRMR
     from collections import Counter
-    import feature_selection
+    import docs.feature_selection as feature_selection
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 

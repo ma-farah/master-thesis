@@ -8,7 +8,7 @@ from sklearn.model_selection import RepeatedKFold
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 import joblib
 import contextlib, io
-import feature_selection
+import docs.feature_selection as feature_selection
 import preprocess
 
 
@@ -241,7 +241,7 @@ def run_tuned_pls_mrmr(
     from feature_engine.selection import MRMR
     from collections import Counter
     import optuna, warnings, statistics
-    import feature_selection
+    import docs.feature_selection as feature_selection
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 

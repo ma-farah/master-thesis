@@ -91,11 +91,11 @@ def elasticnet_mrmr(
     # Sugesstions for num. selected features : from all features to selecting 10 features
     # only include values smaller than p
     p = len(feature_cols)
-    print(f"\n{'='*65}")
+    print(f"\n{'='*80}")
     print(f" Nested CV - ElasticNet + MRMR + Optuna — {target_col}")
     print(f"  n={len(X)}, p={p}")
-    print(f"  Outer 4×5=20   Inner 4×5=20   Optuna trials Model ={N_TRIALS_MODEL}   Optuna trials MRMR ={N_TRIALS_MRMR}")
-    print(f"{'='*65}")
+    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna Trials Model={N_TRIALS_MODEL} | Optuna Trials MRMR={N_TRIALS_MRMR}")
+    print(f"{'='*80}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -215,7 +215,7 @@ def elasticnet_mrmr(
         X_test_scaled = pd.DataFrame(
             scaler.transform(X_test_imp),
             columns=selected_cols, index=X_test_sel.index)
-        print('Running 20 Inner Folds, 50 Optuna Trials...')
+        print('  Running 20 Inner Folds, 50 Optuna Trials...')
         # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
         inner_splits = list(inner_cv.split(X_train_scaled))
 
@@ -243,8 +243,8 @@ def elasticnet_mrmr(
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
-        print(f"    Best Trial: {model_study.best_trial.number}/{N_TRIALS_MODEL}"
-              f"RMSE={model_study.best_value:.4f}  {best_model_params}")
+        print(f"     Best Trial: {model_study.best_trial.number}/{N_TRIALS_MODEL}" 
+              f" RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
@@ -258,8 +258,8 @@ def elasticnet_mrmr(
         r2   = r2_score(y_test, preds)
         fold_results.append({
             'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-        print(f"    Outer Fold {outer_fold}   K={best_k}   Features={len(selected_cols)}: {selected_cols}")
-        print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
+        print(f"     Outer Fold {outer_fold}   K={best_k}   Features={len(selected_cols)}: {selected_cols}")
+        print(f"     MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
 
@@ -450,7 +450,6 @@ def elasticnet_threshold_analysis(
 
         res     = pd.DataFrame(fold_results)
         n_folds = len(fold_results)
-        t_crit  = stats.t.ppf(0.975, df=n_folds - 1)
 
         mean_mae,  std_mae  = res['MAE'].mean(),  res['MAE'].std()
         mean_rmse, std_rmse = res['RMSE'].mean(), res['RMSE'].std()
@@ -461,9 +460,7 @@ def elasticnet_threshold_analysis(
         for label, mv, sv in [('MAE', mean_mae, std_mae),
                                ('RMSE', mean_rmse, std_rmse),
                                ('R2', mean_r2, std_r2)]:
-            ci = t_crit * sv / np.sqrt(n_folds)
-            print(f"    {label}: {mv:.3f} +/- {sv:.4f}  "
-                  f"(95% CI [{mv-ci:.3f}, {mv+ci:.3f}])")
+            print(f"    {label}: {mv:.3f} ± {sv:.4f}  ")
 
         sweep_results.append({
             'threshold':       threshold,
@@ -520,7 +517,7 @@ def run_tuned_elasticnet(
     print(f"\n{'='*65}")
     print(f"  ElasticNet + Optuna — {target_col}")
     print(f"  n={len(X)}, p={len(selected_cols)}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna trials={N_TRIALS}")
+    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna trials Model={N_TRIALS}")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)

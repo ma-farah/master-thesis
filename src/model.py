@@ -464,29 +464,30 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     
     return shap_values
 
-
-
-def plot_sweep(sweep_dfs, title='Feature Selection'):
-    
+def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features'):
+    """
+    Example on Multiple Model plots usage:
+    plot_sweep({
+        'ElasticNet': sweep_df_en,
+        'CatBoost':   sweep_df_cb,
+        'SVR':        sweep_df_svr,
+        'HGBR':       sweep_df_hgbr,
+    }, title='Performance Metrics against Selected Features')
+    """
     if isinstance(sweep_dfs, pd.DataFrame):
         sweep_dfs = {'Model': sweep_dfs}
 
-    model_colors  = ['steelblue', 'darkorange', 'seagreen', 'firebrick',
-                     'mediumpurple', 'saddlebrown', 'deeppink', 'teal']
-    metric_colors = ['steelblue', 'darkorange', 'seagreen']
+    model_colors  = sns.color_palette("viridis", len(sweep_dfs))
     metrics       = ['RMSE', 'MAE', 'R2']
-    single_model  = len(sweep_dfs) == 1
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
     for ax_idx, (ax, metric) in enumerate(zip(axes, metrics)):
         for model_idx, (name, sweep_df) in enumerate(sweep_dfs.items()):
-            color = metric_colors[ax_idx] if single_model else model_colors[model_idx]
+            color = model_colors
             x     = sweep_df['n_features']
             mean  = sweep_df[f'mean_{metric}']
-            std   = sweep_df[f'std_{metric}']
             ax.plot(x, mean, marker='o', color=color, label=name)
-            ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
         ax.set_ylabel(metric)
         ax.legend(loc='upper right')
         ax.grid(True, linestyle='--', alpha=0.5)
@@ -497,12 +498,12 @@ def plot_sweep(sweep_dfs, title='Feature Selection'):
     axes[-1].set_xlabel('Number of features')
     axes[-1].set_xticks(x_vals)
     axes[-1].set_xticklabels(
-        [f"{n}\n({t})" for n, t in zip(x_vals, x_labels)], fontsize=8)
+        [f"{n}\n({t})" for n, t in zip(x_vals, x_labels)],
+        fontsize=8, rotation=45, ha='right')
 
     plt.suptitle(title, fontsize=12)
     plt.tight_layout()
     plt.show()
-
 
 
 def plot_feature_frequency(feature_freq, name, top=20):
@@ -518,14 +519,14 @@ def plot_feature_frequency(feature_freq, name, top=20):
 
     # All features selected in at least 1 fold, highest bar at top
     freq_plot = feature_freq[feature_freq > 0].sort_values(ascending=True).tail(top)
-    
+
     if freq_plot.empty:
         print("  Warning: No features were selected in any fold!")
         return
 
     fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.35)))
     fig.subplots_adjust(top=0.97)
-    bars = ax.barh(freq_plot.index, freq_plot.values, color='lightsteelblue', edgecolor='white')
+    bars = ax.barh(freq_plot.index, freq_plot.values, color='teal', edgecolor='white')
 
     # Value labels on bars
     for bar, val in zip(bars, freq_plot.values):
