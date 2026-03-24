@@ -51,7 +51,7 @@ def prep_for_mrmr(X_train, cat_cols, random_state=42):
 
 
 def elasticnet_mrmr(
-    df_combined, target_col='pain_reduction', random_state=42,
+    df_combined, target_col='pain_reduction_pct', random_state=42,
     target_transformer=None,
 ):
     """ElasticNet with MRMR (K + RFCQ params tuned by Optuna) inside each outer CV fold.
@@ -215,7 +215,7 @@ def elasticnet_mrmr(
         X_test_scaled = pd.DataFrame(
             scaler.transform(X_test_imp),
             columns=selected_cols, index=X_test_sel.index)
-
+        print('Running 20 Inner Folds, 50 Optuna Trials...')
         # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
         inner_splits = list(inner_cv.split(X_train_scaled))
 
@@ -236,19 +236,14 @@ def elasticnet_mrmr(
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        def _cb(study, trial):
-            if trial.state.name == 'COMPLETE':
-                print(f"    Trial {trial.number+1:>3}/{N_TRIALS_MODEL}: "
-                      f"RMSE={trial.value:.4f}  {trial.params}")
-
         model_study = optuna.create_study(direction='minimize')
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
-                                 callbacks=[_cb], show_progress_bar=False)
+                                 show_progress_bar=False)
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
-        print(f"  Best Trial: {model_study.best_trial.number}  "
+        print(f"    Best Trial: {model_study.best_trial.number}/{N_TRIALS_MODEL}"
               f"RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
@@ -263,7 +258,7 @@ def elasticnet_mrmr(
         r2   = r2_score(y_test, preds)
         fold_results.append({
             'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-        print(f"  Outer Fold {outer_fold} | K={best_k} | Features={len(selected_cols)}: {selected_cols}")
+        print(f"    Outer Fold {outer_fold}   K={best_k}   Features={len(selected_cols)}: {selected_cols}")
         print(f"    MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
@@ -276,22 +271,10 @@ def elasticnet_mrmr(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
     n_outer = len(fold_results)
-    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
-
     print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
     for m in metric_cols:
         mv, sv = mean_row[m], std_row[m]
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f})")
-
-    print(f"\n  Per-fold parameters:")
-    print(f"  {'Fold':>4}  {'K':>4}  {'n_est':>5}  {'depth':>5}  {'leaf':>4}  "
-          f"{'alpha':>9}  {'l1_ratio':>8}")
-    print(f"  {'─'*55}")
-    for i, (mrmr_p, model_p) in enumerate(
-            zip(best_mrmr_params_per_fold, best_model_params_list), start=1):
-        print(f"  {i:>4}  {mrmr_p['K']:>4}  {mrmr_p['n_estimators']:>5}  "
-              f"{mrmr_p['max_depth']:>5}  {mrmr_p['min_samples_leaf']:>4}  "
-              f"{model_p['alpha']:>9.4f}  {model_p['l1_ratio']:>8.4f}")
 
     # ── Feature frequency ─────────────────────────────────────────────────────
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
@@ -301,9 +284,9 @@ def elasticnet_mrmr(
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
-    print(f"\n  Complete Feature selection frequency list (out of {n_outer} outer folds):")
+    print(f"\n  Complete Feature Selection Frequency List:")
     for feat, cnt in feature_freq.items():
-            print(f"    {cnt:>2}/{n_outer}  ({cnt/n_outer*100:5.1f}%)  {feat}")
+            print(f"    {cnt:>2}/{n_outer}  {cnt/n_outer*100:4.1f}%  {feat}")
 
     return results_df, feature_freq
 
@@ -313,7 +296,7 @@ def elasticnet_mrmr(
 #_________________________________________________________________________________________________
 
 def elasticnet_threshold_analysis(
-    df_combined, feature_freq, target_col='pain_reduction',
+    df_combined, feature_freq, target_col='pain_reduction_pct',
     random_state=42, target_transformer=None):
     """ElasticNet + Optuna nested CV across feature-frequency threshold subsets.
 
@@ -450,7 +433,7 @@ def elasticnet_threshold_analysis(
                                      show_progress_bar=False)
 
             best_params = model_study.best_params
-            print(f"  Fold {outer_fold:>2}/20: Trial {model_study.best_trial.number+1:>2}/{N_TRIALS}"
+            print(f"  Outer Fold {outer_fold:>2}/20:  Best Trial {model_study.best_trial.number+1:>2}/{N_TRIALS}"
                   f"  RMSE={model_study.best_value:.4f}  {best_params}")
 
             fold_model = ElasticNet(**best_params, max_iter=5000, random_state=random_state)
@@ -504,7 +487,7 @@ def elasticnet_threshold_analysis(
 # Final Elasticnet Model
 #_________________________________________________________________________________________________
 def run_tuned_elasticnet(
-    df_combined, feature_list, target_col='pain_reduction', random_state=42,
+    df_combined, feature_list, target_col='pain_reduction_pct', random_state=42,
     target_transformer=None
 ):
     """ElasticNet with Optuna nested CV.
@@ -651,9 +634,10 @@ def run_tuned_elasticnet(
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
 
     patient_err_df = (pd.DataFrame(patient_errors)
-                      .groupby('Patient')['abs_error']
-                      .agg(mean_mae='mean', n_folds='count')
-                      .sort_values('mean_mae', ascending=False))
+                  .groupby('Patient')['abs_error']
+                  .agg(mean_mae='mean', n_folds='count')
+                  .sort_values('mean_mae', ascending=False)
+                  .round({'mean_mae': 2}))
 
     results_df  = pd.DataFrame(fold_results)
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
@@ -663,7 +647,6 @@ def run_tuned_elasticnet(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
     n_outer = len(fold_results)
-    t_crit  = stats.t.ppf(0.975, df=n_outer - 1)
 
     print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
     for m in metric_cols:

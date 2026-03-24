@@ -14,6 +14,7 @@ from catboost import CatBoostRegressor, Pool
 import joblib, os
 import contextlib, io
 import preprocess
+import re
 
 
 # Leaky Columns (ignored during modeling)
@@ -95,13 +96,31 @@ def construct_datasets_targets(df1, column_name, timepoints):
 
 
 
-def create_model_datasets(df1, df2, targets, timepoints, single_dataset=False):
+def create_model_datasets(df1, df2, targets, timepoints,
+                          single_dataset=False, include_baseline=False):
     """Create wide-format modeling datasets from clinical and/or immunological data.
+
+    Parameters
+    ----------
+    df1              : pd.DataFrame  First dataset (immunological)
+    df2              : pd.DataFrame  Second dataset (clinical) — ignored if single_dataset=True
+    targets          : pd.DataFrame  Output from construct_datasets_targets()
+    timepoints       : list[int]     One timepoint → raw features; two → difference features
+    single_dataset   : bool          If True, merge only df1 with targets
+    include_baseline : bool          If True, include the baseline pain value for the target
+    target_col       : str           Required when include_baseline=True - name of baseline column
+
     Returns
     -------
-    df_combined : pd.DataFrame
-        One row per patient: features + target columns.
+    df_combined : pd.DataFrame  — features + target columns, one row per patient
     """
+    _baseline_map = {
+        'pain_reduction':                'pain_scale_t1',
+        'pain_reduction_pct':            'pain_scale_t1',
+        'pain_under_load_reduction':     'pain_under_load_t1',
+        'pain_under_load_reduction_pct': 'pain_under_load_t1',
+    }
+
     t_a     = timepoints[0]
     t_b     = timepoints[1] if len(timepoints) == 2 else None
     id_cols = {'Patient', 'Timepoint'}
@@ -123,7 +142,6 @@ def create_model_datasets(df1, df2, targets, timepoints, single_dataset=False):
         df1_wide = _at(t_a)
         desc     = f"T{t_a} features"
 
-    # Targets — exclude leaky post-treatment columns when using two timepoints
     post_tm_cols = [c for c in targets.columns if t_b and c.endswith(f'_t{t_b}')]
     target_merge = ['Patient'] + [c for c in targets.columns
                                   if c != 'Patient' and c not in post_tm_cols]
@@ -143,14 +161,21 @@ def create_model_datasets(df1, df2, targets, timepoints, single_dataset=False):
     if drop:
         df_combined = df_combined.drop(columns=list(drop), errors='ignore')
 
+    keep_col = _baseline_map.get(include_baseline)
     baseline_present = [c for c in target_merge
-                        if c.endswith(f'_t{t_a}') and c in df_combined.columns]
+                        if re.search(r'_t\d+$', c)
+                        and c in df_combined.columns
+                        and c != keep_col]
     if baseline_present:
         df_combined = df_combined.drop(columns=baseline_present)
+
+    if keep_col:
+        desc += f" + baseline ({keep_col})"
 
     print(f"\nModeling dataset ready: {desc}")
     print(f"Shape: {df_combined.shape},  Patients: {df_combined['Patient'].nunique()}")
     return df_combined
+
 
 
 
@@ -246,8 +271,8 @@ def run_baseline_catboost(df_model, target_col, name,
 
     """
     y = df_model[target_col].copy()
-    exclude      = ['Patient', 'Timepoint', target_col, 'pain_reduction',
-                    'pain_reduction_pct', 'pain_under_load_reduction',
+    exclude      = ['Patient', 'Timepoint', target_col,
+                    'pain_reduction', 'pain_reduction_pct', 'pain_under_load_reduction',
                     'pain_under_load_reduction_pct']
     feature_cols = [c for c in df_model.columns if c not in exclude]
     X            = df_model[feature_cols].copy()
@@ -286,7 +311,7 @@ def run_baseline_catboost(df_model, target_col, name,
         model = CatBoostRegressor(
             iterations=500, loss_function='RMSE',
             random_seed=random_state, task_type='CPU',
-            thread_count=8, verbose=0)
+            thread_count=-1, verbose=0)
         model.fit(Pool(X_train, y_train_fit, cat_features=cat_cols))
 
         preds_raw = model.predict(X_test)
@@ -440,38 +465,32 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     return shap_values
 
 
-def plot_sweep(sweep_dfs, title='Feature Selection'):
-    """Plot RMSE, MAE, R2 vs number of features for one or more models.
 
-    Parameters
-    ----------
-    sweep_dfs : pd.DataFrame  or  dict {model_name: sweep_df}
-        A single sweep_df or a dict mapping model names to their sweep_dfs.
-        Each sweep_df must have columns: n_features, threshold_label,
-        mean_RMSE, std_RMSE, mean_MAE, std_MAE, mean_R2, std_R2.
-    title : str
-    """
+def plot_sweep(sweep_dfs, title='Feature Selection'):
+    
     if isinstance(sweep_dfs, pd.DataFrame):
         sweep_dfs = {'Model': sweep_dfs}
 
-    colors  = ['steelblue', 'darkorange', 'seagreen', 'firebrick',
-               'mediumpurple', 'saddlebrown', 'deeppink', 'teal']
-    metrics = ['RMSE', 'MAE', 'R2']
+    model_colors  = ['steelblue', 'darkorange', 'seagreen', 'firebrick',
+                     'mediumpurple', 'saddlebrown', 'deeppink', 'teal']
+    metric_colors = ['steelblue', 'darkorange', 'seagreen']
+    metrics       = ['RMSE', 'MAE', 'R2']
+    single_model  = len(sweep_dfs) == 1
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-    for ax, metric in zip(axes, metrics):
-        for (name, sweep_df), color in zip(sweep_dfs.items(), colors):
-            x    = sweep_df['n_features']
-            mean = sweep_df[f'mean_{metric}']
-            std  = sweep_df[f'std_{metric}']
+    for ax_idx, (ax, metric) in enumerate(zip(axes, metrics)):
+        for model_idx, (name, sweep_df) in enumerate(sweep_dfs.items()):
+            color = metric_colors[ax_idx] if single_model else model_colors[model_idx]
+            x     = sweep_df['n_features']
+            mean  = sweep_df[f'mean_{metric}']
+            std   = sweep_df[f'std_{metric}']
             ax.plot(x, mean, marker='o', color=color, label=name)
             ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
         ax.set_ylabel(metric)
         ax.legend(loc='upper right')
         ax.grid(True, linestyle='--', alpha=0.5)
 
-    # x-tick labels from the first sweep_df
     first_df = next(iter(sweep_dfs.values()))
     x_vals   = first_df['n_features']
     x_labels = first_df['threshold_label']
@@ -485,9 +504,10 @@ def plot_sweep(sweep_dfs, title='Feature Selection'):
     plt.show()
 
 
-def plot_feature_frequency(feature_freq, name):
+
+def plot_feature_frequency(feature_freq, name, top=20):
     """Bar plot of feature selection frequency across outer folds.
-    Plots all features selected in at least 1 fold.
+    Plots top n features. 
 
     Parameters:
         feature_freq : pd.Series  — selection counts per feature
@@ -497,13 +517,14 @@ def plot_feature_frequency(feature_freq, name):
     n_outer = 20  # outer folds
 
     # All features selected in at least 1 fold, highest bar at top
-    freq_plot = feature_freq[feature_freq > 0].sort_values(ascending=True)
-
+    freq_plot = feature_freq[feature_freq > 0].sort_values(ascending=True).tail(top)
+    
     if freq_plot.empty:
         print("  Warning: No features were selected in any fold!")
         return
 
-    fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.4)))
+    fig, ax = plt.subplots(figsize=(8, max(4, len(freq_plot) * 0.35)))
+    fig.subplots_adjust(top=0.97)
     bars = ax.barh(freq_plot.index, freq_plot.values, color='lightsteelblue', edgecolor='white')
 
     # Value labels on bars
