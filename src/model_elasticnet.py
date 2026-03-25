@@ -130,7 +130,7 @@ def elasticnet_mrmr(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
         def mrmr_objective(trial):
-            k                = trial.suggest_categorical('K',                [40, 30, 20, 10])
+            k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
             n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
             max_depth        = trial.suggest_categorical('max_depth',        [2, 4, 6, 8])
             min_samples_leaf = trial.suggest_categorical('min_samples_leaf', [3, 5, 8])
@@ -377,8 +377,8 @@ def elasticnet_rfe(
         X_val_rfe_s = pd.DataFrame(scaler_rfe.transform(X_val_rfe),     columns=feature_cols)
 
         def rfe_objective(trial):
-            n_features = trial.suggest_categorical('n_features_to_select', [40, 30, 20, 10])
-            step       = trial.suggest_categorical('step', [0.05, 0.1, 0.2, 0.3])
+            n_features = trial.suggest_categorical('n_features_to_select', [30, 20, 15, 10])
+            step       = trial.suggest_categorical('step', [1, 5, 10])
 
             # step=0.0 means remove 1 feature per iteration; clamp to at least 1
             rfe = RFE(
