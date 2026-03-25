@@ -524,7 +524,7 @@ def elasticnet_rfe(
 
 def elasticnet_rent(
     df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_3=0.95, target_transformer=None,
+    tau_3=0.975, target_transformer=None,
 ):
     """ElasticNet with RENT (C, l1_ratio, τ₁ tuned by Optuna) inside each outer CV fold.
       1. Tune RENT HPs (C, l1_ratio, τ₁) via Optuna (20 trials) on a 75-25 split of X_train.
