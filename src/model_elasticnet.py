@@ -378,7 +378,7 @@ def elasticnet_rfe(
 
         def rfe_objective(trial):
             n_features = trial.suggest_categorical('n_features_to_select', [40, 30, 20, 10])
-            step       = trial.suggest_categorical('step', [0.1, 0.2, 0.3, 0.5])
+            step       = trial.suggest_categorical('step', [0.05, 0.1, 0.2, 0.3])
 
             # step=0.0 means remove 1 feature per iteration; clamp to at least 1
             rfe = RFE(
