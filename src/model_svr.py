@@ -110,8 +110,8 @@ def svr_mrmr(
         def mrmr_objective(trial):
             k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
             n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
-            max_depth        = trial.suggest_categorical('max_depth',        [2, 4, 6, 8])
-            min_samples_leaf = trial.suggest_categorical('min_samples_leaf', [3, 5, 8])
+            max_depth        = trial.suggest_int('max_depth',             2, 8)
+            min_samples_leaf = trial.suggest_int('min_samples_leaf',      5, 20)
 
             mrmr_t = MRMR(
                 method='RFCQ', max_features=k,
@@ -299,7 +299,7 @@ def svr_threshold_analysis(
 
     sweep_results = []
     total_start   = time.time()
-    
+
     last_count = int(feature_freq[feature_freq > 0].max())
     steps = sorted(set([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20] + [last_count]))
     

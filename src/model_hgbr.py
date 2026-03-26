@@ -4,9 +4,8 @@ import pandas as pd
 import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder
 import joblib
 import contextlib, io
 import preprocess
@@ -27,6 +26,7 @@ def prep_for_mrmr(X_train, cat_cols, random_state=42):
     return out
 
 
+
 #_________________________________________________________________________________________________
 # HGBR + MRMR
 #_________________________________________________________________________________________________
@@ -43,7 +43,7 @@ def hgbr_mrmr(
     from feature_engine.selection import MRMR
     from sklearn.model_selection import train_test_split
     from collections import Counter
-    import optuna, warnings, statistics
+    import optuna, warnings
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     warnings.filterwarnings('ignore', category=FutureWarning)
@@ -114,7 +114,7 @@ def hgbr_mrmr(
                 param_grid={'n_estimators':    [n_estimators],
                             'max_depth':        [max_depth],
                             'min_samples_leaf': [min_samples_leaf]},
-                cv=5, regression=True, random_state=random_state, n_jobs=-1)
+                cv=5, regression=True, random_state=random_state, n_jobs=16)
             mrmr_t.fit(X_tr_mrmr, y_tr)
             sel_cols = list(mrmr_t.transform(X_tr_mrmr).columns)
 
@@ -140,7 +140,7 @@ def hgbr_mrmr(
             param_grid={'n_estimators':    [best_mrmr['n_estimators']],
                         'max_depth':        [best_mrmr['max_depth']],
                         'min_samples_leaf': [best_mrmr['min_samples_leaf']]},
-            cv=5, regression=True, random_state=random_state, n_jobs=-1)
+            cv=5, regression=True, random_state=random_state, n_jobs=16)
         mrmr_full.fit(X_train_mrmr, y_train_fit)
         selected_cols = list(mrmr_full.transform(X_train_mrmr).columns)
         selected_features_per_fold.append(selected_cols)
@@ -180,7 +180,7 @@ def hgbr_mrmr(
                 learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
                 min_samples_leaf  = trial.suggest_int('min_samples_leaf',  10, 30),
                 l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
-                max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 500]))
+                max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]))
             
             rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
                 joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
@@ -266,7 +266,7 @@ def hgbr_threshold_analysis(
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-    N_TRIALS = 50
+    N_TRIALS = 20  # reduce time
 
     y = df_combined[target_col].copy()
     exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
@@ -311,7 +311,6 @@ def hgbr_threshold_analysis(
         print(f"{'='*65}")
 
         fold_results = []
-        thresh_start = time.time()
 
         for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
             X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
@@ -351,13 +350,13 @@ def hgbr_threshold_analysis(
 
             def model_objective(trial):
                 params = dict(
-                    max_depth         = trial.suggest_int(        'max_depth',          2,   8),
-                    learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
-                    min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
-                    l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
-                    max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]),
+                    max_depth         = trial.suggest_int(  'max_depth',          2,   6),
+                    learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                    min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',  10,  30),
+                    l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
+                    max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]),
                 )
-                rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
+                rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
                     joblib.delayed(_fit_inner)(itr, ival, params)
                     for itr, ival in inner_splits)
                 return np.mean(rmses)
@@ -430,7 +429,7 @@ def run_tuned_hgbr(
 
     Returns: results_df, final_model, X_final, y_pred, patient_err_df, scaler_final
     """
-    import optuna, warnings, statistics
+    import optuna, statistics
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -503,18 +502,18 @@ def run_tuned_hgbr(
 
         def model_objective(trial):
             params = dict(
-                max_depth         = trial.suggest_int(        'max_depth',          2,   8),
-                learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
-                min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
-                l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
-                max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]),
+                max_depth         = trial.suggest_int(  'max_depth',          2,   6),
+                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',  10,  30),
+                l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
+                max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]),
             )
-            rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
+            rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
                 joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        def _cb(study, trial):
+        def _cb(_, trial):
             if trial.state.name == 'COMPLETE':
                 print(f"    Trial {trial.number+1:>3}/{N_TRIALS}: "
                       f"RMSE={trial.value:.4f}  {trial.params}")
@@ -568,7 +567,6 @@ def run_tuned_hgbr(
     results_df  = pd.concat(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    n_outer = len(fold_results)
     print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
     for m in metric_cols:
         mv, sv = mean_row[m], std_row[m]
