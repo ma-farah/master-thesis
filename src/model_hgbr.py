@@ -6,8 +6,6 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import RepeatedKFold
 from sklearn.preprocessing import OrdinalEncoder
-import joblib
-import contextlib, io
 import preprocess
 
 def prep_for_mrmr(X_train, cat_cols, random_state=42):
@@ -121,7 +119,7 @@ def hgbr_mrmr(
             if len(sel_cols) == 0:
                 return 1e6
 
-            probe = HistGradientBoostingRegressor(max_iter=300, loss='absolute_error', random_state=random_state)
+            probe = HistGradientBoostingRegressor(max_iter=300, loss='squared_error', random_state=random_state)
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
@@ -166,7 +164,7 @@ def hgbr_mrmr(
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_hgbr(itr, ival, params):
-            m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+            m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                              categorical_features=cat_indices,
                                              random_state=random_state)
             m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
@@ -177,27 +175,23 @@ def hgbr_mrmr(
         def model_objective(trial):
             params = dict(
                 max_depth         = trial.suggest_int('max_depth',      2, 6),
-                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                learning_rate     = trial.suggest_float('learning_rate',   0.01, 0.3, log=True),
                 min_samples_leaf  = trial.suggest_int('min_samples_leaf',  10, 30),
                 l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
                 max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]))
-            
-            rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
-                joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
-                for itr, ival in inner_splits)
+            rmses = [_fit_inner_hgbr(itr, ival, params) for itr, ival in inner_splits]
             return np.mean(rmses)
 
         model_study = optuna.create_study(direction='minimize')
-        with contextlib.redirect_stderr(io.StringIO()):
-            model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
-                                 show_progress_bar=False)
+        model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
+                             show_progress_bar=False)
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
         print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}"
               f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
 
-        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='absolute_error',
+        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='squared_error',
                                                   categorical_features=cat_indices,
                                                   random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
@@ -340,7 +334,7 @@ def hgbr_threshold_analysis(
             inner_splits = list(inner_cv.split(X_train_sc))
 
             def _fit_inner(itr, ival, params):
-                m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+                m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                                  categorical_features=cat_indices,
                                                  random_state=random_state)
                 m.fit(X_train_sc.iloc[itr], y_train_fit.iloc[itr])
@@ -351,26 +345,23 @@ def hgbr_threshold_analysis(
             def model_objective(trial):
                 params = dict(
                     max_depth         = trial.suggest_int(  'max_depth',          2,   6),
-                    learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                    learning_rate     = trial.suggest_float('learning_rate',   0.01, 0.3, log=True),
                     min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',  10,  30),
                     l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
                     max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]),
                 )
-                rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
-                    joblib.delayed(_fit_inner)(itr, ival, params)
-                    for itr, ival in inner_splits)
+                rmses = [_fit_inner(itr, ival, params) for itr, ival in inner_splits]
                 return np.mean(rmses)
 
             model_study = optuna.create_study(direction='minimize')
-            with contextlib.redirect_stderr(io.StringIO()):
-                model_study.optimize(model_objective, n_trials=N_TRIALS,
-                                     show_progress_bar=False)
+            model_study.optimize(model_objective, n_trials=N_TRIALS,
+                                 show_progress_bar=False)
 
             best_params = model_study.best_params
             print(f"  Outer Fold {outer_fold:>2}/20:  Best Trial {model_study.best_trial.number+1:>2}/{N_TRIALS}"
                   f"  RMSE={model_study.best_value:.4f}  {best_params}")
 
-            fold_model = HistGradientBoostingRegressor(**best_params, loss='absolute_error',
+            fold_model = HistGradientBoostingRegressor(**best_params, loss='squared_error',
                                                       categorical_features=cat_indices,
                                                       random_state=random_state)
             fold_model.fit(X_train_sc, y_train_fit)
@@ -492,7 +483,7 @@ def run_tuned_hgbr(
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_hgbr(itr, ival, params):
-            m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+            m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                              categorical_features=cat_indices,
                                              random_state=random_state)
             m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
@@ -503,14 +494,12 @@ def run_tuned_hgbr(
         def model_objective(trial):
             params = dict(
                 max_depth         = trial.suggest_int(  'max_depth',          2,   6),
-                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                learning_rate     = trial.suggest_float('learning_rate',   0.01, 0.3, log=True),
                 min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',  10,  30),
                 l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
                 max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 400]),
             )
-            rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
-                joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
-                for itr, ival in inner_splits)
+            rmses = [_fit_inner_hgbr(itr, ival, params) for itr, ival in inner_splits]
             return np.mean(rmses)
 
         def _cb(_, trial):
@@ -519,16 +508,15 @@ def run_tuned_hgbr(
                       f"RMSE={trial.value:.4f}  {trial.params}")
 
         model_study = optuna.create_study(direction='minimize')
-        with contextlib.redirect_stderr(io.StringIO()):
-            model_study.optimize(model_objective, n_trials=N_TRIALS,
-                                 callbacks=[_cb], show_progress_bar=False)
+        model_study.optimize(model_objective, n_trials=N_TRIALS,
+                             callbacks=[_cb], show_progress_bar=False)
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
         print(f"  Best Trial: {model_study.best_trial.number}  "
               f"RMSE={model_study.best_value:.4f}  {best_model_params}")
 
-        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='absolute_error',
+        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='squared_error',
                                                   categorical_features=cat_indices,
                                                   random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
@@ -596,7 +584,7 @@ def run_tuned_hgbr(
         for k in best_model_params_list[0]}
     print(f"  Final model hyperparameters (median across outer folds): {hp_final}")
 
-    final_model = HistGradientBoostingRegressor(**hp_final, loss='absolute_error',
+    final_model = HistGradientBoostingRegressor(**hp_final, loss='squared_error',
                                                categorical_features=cat_indices,
                                                random_state=random_state)
     final_model.fit(X_final, y_final_fit)
