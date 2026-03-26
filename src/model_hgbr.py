@@ -105,8 +105,8 @@ def hgbr_mrmr(
         def mrmr_objective(trial):
             k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
             n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
-            max_depth        = trial.suggest_categorical('max_depth',        [2, 4, 6, 8])
-            min_samples_leaf = trial.suggest_categorical('min_samples_leaf', [3, 5, 8])
+            max_depth        = trial.suggest_int('max_depth',                 2, 8)
+            min_samples_leaf = trial.suggest_int('min_samples_leaf',          5, 20)
 
             mrmr_t = MRMR(
                 method='RFCQ', max_features=k,
@@ -176,13 +176,13 @@ def hgbr_mrmr(
 
         def model_objective(trial):
             params = dict(
-                max_depth         = trial.suggest_int(        'max_depth',          2,   8),
-                learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
-                min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
-                l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
-                max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]))
+                max_depth         = trial.suggest_int('max_depth',      2, 6),
+                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
+                min_samples_leaf  = trial.suggest_int('min_samples_leaf',  10, 30),
+                l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
+                max_iter          = trial.suggest_categorical('max_iter', [100, 200, 300, 500]))
             
-            rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
+            rmses = joblib.Parallel(n_jobs=16, prefer='threads')(
                 joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
                 for itr, ival in inner_splits)
             return np.mean(rmses)
