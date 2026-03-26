@@ -31,6 +31,8 @@ def prep_for_mrmr(X_train, cat_cols, random_state=42):
 # HGBR + MRMR
 #_________________________________________________________________________________________________
 
+# Imputation is only for mrmr feature selection - hgbr handles nan natively. 
+
 def hgbr_mrmr(
     df_combined, target_col='pain_reduction_pct', random_state=42,
     target_transformer=None,
@@ -119,7 +121,7 @@ def hgbr_mrmr(
             if len(sel_cols) == 0:
                 return 1e6
 
-            probe = HistGradientBoostingRegressor(max_iter=300, random_state=random_state)
+            probe = HistGradientBoostingRegressor(max_iter=300, loss='absolute_error', random_state=random_state)
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
@@ -144,7 +146,7 @@ def hgbr_mrmr(
         selected_features_per_fold.append(selected_cols)
         print(f"  {len(selected_cols)} selected features: {selected_cols}")
 
-        # ── Encode + impute + scale ───────────────────────────────────────────
+        # ── Encode only (HGBR handles NaN natively, no scaling needed) ────────
         X_train_sel = X_train[selected_cols].copy()
         X_test_sel  = X_test[selected_cols].copy()
 
@@ -154,21 +156,9 @@ def hgbr_mrmr(
             X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
             X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
 
-        X_train_sel = X_train_sel.astype(float)
-        X_test_sel  = X_test_sel.astype(float)
-
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test_sel), columns=selected_cols, index=X_test_sel.index)
-
-        scaler = StandardScaler()
-        X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train_sel.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test_sel.index)
+        X_train_scaled = X_train_sel.astype(float)
+        X_test_scaled  = X_test_sel.astype(float)
+        cat_indices    = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
 
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
 
@@ -176,7 +166,9 @@ def hgbr_mrmr(
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_hgbr(itr, ival, params):
-            m = HistGradientBoostingRegressor(**params, random_state=random_state)
+            m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+                                             categorical_features=cat_indices,
+                                             random_state=random_state)
             m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
@@ -184,11 +176,12 @@ def hgbr_mrmr(
 
         def model_objective(trial):
             params = dict(
-                max_depth         = trial.suggest_int(  'max_depth',          2,   8),
-                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
-                min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',   5,  30),
-                l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
-                max_iter          = 300)
+                max_depth         = trial.suggest_int(        'max_depth',          2,   8),
+                learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
+                min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
+                l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
+                max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]))
+            
             rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
                 joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
                 for itr, ival in inner_splits)
@@ -204,7 +197,9 @@ def hgbr_mrmr(
         print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}"
               f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
 
-        fold_model = HistGradientBoostingRegressor(**best_model_params, random_state=random_state)
+        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='absolute_error',
+                                                  categorical_features=cat_indices,
+                                                  random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
 
         preds_raw = fold_model.predict(X_test_scaled)
@@ -290,10 +285,11 @@ def hgbr_threshold_analysis(
 
     sweep_results = []
     total_start   = time.time()
-
-    steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-
+    last_count = int(feature_freq[feature_freq > 0].max())
+    steps = sorted(set([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20] + [last_count]))
+    
     for step in steps:
+        is_last = False
         if step == 0:
             selected_cols = feature_cols.copy()
             thresh_label  = 'all'
@@ -302,19 +298,11 @@ def hgbr_threshold_analysis(
             selected_cols = feature_freq[feature_freq >= step].index.tolist()
             thresh_label  = f'>={step}/20'
             pct_str = f'{step/20*100:.0f}%'
-
-        if len(selected_cols) == 0:
-            last_count = feature_freq[feature_freq > 0].max()
-            if sweep_results and sweep_results[-1]['threshold'] == int(last_count):
-                print(f"\n  No new features beyond >={int(last_count)}/20. Stopping computations.")
-                break
-            selected_cols = feature_freq[feature_freq >= last_count].index.tolist()
-            thresh_label  = f'>={int(last_count)}/20'
-            print(f"\n  No features at {thresh_label}. Using last valid count: {int(last_count)}/20.")
-            is_last = True
-            pct_str = f'{int(last_count)/20*100:.0f}%'
-        else:
-            is_last = False
+            if len(selected_cols) == 0:
+                print(f"\n  No new features at {thresh_label}. Skipping step.")
+                continue
+            if step >= last_count:
+                is_last = True
 
         n_features = len(selected_cols)
         print(f"\n{'='*65}")
@@ -346,30 +334,16 @@ def hgbr_threshold_analysis(
                 X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
                 X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
 
-            X_train_sel = X_train_sel.astype(float)
-            X_test_sel  = X_test_sel.astype(float)
-
-            X_train_imp, imputer = preprocess.impute_iterative(
-                X_train_sel, ex_cols=None, iterations=10,
-                random_state=random_state, verbose=False)
-            X_train_imp = pd.DataFrame(
-                X_train_imp, columns=selected_cols, index=X_train_sel.index)
-            X_test_imp = pd.DataFrame(
-                imputer.transform(X_test_sel),
-                columns=selected_cols, index=X_test_sel.index)
-
-            scaler = StandardScaler()
-            X_train_sc = pd.DataFrame(
-                scaler.fit_transform(X_train_imp),
-                columns=selected_cols, index=X_train_sel.index)
-            X_test_sc = pd.DataFrame(
-                scaler.transform(X_test_imp),
-                columns=selected_cols, index=X_test_sel.index)
+            X_train_sc  = X_train_sel.astype(float)
+            X_test_sc   = X_test_sel.astype(float)
+            cat_indices = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
 
             inner_splits = list(inner_cv.split(X_train_sc))
 
             def _fit_inner(itr, ival, params):
-                m = HistGradientBoostingRegressor(**params, random_state=random_state)
+                m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+                                                 categorical_features=cat_indices,
+                                                 random_state=random_state)
                 m.fit(X_train_sc.iloc[itr], y_train_fit.iloc[itr])
                 return np.sqrt(mean_squared_error(
                     y_train_fit.iloc[ival],
@@ -377,11 +351,11 @@ def hgbr_threshold_analysis(
 
             def model_objective(trial):
                 params = dict(
-                    max_depth         = trial.suggest_int(  'max_depth',          2,   8),
-                    learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
-                    min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',   5,  30),
-                    l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
-                    max_iter          = 300,
+                    max_depth         = trial.suggest_int(        'max_depth',          2,   8),
+                    learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
+                    min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
+                    l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
+                    max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]),
                 )
                 rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
                     joblib.delayed(_fit_inner)(itr, ival, params)
@@ -397,7 +371,9 @@ def hgbr_threshold_analysis(
             print(f"  Outer Fold {outer_fold:>2}/20:  Best Trial {model_study.best_trial.number+1:>2}/{N_TRIALS}"
                   f"  RMSE={model_study.best_value:.4f}  {best_params}")
 
-            fold_model = HistGradientBoostingRegressor(**best_params, random_state=random_state)
+            fold_model = HistGradientBoostingRegressor(**best_params, loss='absolute_error',
+                                                      categorical_features=cat_indices,
+                                                      random_state=random_state)
             fold_model.fit(X_train_sc, y_train_fit)
 
             preds_raw = fold_model.predict(X_test_sc)
@@ -480,6 +456,8 @@ def run_tuned_hgbr(
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
 
+    cat_indices = [selected_cols.index(c) for c in cat_cols] if cat_cols else None
+
     fold_results           = []
     best_model_params_list = []
     patient_errors         = []
@@ -509,25 +487,15 @@ def run_tuned_hgbr(
         X_train = X_train.astype(float)
         X_test  = X_test.astype(float)
 
-        # 2. Impute
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test), columns=selected_cols, index=X_test.index)
-
-        # 3. Scale
-        scaler = StandardScaler()
-        X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test.index)
+        X_train_scaled = X_train
+        X_test_scaled  = X_test
 
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_hgbr(itr, ival, params):
-            m = HistGradientBoostingRegressor(**params, random_state=random_state)
+            m = HistGradientBoostingRegressor(**params, loss='absolute_error',
+                                             categorical_features=cat_indices,
+                                             random_state=random_state)
             m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
@@ -535,11 +503,11 @@ def run_tuned_hgbr(
 
         def model_objective(trial):
             params = dict(
-                max_depth         = trial.suggest_int(  'max_depth',          2,   8),
-                learning_rate     = trial.suggest_float('learning_rate',   1e-3, 0.3, log=True),
-                min_samples_leaf  = trial.suggest_int(  'min_samples_leaf',   5,  30),
-                l2_regularization = trial.suggest_float('l2_regularization', 0.0, 1.0),
-                max_iter          = 300,
+                max_depth         = trial.suggest_int(        'max_depth',          2,   8),
+                learning_rate     = trial.suggest_float(      'learning_rate',   1e-3, 0.3, log=True),
+                min_samples_leaf  = trial.suggest_int(        'min_samples_leaf',  10,  30),
+                l2_regularization = trial.suggest_float(      'l2_regularization', 0.0, 1.0),
+                max_iter          = trial.suggest_categorical('max_iter', [50, 100, 200, 300]),
             )
             rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
                 joblib.delayed(_fit_inner_hgbr)(itr, ival, params)
@@ -561,7 +529,9 @@ def run_tuned_hgbr(
         print(f"  Best Trial: {model_study.best_trial.number}  "
               f"RMSE={model_study.best_value:.4f}  {best_model_params}")
 
-        fold_model = HistGradientBoostingRegressor(**best_model_params, random_state=random_state)
+        fold_model = HistGradientBoostingRegressor(**best_model_params, loss='absolute_error',
+                                                  categorical_features=cat_indices,
+                                                  random_state=random_state)
         fold_model.fit(X_train_scaled, y_train_fit)
 
         preds_raw = fold_model.predict(X_test_scaled)
@@ -611,15 +581,7 @@ def run_tuned_hgbr(
         X_final[cat_cols] = oe_final.fit_transform(X_final[cat_cols].astype(str))
     X_final = X_final.astype(float)
 
-    X_final_imp, _ = preprocess.impute_iterative(
-        X_final, ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final.index)
-
-    scaler_final = StandardScaler()
-    X_final = pd.DataFrame(
-        scaler_final.fit_transform(X_final_imp),
-        columns=selected_cols, index=X_final_imp.index)
+    scaler_final = None  # HGBR is tree-based, no scaling needed
 
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
@@ -636,7 +598,9 @@ def run_tuned_hgbr(
         for k in best_model_params_list[0]}
     print(f"  Final model hyperparameters (median across outer folds): {hp_final}")
 
-    final_model = HistGradientBoostingRegressor(**hp_final, random_state=random_state)
+    final_model = HistGradientBoostingRegressor(**hp_final, loss='absolute_error',
+                                               categorical_features=cat_indices,
+                                               random_state=random_state)
     final_model.fit(X_final, y_final_fit)
 
     y_pred_raw = pd.Series(

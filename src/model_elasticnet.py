@@ -804,10 +804,12 @@ def elasticnet_threshold_analysis(
     sweep_results = []
     total_start   = time.time()
 
-     # steps to run threshold-analysis
-    steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-
+   
+    last_count = int(feature_freq[feature_freq > 0].max())
+    steps = sorted(set([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20] + [last_count]))
+    
     for step in steps:
+        is_last = False
         if step == 0:
             selected_cols = feature_cols.copy()
             thresh_label  = 'all'
@@ -816,19 +818,11 @@ def elasticnet_threshold_analysis(
             selected_cols = feature_freq[feature_freq >= step].index.tolist()
             thresh_label  = f'>={step}/20'
             pct_str = f'{step/20*100:.0f}%'
-
-        if len(selected_cols) == 0:
-            last_count = feature_freq[feature_freq > 0].max()
-            if sweep_results and sweep_results[-1]['threshold'] == int(last_count):
-                print(f"\n  No new features beyond >={int(last_count)}/20. Stopping computations.")
-                break
-            selected_cols = feature_freq[feature_freq >= last_count].index.tolist()
-            thresh_label  = f'>={int(last_count)}/20'
-            print(f"\n  No features at {thresh_label}. Using last valid count: {int(last_count)}/20.")
-            is_last = True
-            pct_str = f'{int(last_count)/20*100:.0f}%'
-        else:
-            is_last = False
+            if len(selected_cols) == 0:
+                print(f"\n  No new features at {thresh_label}. Skipping step.")
+                continue
+            if step >= last_count:
+                is_last = True
 
         n_features = len(selected_cols)
         print(f"\n{'='*65}") 
