@@ -300,8 +300,8 @@ def svr_threshold_analysis(
     sweep_results = []
     total_start   = time.time()
 
-    last_count = int(feature_freq[feature_freq > 0].max())
-    steps = sorted(set([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20] + [last_count]))
+    last_count = int(feature_freq[feature_freq > 0].max())   
+    steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
     
     for step in steps:
         is_last = False
@@ -309,15 +309,27 @@ def svr_threshold_analysis(
             selected_cols = feature_cols.copy()
             thresh_label  = 'all'
             pct_str = ' '
+            current = 0
         else:
             selected_cols = feature_freq[feature_freq >= step].index.tolist()
-            thresh_label  = f'>={step}/20'
-            pct_str = f'{step/20*100:.0f}%'
+            current = step
+        
+            # If empty at step, try step + 1
             if len(selected_cols) == 0:
-                print(f"\n  No new features at {thresh_label}. Skipping step.")
+                selected_cols = feature_freq[feature_freq >= step + 1].index.tolist()
+                current = step + 1
+            
+            # If still empty, skip
+            if len(selected_cols) == 0:
+                print(f"\n  No features at threshold {step} or {step + 1}. Skipping.")
                 continue
-            if step >= last_count:
+            
+            thresh_label = f'>={step}/20'
+            pct_str = f'{step/20*100:.0f}%'
+            
+            if current >= last_count:
                 is_last = True
+
         n_features = len(selected_cols)
         print(f"\n{'='*65}")
         print(f"  Threshold  {thresh_label} ({pct_str}):  {n_features} features")

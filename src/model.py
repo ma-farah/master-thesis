@@ -346,20 +346,20 @@ def run_baseline_catboost(df_model, target_col, name,
 
 
 
-def plot_shap_catboost(model, X):
-    """SHAP bar + beeswarm plots for a catboost model."""
+def plot_shap_hgbr(model, X):
+    """SHAP bar + beeswarm plots for HGBR model."""
     import shap
-    print(f"\n=== SHAP Analysis: CatBoost ===")
+    print(f"\n=== SHAP Analysis: HGBR ===")
     explainer   = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)
 
     shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
-    plt.title(f"SHAP Feature Importance  CatBoost")
+    plt.title(f"SHAP Feature Importance  HGBR")
     plt.tight_layout()
     plt.show()
 
     shap.summary_plot(shap_values, X, show=False, max_display=20)
-    plt.title(f"SHAP Beeswarm  CatBoost")
+    plt.title(f"SHAP Beeswarm  HGBR")
     plt.tight_layout()
     plt.show()
 
@@ -463,13 +463,12 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     plt.show()
     
     return shap_values
-
-def plot_sweep(sweep_dfs, name='Performance Metrics against Selected Features'):
+def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features'):
     """
     Example on Multiple Model plots usage:
     plot_sweep({
         'ElasticNet': sweep_df_en,
-        'CatBoost':   sweep_df_cb,
+        'PLSR':       sweep_df_pls,
         'SVR':        sweep_df_svr,
         'HGBR':       sweep_df_hgbr,
     }, title='Performance Metrics against Selected Features')
@@ -477,32 +476,37 @@ def plot_sweep(sweep_dfs, name='Performance Metrics against Selected Features'):
     if isinstance(sweep_dfs, pd.DataFrame):
         sweep_dfs = {'Model': sweep_dfs}
 
-    model_colors  = sns.color_palette("viridis", len(sweep_dfs))
-    metrics       = ['RMSE', 'MAE', 'R2']
+    # Sample viridis at spread-out positions for bigger contrast between middle colors
+    cmap = plt.cm.viridis
+    n = len(sweep_dfs)
+    positions = [0.0, 0.45, 0.75, 1.0] if n == 4 else list(np.linspace(0, 1, n))
+    model_colors = [cmap(p) for p in positions]
 
+    metrics = ['RMSE', 'MAE', 'R2']
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-    for ax_idx, (ax, metric) in enumerate(zip(axes, metrics)):
-        for model_idx, (name, sweep_df) in enumerate(sweep_dfs.items()):
-            color = tuple(model_colors[model_idx])
-            x     = sweep_df['threshold']          # fixed across all models
+    for ax, metric in zip(axes, metrics):
+        for model_idx, (model_name, sweep_df) in enumerate(sweep_dfs.items()):
+            color = model_colors[model_idx]
+            x     = sweep_df['threshold']
             mean  = sweep_df[f'mean_{metric}']
-            ax.plot(x, mean, marker='o', color=color, label=name)
+            ax.plot(x, mean, marker='o', color=color, label=model_name)
         ax.set_ylabel(metric)
-        ax.legend(loc='upper right')
         ax.grid(True, linestyle='--', alpha=0.5)
+
+    # Single legend for the whole figure, outside the subplots
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper right',
+               bbox_to_anchor=(1.0, 1.0), bbox_transform=axes[0].transAxes)
 
     first_df = next(iter(sweep_dfs.values()))
     x_vals   = first_df['threshold']
     x_labels = first_df['threshold_label']
-    n_vals   = first_df['n_features']
     axes[-1].set_xlabel('Threshold')
     axes[-1].set_xticks(x_vals)
-    axes[-1].set_xticklabels(
-        [f"{t}\n({n})" for t, n in zip(x_labels, n_vals)],
-        fontsize=8, rotation=45, ha='right')
+    axes[-1].set_xticklabels(labels=x_labels, fontsize=8, rotation=45, ha='right')
 
-    plt.suptitle(name, fontsize=12)
+    fig.suptitle(title, fontsize=12)
     plt.tight_layout()
     plt.show()
 
@@ -604,3 +608,57 @@ def jaccard_scores(selected_features_per_fold, name=''):
     plt.show()
 
     return jaccard_matrix
+
+
+def pairwise_metric_comparison(results_dict, alpha=0.05):
+    """Pairwise paired t-test across model metrics RMSE, MAE and R2."""
+    from itertools import combinations
+    model_names = list(results_dict.keys())
+    n_models    = len(model_names)
+    metrics     = ['RMSE', 'MAE', 'R2']
+    get_folds   = lambda df, m: df[~df['Fold'].isin(['Mean','Std'])][m].astype(float).values
+
+    #  p-value matrices
+    pval_matrices = {}
+    for metric in metrics:
+        pm = pd.DataFrame(np.ones((n_models, n_models)), index=model_names, columns=model_names)
+        for m1, m2 in combinations(model_names, 2):
+            _, p = stats.ttest_rel(get_folds(results_dict[m1], metric),
+                                   get_folds(results_dict[m2], metric))
+            pm.loc[m1, m2] = pm.loc[m2, m1] = p
+        pval_matrices[metric] = pm
+
+    # ── Print ─────────────────────────────────────────────────────────────────
+    print(f"\n{'='*60}\n  Pairwise Paired t-test (α={alpha})\n{'='*60}")
+    for m1, m2 in combinations(model_names, 2):
+        print(f"\n  {m1} vs {m2}\n  {'Metric':<8} {'p-value':>10}  {'Sig':>6}\n  {'-'*28}")
+        for metric in metrics:
+            p = pval_matrices[metric].loc[m1, m2]
+            print(f"  {metric:<8} {p:>10.4f}  {'*YES' if p < alpha else 'no':>6}")
+
+    # ── Heatmaps ──────────────────────────────────────────────────────────────
+    fig, axes   = plt.subplots(1, 3, figsize=(18, 5))
+    mask_diag   = np.eye(n_models, dtype=bool)
+
+    for ax, metric in zip(axes, metrics):
+        annot = pd.DataFrame([[
+            '—' if m1 == m2 else f"{pval_matrices[metric].loc[m1,m2]:.3f}{' *' if pval_matrices[metric].loc[m1,m2] < alpha else ''}"
+            for m2 in model_names] for m1 in model_names],
+            index=model_names, columns=model_names)
+
+        sns.heatmap(pval_matrices[metric].astype(float), annot=annot, fmt='',
+                    cmap='mako', vmin=0, vmax=1, mask=mask_diag,
+                    linewidths=1.0, linecolor='white', ax=ax,
+                    cbar_kws={'label': 'p-value'})
+
+        for i in range(n_models):
+            ax.add_patch(plt.Rectangle((i, i), 1, 1, fill=True, color='lightgrey', lw=0))
+            ax.text(i+0.5, i+0.5, '—', ha='center', va='center', fontsize=11, color='grey')
+
+        ax.set_title(f'{metric}  (α={alpha})', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Model'); ax.set_ylabel('Model')
+
+    plt.suptitle('Pairwise Model Metrics Comparison: p-values', fontsize=14, fontweight='bold')
+    plt.tight_layout(); plt.show()
+    return pval_matrices
+
