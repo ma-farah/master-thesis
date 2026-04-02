@@ -123,7 +123,7 @@ def hgbr_mrmr(
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
-        mrmr_study = optuna.create_study(direction='minimize')
+        mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         mrmr_study.optimize(mrmr_objective, n_trials=N_TRIALS_MRMR, show_progress_bar=False)
 
         best_mrmr = mrmr_study.best_params
@@ -182,7 +182,7 @@ def hgbr_mrmr(
             rmses = [_fit_inner_hgbr(itr, ival, params) for itr, ival in inner_splits]
             return np.mean(rmses)
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                              show_progress_bar=False)
 
@@ -365,7 +365,7 @@ def hgbr_threshold_analysis(
                 rmses = [_fit_inner(itr, ival, params) for itr, ival in inner_splits]
                 return np.mean(rmses)
 
-            model_study = optuna.create_study(direction='minimize')
+            model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
             model_study.optimize(model_objective, n_trials=N_TRIALS,
                                  show_progress_bar=False)
 
@@ -519,7 +519,7 @@ def run_tuned_hgbr(
                 print(f"    Trial {trial.number+1:>3}/{N_TRIALS}: "
                       f"RMSE={trial.value:.4f}  {trial.params}")
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         model_study.optimize(model_objective, n_trials=N_TRIALS,
                              callbacks=[_cb], show_progress_bar=False)
 

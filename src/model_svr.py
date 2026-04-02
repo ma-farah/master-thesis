@@ -133,7 +133,7 @@ def svr_mrmr(
             probe.fit(X_tr_s, y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_s)))
 
-        mrmr_study = optuna.create_study(direction='minimize')
+        mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         mrmr_study.optimize(mrmr_objective, n_trials=N_TRIALS_MRMR, show_progress_bar=False)
 
         best_mrmr = mrmr_study.best_params
@@ -203,7 +203,7 @@ def svr_mrmr(
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                                  show_progress_bar=False)
@@ -400,7 +400,7 @@ def svr_threshold_analysis(
                     for itr, ival in inner_splits)
                 return np.mean(rmses)
 
-            model_study = optuna.create_study(direction='minimize')
+            model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
             with contextlib.redirect_stderr(io.StringIO()):
                 model_study.optimize(model_objective, n_trials=N_TRIALS,
                                      show_progress_bar=False)
@@ -561,7 +561,7 @@ def run_tuned_svr(
                 print(f"    Trial {trial.number+1:>3}/{N_TRIALS}: "
                       f"RMSE={trial.value:.4f}  {trial.params}")
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS,
                                  callbacks=[_cb], show_progress_bar=False)

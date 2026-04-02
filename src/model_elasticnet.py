@@ -135,7 +135,7 @@ def elasticnet_mrmr(
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
-        mrmr_study = optuna.create_study(direction='minimize')
+        mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         #with contextlib.redirect_stderr(io.StringIO()):
         mrmr_study.optimize(
                 mrmr_objective, n_trials=N_TRIALS_MRMR,
@@ -215,7 +215,7 @@ def elasticnet_mrmr(
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                                  show_progress_bar=False)
@@ -374,7 +374,7 @@ def elasticnet_rfe(
             probe.fit(X_tr_rfe_s[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_rfe_s[sel_cols])))
 
-        rfe_study = optuna.create_study(direction='minimize')
+        rfe_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         rfe_study.optimize(rfe_objective, n_trials=N_TRIALS_RFE, show_progress_bar=False)
 
         best_rfe   = rfe_study.best_params
@@ -444,7 +444,7 @@ def elasticnet_rfe(
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                                  show_progress_bar=False)
@@ -608,7 +608,7 @@ def elasticnet_rent(
             probe.fit(X_tr_s[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_s[sel_cols])))
 
-        rent_study = optuna.create_study(direction='minimize')
+        rent_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             rent_study.optimize(rent_objective, n_trials=N_TRIALS_RENT,
                                 n_jobs=1, show_progress_bar=False)
@@ -685,7 +685,7 @@ def elasticnet_rent(
                 for itr, ival in inner_splits)
             return np.mean(rmses)
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
                                  show_progress_bar=False)
@@ -885,7 +885,7 @@ def elasticnet_threshold_analysis(
                     for itr, ival in inner_splits)
                 return np.mean(rmses)
 
-            model_study = optuna.create_study(direction='minimize')
+            model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
             with contextlib.redirect_stderr(io.StringIO()):
                 model_study.optimize(model_objective, n_trials=N_TRIALS,
                                      show_progress_bar=False)
@@ -1053,7 +1053,7 @@ def run_tuned_elasticnet(
                 print(f"    Trial {trial.number+1:>3}/{N_TRIALS}: "
                       f"RMSE={trial.value:.4f}  {trial.params}")
 
-        model_study = optuna.create_study(direction='minimize')
+        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         with contextlib.redirect_stderr(io.StringIO()):
             model_study.optimize(model_objective, n_trials=N_TRIALS,
                                  callbacks=[_cb], show_progress_bar=False)
