@@ -11,27 +11,6 @@ import contextlib, io
 import preprocess
 
 
-""" This file contains all functions used for Elasticnet Modeling.
-1. elasticnet_mrmr 
-First, ElasticNet is ran with MRMR feature selection in each outer fold
-All model and MRMR hyperparameters are tuned with Optuna.
-A feature frequency list is returned, showing selected features across all outer folds,
-
-2. elasticnet_threshold_analysis
-The returned feature frequency list is then used to run a feature-threshold analysis.
-Up to 11 models are run based on different subsets of features: all features, features selected
-in >= 10% of outer folds, and up to 9 further thresholds sampled from the unique frequencies
-present in the data (data-driven, not fixed at 10% increments).
-Performance metrics are stored across all feature subsets, and used for plotting.
-
-3. run_tuned_elasticnet
-After selecting a cut-off, the remaining features from the feature frequency list is used as
-input data for the final model.
-Model hyperparameters are tuned with optuna, and performance metrics are stored.
-Final model for shap analysis used the selected features, and the median of 
-the best model hyperparameters across all outer folds. This model is later used for SHAP analysis.
-
-"""
 
 
 def prep_for_mrmr(X_train, cat_cols, random_state=42):
@@ -55,7 +34,7 @@ def elasticnet_mrmr(
     target_transformer=None,
 ):
     """ElasticNet with MRMR (K + RFCQ params tuned by Optuna) inside each outer CV fold.
-      1. Tune K and RFCQ params (n_estimators, max_depth, min_samples_leaf) via Optuna with 20 trials
+      1. Tune K and RFCQ params (n_estimators, max_depth, min_samples_leaf) via Optuna with 50 trials
          on a 75-25 split of X_train. K candidates: all features 40, 30, 20, 10 features.
       2. Re-run MRMR on full X_train with best K + best RFCQ params -> selected feature subset for an outer fold
       3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters
@@ -130,10 +109,10 @@ def elasticnet_mrmr(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
         def mrmr_objective(trial):
-            k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
-            n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
-            max_depth        = trial.suggest_int('max_depth',             2, 8)
-            min_samples_leaf = trial.suggest_int('min_samples_leaf',      5, 20)
+            k                = trial.suggest_categorical('K',                [10, 15, 20])
+            n_estimators     = trial.suggest_categorical('n_estimators',     [100, 200, 300, 400])
+            max_depth        = trial.suggest_int('max_depth',                 3, 8)
+            min_samples_leaf = trial.suggest_int('min_samples_leaf',          5, 20)
 
             mrmr_t = MRMR(
                 method='RFCQ',

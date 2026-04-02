@@ -101,9 +101,9 @@ def hgbr_mrmr(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
         def mrmr_objective(trial):
-            k                = trial.suggest_categorical('K',                [30, 20, 15, 10])
-            n_estimators     = trial.suggest_categorical('n_estimators',     [50, 100, 200, 300])
-            max_depth        = trial.suggest_int('max_depth',                 2, 8)
+            k                = trial.suggest_categorical('K',                [10, 15, 20])
+            n_estimators     = trial.suggest_categorical('n_estimators',     [100, 200, 300, 400])
+            max_depth        = trial.suggest_int('max_depth',                 3, 8)
             min_samples_leaf = trial.suggest_int('min_samples_leaf',          5, 20)
 
             mrmr_t = MRMR(
