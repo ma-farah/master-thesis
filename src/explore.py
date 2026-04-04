@@ -814,96 +814,93 @@ def pca_per_timepoint(df, timepoints, ex_cols, name, ncomp=10):
     return pca_store
 
 
-# ── PCA colored by clinical adata ───────────────────────────────────────────────────
+def plot_loadings(pca_store, timepoints=[1, 2], top_n=15):
+    """Bar plot of top loadings for PC1 and PC2."""
+    for t in timepoints:
+        d        = pca_store[t]
+        loadings = d['loadings']
+        features = d['feat_names']
+        exp      = d['exp']
 
-def pca_colored(pca_store, timepoints, color_configs, name,
-                color_source_df=None):
-    
-    """Plotting PCA score plots T1–T5, colored by clinical variables.
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'Top {top_n} loadings at T{t}', fontsize=13, fontweight='bold')
 
-    Parameters
-    ----------
-    pca_store       : dict,  saved output of pca_per_timepoint          
-    timepoints      : list[int]
-    color_configs   : list of tuples (col_name, col_type, palette)
-                      col_type ∈ {'categorical', 'continuous'}
-    name            : str   label for figure title
-    color_source_df : pd.DataFrame  or None - reference for clinical dataset
-                      If None: reads color values from pca_store (self-coloring).
-                      If provided: looks up patient IDs at the matching timepoint (cross-dataset coloring).
+        for pc_i, ax in enumerate(axes):
+            vals    = loadings[:, pc_i]
+            top_idx = np.argsort(np.abs(vals))[::-1][:top_n]
+            # Sort by actual value so positive/negative bars are grouped
+            top_idx = top_idx[np.argsort(vals[top_idx])]
+
+            names  = [features[i] for i in top_idx]
+            values = vals[top_idx]
+            colors = ['steelblue' if v >= 0 else 'coral' for v in values]
+
+            ax.barh(range(len(names)), values, color=colors, edgecolor='white', linewidth=0.5)
+            ax.set_yticks(range(len(names)))
+            ax.set_yticklabels(names, fontsize=9)
+            ax.set_xlabel('Loading')
+            ax.set_title(f'PC{pc_i+1} ({exp[pc_i]:.1f}% variance)')
+            ax.axvline(0, color='grey', lw=0.5)
+
+        plt.tight_layout()
+        plt.show()
+
+
+def pca_colored(pca_store, timepoints, color_configs, name, color_source_df):
+    """PCA score plots colored by clinical variables.
     """
-
-    for col, col_type, palette in color_configs:
+    for col, col_type in color_configs:
         fig, axes = plt.subplots(1, len(timepoints), figsize=(22, 5), sharey=False)
-        fig.suptitle(f'{name} PCA Score Plots T1–T5  |  coloured by {col}',
+        fig.suptitle(f'{name} PCA Score Plots  -  coloured by {col}',
                      fontsize=13, fontweight='bold')
 
         if col_type == 'categorical':
-            if color_source_df is None:
-                all_vals = pd.concat([
-                    pca_store[t]['df'][col].astype(str)
-                    for t in timepoints
-                    if col in pca_store[t]['df'].columns
-                ]).replace({'nan': np.nan, '<NA>': np.nan}).dropna().unique()
-            else:
-                all_vals = (
-                    color_source_df[col].astype(str)
-                    .replace({'nan': np.nan, '<NA>': np.nan})
-                    .dropna().unique()
-                )
-            categories    = sorted(all_vals)
-            cat_palette   = sns.color_palette(palette, len(categories))
-            cat_color_map = dict(zip(categories, cat_palette))
+            all_vals   = (color_source_df[col].astype(str)
+                          .replace({'nan': np.nan, '<NA>': np.nan})
+                          .dropna().unique())
+            categories = sorted(all_vals)
+            colors     = sns.color_palette('tab10', len(categories))
+            color_map  = dict(zip(categories, colors))
 
         for i, t in enumerate(timepoints):
-            ax      = axes[i]
-            d       = pca_store[t]
-            scores  = d['scores']
-            exp_t   = d['exp']
-            pt_ids  = d['patient_ids']
-            n_t     = len(pt_ids)
+            ax     = axes[i]
+            d      = pca_store[t]
+            scores = d['scores']
+            exp_t  = d['exp']
+            pt_ids = d['patient_ids']
+            n_t    = len(pt_ids)
 
             ax.axhline(0, color='grey', lw=0.5, linestyle='--')
             ax.axvline(0, color='grey', lw=0.5, linestyle='--')
 
-            # Resolve color values: self-coloring or cross-dataset
-            if color_source_df is None:
-                df_t      = d['df']
-                color_ser = (df_t[col] if col in df_t.columns
-                             else pd.Series([np.nan] * n_t))
-            else:
-                cl_lookup = (
-                    color_source_df[color_source_df['Timepoint'] == t]
-                    .set_index('Patient')[col]
-                )
-                color_ser = pd.Series(
-                    [cl_lookup.loc[p] if p in cl_lookup.index else np.nan
-                     for p in pt_ids],
-                    dtype=object,
-                )
+            cl_lookup = (color_source_df[color_source_df['Timepoint'] == t]
+                         .set_index('Patient')[col])
+            color_ser = pd.Series(
+                [cl_lookup.loc[p] if p in cl_lookup.index else np.nan
+                 for p in pt_ids], dtype=object)
 
             if col_type == 'continuous':
                 vals  = pd.to_numeric(color_ser, errors='coerce').values
                 valid = ~np.isnan(vals)
+                vmin, vmax = np.nanmin(vals[valid]), np.nanmax(vals[valid])
                 sc = ax.scatter(
                     scores[valid, 0], scores[valid, 1],
-                    c=vals[valid], cmap='mako', vmin=0, vmax=10,
+                    c=vals[valid], cmap='mako_r', vmin=vmin, vmax=vmax,
                     s=30, alpha=0.85, edgecolors='white', linewidth=0.3, zorder=3)
                 if (~valid).sum() > 0:
                     ax.scatter(scores[~valid, 0], scores[~valid, 1],
                                c='lightgrey', s=20, alpha=0.5, zorder=1)
                 if i == len(timepoints) - 1:
                     fig.colorbar(sc, ax=ax, label=col, shrink=0.85)
-            else:  # categorical
+            else:
                 vals_str = color_ser.astype(str).replace({'nan': np.nan, '<NA>': np.nan})
-                for cat in categories:
+                for cat, color in color_map.items():
                     mask = (vals_str == cat).values
                     if mask.sum() > 0:
-                        ax.scatter(
-                            scores[mask, 0], scores[mask, 1],
-                            color=cat_color_map[cat], s=30, alpha=0.85,
-                            edgecolors='white', linewidth=0.3, zorder=3,
-                            label=cat if i == 0 else '_nolegend_')
+                        ax.scatter(scores[mask, 0], scores[mask, 1],
+                                   color=color, s=30, alpha=0.85,
+                                   edgecolors='white', linewidth=0.3, zorder=3,
+                                   label=cat if i == 0 else '_nolegend_')
                 nan_mask = vals_str.isna().values
                 if nan_mask.sum() > 0:
                     ax.scatter(scores[nan_mask, 0], scores[nan_mask, 1],
@@ -918,7 +915,6 @@ def pca_colored(pca_store, timepoints, color_configs, name,
             axes[0].legend(fontsize=7, loc='best', framealpha=0.7)
         plt.tight_layout()
         plt.show()
-
 
 
 # ── PyOD Zryan outlier detection ──────────────────────────────────────────────
