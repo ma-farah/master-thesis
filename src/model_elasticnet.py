@@ -5,28 +5,73 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 import joblib
 import contextlib, io
 import preprocess
 
 
+# ── Encoding constants ──────────────────────────────────────────────────────
+BINARY_MAPS = {
+    'gender':     {'m': 1, 'f': 0},
+    'overweight': {'ja': 1, 'nein': 0},
+}
+OHE_COLS        = ['target_volume_side']
+TARGET_ENC_COLS = ['diagnosis', 'target_volume']
 
 
-def prep_for_mrmr(X_train, cat_cols, random_state=42):
-    """OrdinalEncode + iterativeImpute for MRMR."""
-    out = X_train.copy()
+def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
+                        ohe_categories=None):
+    """Encode categoricals — fit on X_train/y_train only, transform both.
 
-    # Encode, iterative imputer needs numeric imput only
-    cats = [c for c in cat_cols if c in out.columns]
-    if cats:
-        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        out[cats] = oe.fit_transform(out[cats].astype(str))
-    # impute
-    out, _ = preprocess.impute_iterative(
-        out.astype(float), ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    return out
+    Binary:  gender (m=1, f=0), overweight (ja=1, nein=0)
+    OHE:     target_volume_side (L, R, B)
+    Target:  diagnosis, target_volume  (smoothed for small groups)
+
+    Returns (X_train_enc, X_test_enc | None, encoders dict).
+    """
+    X_tr = X_train.copy()
+    X_te = X_test.copy() if X_test is not None else None
+    encoders = {}
+
+    # 1. Binary mapping
+    for col, mapping in BINARY_MAPS.items():
+        if col in X_tr.columns:
+            str_map = {str(k): v for k, v in mapping.items()}
+            X_tr[col] = X_tr[col].astype(str).str.lower().map(str_map)
+            if X_te is not None:
+                X_te[col] = X_te[col].astype(str).str.lower().map(str_map)
+
+    # 2. One-hot encoding
+    ohe_present = [c for c in OHE_COLS if c in X_tr.columns]
+    if ohe_present:
+        ohe = OneHotEncoder(
+            categories=ohe_categories if ohe_categories else 'auto',
+            sparse_output=False,
+            handle_unknown='ignore')
+        train_ohe = pd.DataFrame(
+            ohe.fit_transform(X_tr[ohe_present].astype(str)),
+            columns=ohe.get_feature_names_out(ohe_present),
+            index=X_tr.index)
+        X_tr = X_tr.drop(columns=ohe_present).join(train_ohe)
+        if X_te is not None:
+            test_ohe = pd.DataFrame(
+                ohe.transform(X_te[ohe_present].astype(str)),
+                columns=ohe.get_feature_names_out(ohe_present),
+                index=X_te.index)
+            X_te = X_te.drop(columns=ohe_present).join(test_ohe)
+        encoders['ohe'] = ohe
+
+    # 3. Target encoding (with automatic smoothing for small groups)
+    te_present = [c for c in TARGET_ENC_COLS if c in X_tr.columns]
+    if te_present:
+        te = TargetEncoder(smooth='auto', random_state=random_state)
+        X_tr[te_present] = te.fit_transform(X_tr[te_present].astype(str), y_train)
+        if X_te is not None:
+            X_te[te_present] = te.transform(X_te[te_present].astype(str))
+        encoders['te'] = te
+
+    return X_tr, X_te, encoders
 
 
 def elasticnet_mrmr(
@@ -37,7 +82,7 @@ def elasticnet_mrmr(
       1. Tune K and RFCQ params (n_estimators, max_depth, min_samples_leaf) via Optuna with 50 trials
          on a 75-25 split of X_train. K candidates: all features 40, 30, 20, 10 features.
       2. Re-run MRMR on full X_train with best K + best RFCQ params -> selected feature subset for an outer fold
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters
+      3. Inner CV (4x5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters
       Returns results dataframe with metrics, and a feature frequency list
 
     Returns: results_df, feature_freq, selected_features_per_fold
@@ -65,15 +110,24 @@ def elasticnet_mrmr(
     X = df_combined[feature_cols].copy()
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-    
-    # Sugesstions for num. selected features : from all features to selecting 10 features
-    # only include values smaller than p
+
+    # Precompute OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    # Build full list of encoded feature names (for feature frequency tracking)
+    all_enc_cols = []
+    for c in feature_cols:
+        if c in OHE_COLS:
+            for v in sorted(X[c].dropna().astype(str).unique()):
+                all_enc_cols.append(f"{c}_{v}")
+        else:
+            all_enc_cols.append(c)
+
     p = len(feature_cols)
     print(f"\n{'='*80}")
     print(f" Nested CV - ElasticNet + MRMR + Optuna — {target_col}")
     print(f"  n={len(X)}, p={p}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna Trials Model={N_TRIALS_MODEL} | Optuna Trials MRMR={N_TRIALS_MRMR}")
+    print(f"  Outer 4x5=20 | Inner 4x5=20 | Optuna Trials Model={N_TRIALS_MODEL} | Optuna Trials MRMR={N_TRIALS_MRMR}")
     print(f"{'='*80}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -102,8 +156,14 @@ def elasticnet_mrmr(
         else:
             pt_fold, y_train_fit = None, y_train
 
+        # ── Encode categoricals (fit on train only) ────────────────────────
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
+
         # ── Step 1: Tune mrmr parameters on 75-25 split of X_train ─────────────────────────
-        X_train_mrmr = prep_for_mrmr(X_train, cat_cols, random_state)
+        X_train_mrmr, _ = preprocess.impute_iterative(
+            X_train_enc.astype(float), ex_cols=None, iterations=10,
+            random_state=random_state, verbose=False)
 
         X_tr_mrmr, X_val_mrmr, y_tr, y_val = train_test_split(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
@@ -123,20 +183,18 @@ def elasticnet_mrmr(
                             'min_samples_leaf': [min_samples_leaf]},
                 cv=5, regression=True,
                 random_state=random_state, n_jobs=-1)
-            
-            #with contextlib.redirect_stderr(io.StringIO()):
+
             mrmr_t.fit(X_tr_mrmr, y_tr)
             sel_cols = list(mrmr_t.transform(X_tr_mrmr).columns)
 
             if len(sel_cols) == 0:
                 return 1e6
 
-            probe = ElasticNet(max_iter=5000, random_state=random_state) 
+            probe = ElasticNet(max_iter=5000, random_state=random_state)
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
 
         mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        #with contextlib.redirect_stderr(io.StringIO()):
         mrmr_study.optimize(
                 mrmr_objective, n_trials=N_TRIALS_MRMR,
                 show_progress_bar=False)
@@ -156,27 +214,18 @@ def elasticnet_mrmr(
                         'min_samples_leaf': [best_mrmr['min_samples_leaf']]},
             cv=5, regression=True,
             random_state=random_state, n_jobs=-1)
-        
+
         mrmr_full.fit(X_train_mrmr, y_train_fit)
         selected_cols = list(mrmr_full.transform(X_train_mrmr).columns)
         selected_features_per_fold.append(selected_cols)
         print(f"  {len(selected_cols)} selected features: {selected_cols}")
         # ─────────────────────────────────────────────────────────────────────
 
-        # 1. Encode — fitted on X_train only, applied to X_test
-        X_train_sel = X_train[selected_cols].copy()
-        X_test_sel  = X_test[selected_cols].copy()
+        # Select encoded features (encoding already done above)
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
 
-        cats_sel = [c for c in cat_cols if c in selected_cols]
-        if cats_sel:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-            X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-        X_train_sel = X_train_sel.astype(float)
-        X_test_sel  = X_test_sel.astype(float)
-
-        # 2. Impute
+        # Impute
         X_train_imp, imputer = preprocess.impute_iterative(
             X_train_sel, ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
@@ -186,7 +235,7 @@ def elasticnet_mrmr(
             imputer.transform(X_test_sel),
             columns=selected_cols, index=X_test_sel.index)
 
-        # 3. Scale
+        # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
@@ -222,7 +271,7 @@ def elasticnet_mrmr(
 
         best_model_params = model_study.best_params
         best_model_params_list.append(best_model_params)
-        print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}" 
+        print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}"
               f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
 
         fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
@@ -258,7 +307,7 @@ def elasticnet_mrmr(
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
+        .reindex(all_enc_cols, fill_value=0)
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
@@ -268,474 +317,6 @@ def elasticnet_mrmr(
 
     return results_df, feature_freq, selected_features_per_fold
 
-
-#_________________________________________________________________________________________________
-# ElasticNet + RFE
-#_________________________________________________________________________________________________
-
-def elasticnet_rfe(
-    df_combined, target_col='pain_reduction_pct', random_state=42,
-    target_transformer=None,
-):
-    """ElasticNet with RFE (n_features_to_select + step tuned by Optuna) inside each outer CV fold.
-      1. Tune n_features_to_select and step via Optuna (20 trials) on a 75-25 split of X_train.
-         n_features_to_select candidates: [40, 30, 20, 10]. step: float in (0.0, 1.0).
-         RFE estimator: Ridge (stable coef_ for feature ranking, decoupled from final ElasticNet).
-      2. Re-run RFE on full X_train with best params -> selected feature subset for the outer fold.
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters.
-
-    Returns: results_df, feature_freq, selected_features_per_fold
-    """
-    from sklearn.linear_model import ElasticNet, Ridge
-    from sklearn.feature_selection import RFE
-    from sklearn.model_selection import train_test_split
-    from collections import Counter
-    import optuna, warnings, statistics
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    warnings.filterwarnings('ignore', category=FutureWarning)
-    warnings.filterwarnings('ignore', category=RuntimeWarning)
-
-    N_TRIALS_RFE   = 20
-    N_TRIALS_MODEL = 50
-
-    y = df_combined[target_col].copy()
-    valid = y.notna()
-
-    exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
-               'pain_reduction_pct', 'pain_under_load_reduction',
-               'pain_under_load_reduction_pct'}
-    feature_cols = [c for c in df_combined.columns if c not in exclude]
-    X = df_combined[feature_cols].copy()
-
-    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-
-    p = len(feature_cols)
-    print(f"\n{'='*80}")
-    print(f" Nested CV - ElasticNet + RFE + Optuna — {target_col}")
-    print(f"  n={len(X)}, p={p}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna Trials Model={N_TRIALS_MODEL} | Optuna Trials RFE={N_TRIALS_RFE}")
-    print(f"{'='*80}")
-
-    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-
-    fold_results               = []
-    best_model_params_list     = []
-    best_rfe_params_per_fold   = []
-    selected_features_per_fold = []
-    start = time.time()
-
-    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
-        print(f"\n{'─'*65}")
-        print(f"  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
-        print(f"{'─'*65}")
-
-        X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-        # Target transform, fit on y_train only
-        if target_transformer is not None:
-            pt_fold = clone(target_transformer)
-            y_train_fit = pd.Series(
-                pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
-                index=y_train.index)
-        else:
-            pt_fold, y_train_fit = None, y_train
-
-        # ── Step 1: Tune RFE params on 75-25 split of X_train ───────────────
-        X_train_rfe = prep_for_mrmr(X_train, cat_cols, random_state)  # encode + impute
-
-        X_tr_rfe, X_val_rfe, y_tr, y_val = train_test_split(
-            X_train_rfe, y_train_fit, test_size=0.25, random_state=random_state)
-
-        # Scale for RFE tuning split
-        scaler_rfe = StandardScaler()
-        X_tr_rfe_s  = pd.DataFrame(scaler_rfe.fit_transform(X_tr_rfe),  columns=feature_cols)
-        X_val_rfe_s = pd.DataFrame(scaler_rfe.transform(X_val_rfe),     columns=feature_cols)
-
-        def rfe_objective(trial):
-            n_features = trial.suggest_categorical('n_features_to_select', [30, 20, 15, 10])
-            step       = trial.suggest_categorical('step', [1, 5, 10])
-
-            # step=0.0 means remove 1 feature per iteration; clamp to at least 1
-            rfe = RFE(
-                estimator=Ridge(random_state=random_state),
-                n_features_to_select=min(n_features, X_tr_rfe_s.shape[1]),
-                step=max(step, 1e-6))
-            rfe.fit(X_tr_rfe_s, y_tr)
-            sel_cols = [c for c, s in zip(feature_cols, rfe.support_) if s]
-
-            if len(sel_cols) == 0:
-                return 1e6
-
-            probe = ElasticNet(max_iter=5000, random_state=random_state)
-            probe.fit(X_tr_rfe_s[sel_cols], y_tr)
-            return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_rfe_s[sel_cols])))
-
-        rfe_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        rfe_study.optimize(rfe_objective, n_trials=N_TRIALS_RFE, show_progress_bar=False)
-
-        best_rfe   = rfe_study.best_params
-        best_rfe_params_per_fold.append(best_rfe)
-        print(f"  Best RFE params: {best_rfe}  RMSE={rfe_study.best_value:.4f}")
-
-        # ── Step 2: Re-run RFE on full X_train with best params ──────────────
-        X_train_full = prep_for_mrmr(X_train, cat_cols, random_state)
-        scaler_full  = StandardScaler()
-        X_train_full_s = pd.DataFrame(
-            scaler_full.fit_transform(X_train_full), columns=feature_cols)
-
-        rfe_full = RFE(
-            estimator=Ridge(random_state=random_state),
-            n_features_to_select=min(best_rfe['n_features_to_select'], X_train_full_s.shape[1]),
-            step=best_rfe['step'])
-        rfe_full.fit(X_train_full_s, y_train_fit)
-        selected_cols = [c for c, s in zip(feature_cols, rfe_full.support_) if s]
-        selected_features_per_fold.append(selected_cols)
-        print(f"  {len(selected_cols)} selected features: {selected_cols}")
-
-        # ── Encode + impute + scale for ElasticNet ───────────────────────────
-        X_train_sel = X_train[selected_cols].copy()
-        X_test_sel  = X_test[selected_cols].copy()
-
-        cats_sel = [c for c in cat_cols if c in selected_cols]
-        if cats_sel:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-            X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-        X_train_sel = X_train_sel.astype(float)
-        X_test_sel  = X_test_sel.astype(float)
-
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test_sel), columns=selected_cols, index=X_test_sel.index)
-
-        scaler = StandardScaler()
-        X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train_sel.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test_sel.index)
-
-        print('     Running 20 Inner Folds, 50 Optuna Trials...')
-
-        # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
-        inner_splits = list(inner_cv.split(X_train_scaled))
-
-        def _fit_inner_en(itr, ival, params):
-            m = ElasticNet(**params, max_iter=5000, random_state=random_state)
-            m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
-            return np.sqrt(mean_squared_error(
-                y_train_fit.iloc[ival],
-                m.predict(X_train_scaled.iloc[ival])))
-
-        def model_objective(trial):
-            params = dict(
-                alpha    = trial.suggest_float('alpha',    1e-4, 10.0, log=True),
-                l1_ratio = trial.suggest_float('l1_ratio', 0.0,  1.0),
-            )
-            rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
-                joblib.delayed(_fit_inner_en)(itr, ival, params)
-                for itr, ival in inner_splits)
-            return np.mean(rmses)
-
-        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        with contextlib.redirect_stderr(io.StringIO()):
-            model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
-                                 show_progress_bar=False)
-
-        best_model_params = model_study.best_params
-        best_model_params_list.append(best_model_params)
-        print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}"
-              f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
-
-        fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
-        fold_model.fit(X_train_scaled, y_train_fit)
-
-        preds_raw = fold_model.predict(X_test_scaled)
-        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
-                 if pt_fold is not None else preds_raw)
-
-        mae  = mean_absolute_error(y_test, preds)
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        r2   = r2_score(y_test, preds)
-        fold_results.append({
-            'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-        print(f"  MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
-
-    print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
-
-    results_df  = pd.DataFrame(fold_results)
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    mean_row    = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
-    std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
-    results_df  = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
-    n_outer = len(fold_results)
-    print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
-    for m in metric_cols:
-        mv, sv = mean_row[m], std_row[m]
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f})")
-
-    freq = Counter(f for fold in selected_features_per_fold for f in fold)
-    feature_freq = (
-        pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
-        .sort_values(ascending=False))
-    feature_freq.index.name = 'feature'
-
-    print(f"\n  Complete Feature Selection Frequency List:")
-    for feat, cnt in feature_freq.items():
-        print(f"    {cnt:>2}/{n_outer}  {cnt/n_outer*100:4.1f}%  {feat}")
-
-    return results_df, feature_freq, selected_features_per_fold
-
-
-#_________________________________________________________________________________________________
-# ElasticNet + RENT
-#_________________________________________________________________________________________________
-
-def elasticnet_rent(
-    df_combined, target_col='pain_reduction_pct', random_state=42,
-    tau_3=0.975, target_transformer=None,
-):
-    """ElasticNet with RENT (C, l1_ratio, τ₁ tuned by Optuna) inside each outer CV fold.
-      1. Tune RENT HPs (C, l1_ratio, τ₁) via Optuna (20 trials) on a 75-25 split of X_train.
-      2. Re-run RENT on full X_train with best HPs -> selected feature subset for the outer fold.
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters.
-
-    Returns: results_df, feature_freq, selected_features_per_fold
-    """
-    from sklearn.linear_model import ElasticNet
-    from RENT import RENT
-    from sklearn.model_selection import train_test_split
-    from collections import Counter
-    import optuna, warnings, statistics
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    warnings.filterwarnings('ignore', category=FutureWarning)
-    warnings.filterwarnings('ignore', category=RuntimeWarning)
-    for pat in ['.*joblib.*', '.*loky.*']:
-        warnings.filterwarnings('ignore', message=pat)
-
-    N_TRIALS_RENT  = 20
-    N_TRIALS_MODEL = 50
-
-    y = df_combined[target_col].copy()
-    valid = y.notna()
-
-    exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
-               'pain_reduction_pct', 'pain_under_load_reduction',
-               'pain_under_load_reduction_pct'}
-    feature_cols = [c for c in df_combined.columns if c not in exclude]
-    X = df_combined[feature_cols].copy()
-
-    X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-
-    p = len(feature_cols)
-    print(f"\n{'='*80}")
-    print(f" Nested CV - ElasticNet + RENT + Optuna — {target_col}")
-    print(f"  n={len(X)}, p={p}, τ₃={tau_3}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna Trials Model={N_TRIALS_MODEL} | Optuna Trials RENT={N_TRIALS_RENT} | K=100")
-    print(f"{'='*80}")
-
-    outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-    inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-
-    fold_results               = []
-    best_model_params_list     = []
-    selected_features_per_fold = []
-    start = time.time()
-
-    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
-        print(f"\n{'─'*65}")
-        print(f"  Outer fold {outer_fold}/{outer_cv.get_n_splits()}")
-        print(f"{'─'*65}")
-
-        X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-        # Target transform, fit on y_train only
-        if target_transformer is not None:
-            pt_fold = clone(target_transformer)
-            y_train_fit = pd.Series(
-                pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
-                index=y_train.index)
-        else:
-            pt_fold, y_train_fit = None, y_train
-
-        # ── Impute + encode X_train for RENT (fully numeric, NaN-free) ───────
-        X_train_rent = prep_for_mrmr(X_train, cat_cols, random_state)
-
-        # ── Step 1: Tune RENT HPs on 75-25 split of X_train ─────────────────
-        X_tr_rent, X_val_rent, y_tr, y_val = train_test_split(
-            X_train_rent, y_train_fit, test_size=0.25, random_state=random_state)
-
-        scaler_probe = StandardScaler()
-        X_tr_s  = pd.DataFrame(scaler_probe.fit_transform(X_tr_rent),  columns=feature_cols)
-        X_val_s = pd.DataFrame(scaler_probe.transform(X_val_rent),     columns=feature_cols)
-        X_tr_rent_reset = X_tr_rent.reset_index(drop=True)
-
-        def rent_objective(trial):
-            c_val    = trial.suggest_float('C',        1e-3, 10.0, log=True)
-            l1_ratio = trial.suggest_float('l1_ratio', 0.1,  1.0)
-            tau_1    = trial.suggest_float('tau_1',    0.0,  1.0)
-
-            rent_t = RENT.RENT_Regression(
-                data=X_tr_rent_reset,
-                target=y_tr.values, feat_names=feature_cols,
-                C=[c_val], l1_ratios=[l1_ratio], autoEnetParSel=False,
-                poly='OFF', testsize_range=(0.25, 0.25), K=100,
-                random_state=random_state, verbose=0)
-
-            with contextlib.redirect_stderr(io.StringIO()):
-                rent_t.train()
-            sel_idx = rent_t.select_features(
-                tau_1_cutoff=tau_1, tau_2_cutoff=tau_1, tau_3_cutoff=tau_3)
-
-            if len(sel_idx) == 0:
-                return 1e6
-
-            sel_cols = [feature_cols[i] for i in sel_idx]
-            probe = ElasticNet(max_iter=5000, random_state=random_state)
-            probe.fit(X_tr_s[sel_cols], y_tr)
-            return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_s[sel_cols])))
-
-        rent_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        with contextlib.redirect_stderr(io.StringIO()):
-            rent_study.optimize(rent_objective, n_trials=N_TRIALS_RENT,
-                                n_jobs=1, show_progress_bar=False)
-
-        best_rent = rent_study.best_params
-        print(f"  Best RENT params: {best_rent}  RMSE={rent_study.best_value:.4f}")
-
-        # ── Step 2: Re-run RENT on full X_train with best HPs ────────────────
-        rent_full = RENT.RENT_Regression(
-            data=X_train_rent.reset_index(drop=True),
-            target=y_train_fit.values, feat_names=feature_cols,
-            C=[best_rent['C']], l1_ratios=[best_rent['l1_ratio']],
-            autoEnetParSel=False, poly='OFF', testsize_range=(0.25, 0.25),
-            K=100, random_state=random_state, verbose=0)
-
-        with contextlib.redirect_stderr(io.StringIO()):
-            rent_full.train()
-        sel_idx_outer = rent_full.select_features(
-            tau_1_cutoff=best_rent['tau_1'],
-            tau_2_cutoff=best_rent['tau_1'],
-            tau_3_cutoff=tau_3)
-
-        selected_cols = ([feature_cols[i] for i in sel_idx_outer]
-                         if len(sel_idx_outer) > 0 else feature_cols)
-        selected_features_per_fold.append(selected_cols)
-        suffix = '...' if len(selected_cols) > 8 else ''
-        print(f"  {len(selected_cols)} selected features: {selected_cols[:8]}{suffix}")
-
-        # ── Encode + impute + scale for ElasticNet ───────────────────────────
-        X_train_sel = X_train[selected_cols].copy()
-        X_test_sel  = X_test[selected_cols].copy()
-
-        cats_sel = [c for c in cat_cols if c in selected_cols]
-        if cats_sel:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-            X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-        X_train_sel = X_train_sel.astype(float)
-        X_test_sel  = X_test_sel.astype(float)
-
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test_sel), columns=selected_cols, index=X_test_sel.index)
-
-        scaler = StandardScaler()
-        X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train_sel.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test_sel.index)
-
-        print('     Running 20 Inner Folds, 50 Optuna Trials...')
-
-        # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
-        inner_splits = list(inner_cv.split(X_train_scaled))
-
-        def _fit_inner_en(itr, ival, params):
-            m = ElasticNet(**params, max_iter=5000, random_state=random_state)
-            m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
-            return np.sqrt(mean_squared_error(
-                y_train_fit.iloc[ival],
-                m.predict(X_train_scaled.iloc[ival])))
-
-        def model_objective(trial):
-            params = dict(
-                alpha    = trial.suggest_float('alpha',    1e-4, 10.0, log=True),
-                l1_ratio = trial.suggest_float('l1_ratio', 0.0,  1.0),
-            )
-            rmses = joblib.Parallel(n_jobs=4, prefer='threads')(
-                joblib.delayed(_fit_inner_en)(itr, ival, params)
-                for itr, ival in inner_splits)
-            return np.mean(rmses)
-
-        model_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        with contextlib.redirect_stderr(io.StringIO()):
-            model_study.optimize(model_objective, n_trials=N_TRIALS_MODEL,
-                                 show_progress_bar=False)
-
-        best_model_params = model_study.best_params
-        best_model_params_list.append(best_model_params)
-        print(f"     Best Trial:  {model_study.best_trial.number}/{N_TRIALS_MODEL}"
-              f"   RMSE={model_study.best_value:.4f}  {best_model_params}")
-
-        fold_model = ElasticNet(**best_model_params, max_iter=5000, random_state=random_state)
-        fold_model.fit(X_train_scaled, y_train_fit)
-
-        preds_raw = fold_model.predict(X_test_scaled)
-        preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
-                 if pt_fold is not None else preds_raw)
-
-        mae  = mean_absolute_error(y_test, preds)
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        r2   = r2_score(y_test, preds)
-        fold_results.append({
-            'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-        print(f"  MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
-
-    print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
-
-    results_df  = pd.DataFrame(fold_results)
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
-    mean_row    = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
-    std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
-    results_df  = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
-    n_outer = len(fold_results)
-    print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
-    for m in metric_cols:
-        mv, sv = mean_row[m], std_row[m]
-        print(f"    {m:<5}: {mv:.3f} ± {sv:.4f})")
-
-    freq = Counter(f for fold in selected_features_per_fold for f in fold)
-    feature_freq = (
-        pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
-        .sort_values(ascending=False))
-    feature_freq.index.name = 'feature'
-
-    print(f"\n  Complete Feature Selection Frequency List:")
-    for feat, cnt in feature_freq.items():
-        print(f"    {cnt:>2}/{n_outer}  {cnt/n_outer*100:4.1f}%  {feat}")
-
-    return results_df, feature_freq, selected_features_per_fold
 
 
 #_________________________________________________________________________________________________
@@ -747,8 +328,8 @@ def elasticnet_threshold_analysis(
     random_state=42, target_transformer=None):
     """ElasticNet + Optuna nested CV across feature-frequency threshold subsets.
 
-    Evaluates 11 subsets (all features → most-frequent features) with outer 4×5=20 CV
-    and inner 4×5=20 CV + Optuna (50 trials). Use the returned sweep_df to plot and
+    Evaluates 11 subsets (all features -> most-frequent features) with outer 4x5=20 CV
+    and inner 4x5=20 CV + Optuna (50 trials). Use the returned sweep_df to plot and
     choose a feature threshold, then pass the chosen feature list to run_tuned_elasticnet.
 
     Returns
@@ -775,7 +356,9 @@ def elasticnet_threshold_analysis(
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+    # OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -783,30 +366,31 @@ def elasticnet_threshold_analysis(
     sweep_results = []
     total_start   = time.time()
 
-    last_count = int(feature_freq[feature_freq > 0].max())   
+    last_count = int(feature_freq[feature_freq > 0].max())
     steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    
+
     for step in steps:
         is_last = False
         if step == 0:
-            selected_cols = feature_cols.copy()
+            # All encoded features
+            selected_cols = list(feature_freq.index)
             thresh_label  = 'all'
             pct_str = ' '
             current = 0
         else:
             selected_cols = feature_freq[feature_freq >= step].index.tolist()
             current = step
-        
+
             # If empty at step, try step + 1
             if len(selected_cols) == 0:
                 selected_cols = feature_freq[feature_freq >= step + 1].index.tolist()
                 current = step + 1
-            
+
             # If still empty, skip
             if len(selected_cols) == 0:
                 print(f"\n  No features at threshold {step} or {step + 1}. Skipping.")
                 continue
-            
+
             thresh_label = f'>={step}/20'
             pct_str = f'{step/20*100:.0f}%'
 
@@ -814,7 +398,7 @@ def elasticnet_threshold_analysis(
                 is_last = True
 
         n_features = len(selected_cols)
-        print(f"\n{'='*65}") 
+        print(f"\n{'='*65}")
         print(f"  Threshold  {thresh_label} ({pct_str}):  {n_features} features")
         print(f"  {selected_cols[:8]}{'...' if n_features > 8 else ''}")
         print(f"{'='*65}")
@@ -834,18 +418,13 @@ def elasticnet_threshold_analysis(
             else:
                 pt_fold, y_train_fit = None, y_train
 
-            # Encode
-            X_train_sel = X_train[selected_cols].copy()
-            X_test_sel  = X_test[selected_cols].copy()
+            # Encode (fit on train only)
+            X_train_enc, X_test_enc, _ = encode_categoricals(
+                X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-            cats_sel = [c for c in cat_cols if c in selected_cols]
-            if cats_sel:
-                oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-                X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-                X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-            X_train_sel = X_train_sel.astype(float)
-            X_test_sel  = X_test_sel.astype(float)
+            # Select encoded features
+            X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+            X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
 
             # Impute
             X_train_imp, imputer = preprocess.impute_iterative(
@@ -947,11 +526,11 @@ def run_tuned_elasticnet(
     """ElasticNet with Optuna nested CV.
       Runs Elasticnet model on a selected sets of features, after feature selection and feature-threshold analysis.
       SHAP analysis is performed on the final model.
-      1. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters on X_train
-      2. Train final fold model on X_train → evaluate on X_test
+      1. Inner CV (4x5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters on X_train
+      2. Train final fold model on X_train -> evaluate on X_test
       3. Final model: median HPs across outer folds, trained on full X
 
-    Returns: results_df, final_model, X_final, y_pred, best_model_params_list, patient_err_df, scaler_final
+    Returns: results_df, final_model, X_final, y_pred, patient_err_df, scaler_final
     """
     from sklearn.linear_model import ElasticNet
     import optuna, warnings, statistics
@@ -963,18 +542,27 @@ def run_tuned_elasticnet(
     y = df_combined[target_col].copy()
     valid = y.notna()
 
-    selected_cols = [f for f in feature_list if f in df_combined.columns]
-    X = df_combined[selected_cols].copy()
+    # feature_list contains encoded column names (e.g. target_volume_side_L);
+    # we need ALL original columns so encode_categoricals can produce them.
+    exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
+               'pain_reduction_pct', 'pain_under_load_reduction',
+               'pain_under_load_reduction_pct'}
+    all_feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[all_feature_cols].copy()
+
+    selected_cols = list(feature_list)
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
     patient_id_map = df_combined.loc[valid, 'Patient'].reset_index(drop=True)
 
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+    # OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
 
     print(f"\n{'='*65}")
     print(f"  ElasticNet + Optuna — {target_col}")
     print(f"  n={len(X)}, p={len(selected_cols)}")
-    print(f"  Outer 4×5=20 | Inner 4×5=20 | Optuna trials Model={N_TRIALS}")
+    print(f"  Outer 4x5=20 | Inner 4x5=20 | Optuna trials Model={N_TRIALS}")
     print(f"{'='*65}")
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -1002,32 +590,32 @@ def run_tuned_elasticnet(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # 1. Encode 
-        if cat_cols:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train[cat_cols] = oe.fit_transform(X_train[cat_cols].astype(str))
-            X_test[cat_cols]  = oe.transform(X_test[cat_cols].astype(str))
-        X_train = X_train.astype(float)
-        X_test  = X_test.astype(float)
+        # Encode (fit on train only)
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        # 2. Impute
+        # Select encoded features
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
+
+        # Impute
         X_train_imp, imputer = preprocess.impute_iterative(
-            X_train, ex_cols=None, iterations=10,
+            X_train_sel, ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
         X_train_imp = pd.DataFrame(
-            X_train_imp, columns=selected_cols, index=X_train.index)
+            X_train_imp, columns=selected_cols, index=X_train_sel.index)
         X_test_imp = pd.DataFrame(
-            imputer.transform(X_test),
-            columns=selected_cols, index=X_test.index)
+            imputer.transform(X_test_sel),
+            columns=selected_cols, index=X_test_sel.index)
 
-        # 3. Scale 
+        # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
             scaler.fit_transform(X_train_imp),
-            columns=selected_cols, index=X_train.index)
+            columns=selected_cols, index=X_train_sel.index)
         X_test_scaled = pd.DataFrame(
             scaler.transform(X_test_imp),
-            columns=selected_cols, index=X_test.index)
+            columns=selected_cols, index=X_test_sel.index)
 
         inner_splits = list(inner_cv.split(X_train_scaled))
 
@@ -1100,39 +688,35 @@ def run_tuned_elasticnet(
     results_df  = pd.concat(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    n_outer = len(fold_results)
-
     print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
     for m in metric_cols:
         mv, sv = mean_row[m], std_row[m]
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
-    # Final model uses the selected features, and the median hyperparameters across outer folds.
-    X_final = X.copy()
-    # encode
-    if cat_cols:
-        oe_final = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        X_final[cat_cols] = oe_final.fit_transform(X_final[cat_cols].astype(str))
-
-    X_final = X_final.astype(float)
-    # impute
-    X_final_imp, _ = preprocess.impute_iterative(
-        X_final, ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final.index)
-    # scale
-    scaler_final = StandardScaler()
-    X_final = pd.DataFrame(
-        scaler_final.fit_transform(X_final_imp),
-        columns=selected_cols, index=X_final_imp.index)
-    
-    # reverse transform predictions
+    # Final model
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
             pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
     else:
         pt_final, y_final_fit = None, y
+
+    # Encode full dataset (fit on all data)
+    X_final_enc, _, _ = encode_categoricals(
+        X, y_final_fit, random_state=random_state, ohe_categories=ohe_cats)
+    X_final_sel = X_final_enc[selected_cols].copy().astype(float)
+
+    # Impute
+    X_final_imp, _ = preprocess.impute_iterative(
+        X_final_sel, ex_cols=None, iterations=10,
+        random_state=random_state, verbose=False)
+    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final_sel.index)
+
+    # Scale
+    scaler_final = StandardScaler()
+    X_final = pd.DataFrame(
+        scaler_final.fit_transform(X_final_imp),
+        columns=selected_cols, index=X_final_imp.index)
 
     hp_final = {
         k: statistics.median([p[k] for p in best_model_params_list])
