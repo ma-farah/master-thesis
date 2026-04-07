@@ -4,24 +4,77 @@ import pandas as pd
 import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+import joblib
+import contextlib, io
 import preprocess
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 
-def prep_for_mrmr(X_train, cat_cols, random_state=42):
-    """OrdinalEncode + iterativeImpute for MRMR."""
-    out = X_train.copy()
 
-    # Encode, iterative imputer needs numeric imput only
-    cats = [c for c in cat_cols if c in out.columns]
-    if cats:
-        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        out[cats] = oe.fit_transform(out[cats].astype(str))
-    # impute
-    out, _ = preprocess.impute_iterative(
-        out.astype(float), ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    return out
+
+# ── Encoding constants ──────────────────────────────────────────────────────
+BINARY_MAPS = {
+    'gender':     {'m': 1, 'f': 0},
+    'overweight': {'ja': 1, 'nein': 0},
+}
+OHE_COLS        = ['target_volume_side']
+TARGET_ENC_COLS = ['diagnosis', 'target_volume']
+
+
+def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
+                        ohe_categories=None):
+    """Encode categoricals — fit on X_train/y_train only, transform both.
+
+    Binary:  gender (m=1, f=0), overweight (ja=1, nein=0)
+    OHE:     target_volume_side (L, R, B)
+    Target:  diagnosis, target_volume  (smoothed for small groups)
+
+    Returns (X_train_enc, X_test_enc | None, encoders dict).
+    """
+    X_tr = X_train.copy()
+    X_te = X_test.copy() if X_test is not None else None
+    encoders = {}
+
+    # 1. Binary mapping
+    for col, mapping in BINARY_MAPS.items():
+        if col in X_tr.columns:
+            str_map = {str(k): v for k, v in mapping.items()}
+            X_tr[col] = X_tr[col].astype(str).str.lower().map(str_map)
+            if X_te is not None:
+                X_te[col] = X_te[col].astype(str).str.lower().map(str_map)
+
+    # 2. One-hot encoding
+    ohe_present = [c for c in OHE_COLS if c in X_tr.columns]
+    if ohe_present:
+        ohe = OneHotEncoder(
+            categories=ohe_categories if ohe_categories else 'auto',
+            sparse_output=False,
+            handle_unknown='ignore')
+        train_ohe = pd.DataFrame(
+            ohe.fit_transform(X_tr[ohe_present].astype(str)),
+            columns=ohe.get_feature_names_out(ohe_present),
+            index=X_tr.index)
+        X_tr = X_tr.drop(columns=ohe_present).join(train_ohe)
+        if X_te is not None:
+            test_ohe = pd.DataFrame(
+                ohe.transform(X_te[ohe_present].astype(str)),
+                columns=ohe.get_feature_names_out(ohe_present),
+                index=X_te.index)
+            X_te = X_te.drop(columns=ohe_present).join(test_ohe)
+        encoders['ohe'] = ohe
+
+    # 3. Target encoding (with automatic smoothing for small groups)
+    te_present = [c for c in TARGET_ENC_COLS if c in X_tr.columns]
+    if te_present:
+        te = TargetEncoder(smooth='auto', random_state=random_state)
+        X_tr[te_present] = te.fit_transform(X_tr[te_present].astype(str), y_train)
+        if X_te is not None:
+            X_te[te_present] = te.transform(X_te[te_present].astype(str))
+        encoders['te'] = te
+
+    return X_tr, X_te, encoders
 
 
 
@@ -29,7 +82,7 @@ def prep_for_mrmr(X_train, cat_cols, random_state=42):
 # HGBR + MRMR
 #_________________________________________________________________________________________________
 
-# Imputation is only for mrmr feature selection - hgbr handles nan natively. 
+# Imputation is only for mrmr feature selection and hgbr handles nan natively
 
 def hgbr_mrmr(
     df_combined, target_col='pain_reduction_pct', random_state=42,
@@ -58,9 +111,21 @@ def hgbr_mrmr(
                'pain_under_load_reduction_pct'}
     feature_cols = [c for c in df_combined.columns if c not in exclude]
     X = df_combined[feature_cols].copy()
-
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+
+    cat_cols =  X.select_dtypes(include=['category', 'object']).columns.tolist()
+    
+    # Precompute OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    # Build full list of encoded feature names (for feature frequency tracking)
+    all_enc_cols = []
+    for c in feature_cols:
+        if c in OHE_COLS:
+            for v in sorted(X[c].dropna().astype(str).unique()):
+                all_enc_cols.append(f"{c}_{v}")
+        else:
+            all_enc_cols.append(c)
 
     p = len(feature_cols)
     print(f"\n{'='*80}")
@@ -94,11 +159,19 @@ def hgbr_mrmr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # ── Step 1: Tune MRMR params on 75-25 split of X_train ──────────────
-        X_train_mrmr = prep_for_mrmr(X_train, cat_cols, random_state)
+        # ── Encode categoricals (fit on train only) ────────────────────────
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
+        # ── Impute ─────────────────────────
+        X_train_mrmr, _ = preprocess.impute_iterative(
+            X_train_enc.astype(float), ex_cols=None, iterations=10,
+            random_state=random_state, verbose=False)
+        
+         # ── Step 1: Tune mrmr parameters on 75-25 split of X_train ─────────────────────────
         X_tr_mrmr, X_val_mrmr, y_tr, y_val = train_test_split(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
+
 
         def mrmr_objective(trial):
             k                = trial.suggest_categorical('K',                [10, 15, 20])
@@ -144,33 +217,27 @@ def hgbr_mrmr(
         selected_features_per_fold.append(selected_cols)
         print(f"  {len(selected_cols)} selected features: {selected_cols}")
 
-        # ── Encode only (HGBR handles NaN natively, no scaling needed) ────────
-        X_train_sel = X_train[selected_cols].copy()
-        X_test_sel  = X_test[selected_cols].copy()
 
+        # Select encoded features (encoding already done)
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
+        
         cats_sel = [c for c in cat_cols if c in selected_cols]
-        if cats_sel:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-            X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-        X_train_scaled = X_train_sel.astype(float)
-        X_test_scaled  = X_test_sel.astype(float)
         cat_indices    = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
 
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
 
         # ── Step 3: Inner CV Optuna for HGBR HPs ─────────────────────────────
-        inner_splits = list(inner_cv.split(X_train_scaled))
+        inner_splits = list(inner_cv.split(X_train_sel))
 
         def _fit_inner_hgbr(itr, ival, params):
             m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                              categorical_features=cat_indices,
                                              random_state=random_state)
-            m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
+            m.fit(X_train_sel.iloc[itr], y_train_fit.iloc[itr])
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
-                m.predict(X_train_scaled.iloc[ival])))
+                m.predict(X_train_sel.iloc[ival])))
 
         def model_objective(trial):
             params = dict(
@@ -194,9 +261,9 @@ def hgbr_mrmr(
         fold_model = HistGradientBoostingRegressor(**best_model_params, loss='squared_error',
                                                   categorical_features=cat_indices,
                                                   random_state=random_state)
-        fold_model.fit(X_train_scaled, y_train_fit)
+        fold_model.fit(X_train_sel, y_train_fit)
 
-        preds_raw = fold_model.predict(X_test_scaled)
+        preds_raw = fold_model.predict(X_test_sel)
         preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                  if pt_fold is not None else preds_raw)
 
@@ -272,6 +339,11 @@ def hgbr_threshold_analysis(
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
+
+    # Precompute OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    
     cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -286,7 +358,7 @@ def hgbr_threshold_analysis(
     for step in steps:
         is_last = False
         if step == 0:
-            selected_cols = feature_cols.copy()
+            selected_cols = feature_freq.index.tolist()
             thresh_label  = 'all'
             pct_str = ' '
             current = 0
@@ -298,6 +370,8 @@ def hgbr_threshold_analysis(
             if len(selected_cols) == 0:
                 selected_cols = feature_freq[feature_freq >= step + 1].index.tolist()
                 current = step + 1
+                thresh_label = f'>={current}/20'
+                pct_str = f'{current/20*100:.0f}%'
             
             # If still empty, skip
             if len(selected_cols) == 0:
@@ -330,21 +404,19 @@ def hgbr_threshold_analysis(
             else:
                 pt_fold, y_train_fit = None, y_train
 
-            X_train_sel = X_train[selected_cols].copy()
-            X_test_sel  = X_test[selected_cols].copy()
 
+            # Encode (fit on train only)
+            X_train_enc, X_test_enc, _ = encode_categoricals(
+                X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
+
+            # Select encoded features
+            X_train_sc = X_train_enc[selected_cols].copy().astype(float)
+            X_test_sc  = X_test_enc[selected_cols].copy().astype(float)
+                                                                  
             cats_sel = [c for c in cat_cols if c in selected_cols]
-            if cats_sel:
-                oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-                X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-                X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-            X_train_sc  = X_train_sel.astype(float)
-            X_test_sc   = X_test_sel.astype(float)
             cat_indices = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
 
             inner_splits = list(inner_cv.split(X_train_sc))
-
             def _fit_inner(itr, ival, params):
                 m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                                  categorical_features=cat_indices,
@@ -441,12 +513,21 @@ def run_tuned_hgbr(
     y = df_combined[target_col].copy()
     valid = y.notna()
 
-    selected_cols = [f for f in feature_list if f in df_combined.columns]
-    X = df_combined[selected_cols].copy()
+    exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
+               'pain_reduction_pct', 'pain_under_load_reduction',
+               'pain_under_load_reduction_pct'}
+    all_feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[all_feature_cols].copy()
+
+    selected_cols = list(feature_list)
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
     patient_id_map = df_combined.loc[valid, 'Patient'].reset_index(drop=True)
-
+    
+    # OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    
     cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     print(f"\n{'='*65}")
@@ -481,16 +562,13 @@ def run_tuned_hgbr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # 1. Encode
-        if cat_cols:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train[cat_cols] = oe.fit_transform(X_train[cat_cols].astype(str))
-            X_test[cat_cols]  = oe.transform(X_test[cat_cols].astype(str))
-        X_train = X_train.astype(float)
-        X_test  = X_test.astype(float)
+        # Encode (fit on train only)
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        X_train_scaled = X_train
-        X_test_scaled  = X_test
+        # Select encoded features
+        X_train_scaled = X_train_enc[selected_cols].copy().astype(float)
+        X_test_scaled  = X_test_enc[selected_cols].copy().astype(float)
 
         inner_splits = list(inner_cv.split(X_train_scaled))
 
@@ -573,20 +651,20 @@ def run_tuned_hgbr(
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
     # Final model: median HPs, trained on full X
-    X_final = X.copy()
-    if cat_cols:
-        oe_final = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        X_final[cat_cols] = oe_final.fit_transform(X_final[cat_cols].astype(str))
-    X_final = X_final.astype(float)
-
-    scaler_final = None  # HGBR is tree-based, no scaling needed
-
+ 
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
             pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
     else:
         pt_final, y_final_fit = None, y
+
+    # Encode full dataset 
+    X_final_enc, _, _ = encode_categoricals(
+        X, y_final_fit, random_state=random_state, ohe_categories=ohe_cats)
+    
+    X_final = X_final_enc[selected_cols].copy().astype(float)
+    scaler_final = None 
 
     int_params = {'max_depth', 'min_samples_leaf', 'max_iter'}
     hp_final = {

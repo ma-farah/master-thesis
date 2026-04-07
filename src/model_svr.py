@@ -10,21 +10,71 @@ from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 import joblib
 import contextlib, io
 import preprocess
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 
-def prep_for_mrmr(X_train, cat_cols, random_state=42):
-    """OrdinalEncode + iterativeImpute for MRMR."""
-    out = X_train.copy()
 
-    # Encode, iterative imputer needs numeric imput only
-    cats = [c for c in cat_cols if c in out.columns]
-    if cats:
-        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        out[cats] = oe.fit_transform(out[cats].astype(str))
-    # impute
-    out, _ = preprocess.impute_iterative(
-        out.astype(float), ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    return out
+
+# ── Encoding constants ──────────────────────────────────────────────────────
+BINARY_MAPS = {
+    'gender':     {'m': 1, 'f': 0},
+    'overweight': {'ja': 1, 'nein': 0},
+}
+OHE_COLS        = ['target_volume_side']
+TARGET_ENC_COLS = ['diagnosis', 'target_volume']
+
+
+def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
+                        ohe_categories=None):
+    """Encode categoricals — fit on X_train/y_train only, transform both.
+
+    Binary:  gender (m=1, f=0), overweight (ja=1, nein=0)
+    OHE:     target_volume_side (L, R, B)
+    Target:  diagnosis, target_volume  (smoothed for small groups)
+
+    Returns (X_train_enc, X_test_enc | None, encoders dict).
+    """
+    X_tr = X_train.copy()
+    X_te = X_test.copy() if X_test is not None else None
+    encoders = {}
+
+    # 1. Binary mapping
+    for col, mapping in BINARY_MAPS.items():
+        if col in X_tr.columns:
+            str_map = {str(k): v for k, v in mapping.items()}
+            X_tr[col] = X_tr[col].astype(str).str.lower().map(str_map)
+            if X_te is not None:
+                X_te[col] = X_te[col].astype(str).str.lower().map(str_map)
+
+    # 2. One-hot encoding
+    ohe_present = [c for c in OHE_COLS if c in X_tr.columns]
+    if ohe_present:
+        ohe = OneHotEncoder(
+            categories=ohe_categories if ohe_categories else 'auto',
+            sparse_output=False,
+            handle_unknown='ignore')
+        train_ohe = pd.DataFrame(
+            ohe.fit_transform(X_tr[ohe_present].astype(str)),
+            columns=ohe.get_feature_names_out(ohe_present),
+            index=X_tr.index)
+        X_tr = X_tr.drop(columns=ohe_present).join(train_ohe)
+        if X_te is not None:
+            test_ohe = pd.DataFrame(
+                ohe.transform(X_te[ohe_present].astype(str)),
+                columns=ohe.get_feature_names_out(ohe_present),
+                index=X_te.index)
+            X_te = X_te.drop(columns=ohe_present).join(test_ohe)
+        encoders['ohe'] = ohe
+
+    # 3. Target encoding (with automatic smoothing for small groups)
+    te_present = [c for c in TARGET_ENC_COLS if c in X_tr.columns]
+    if te_present:
+        te = TargetEncoder(smooth='auto', random_state=random_state)
+        X_tr[te_present] = te.fit_transform(X_tr[te_present].astype(str), y_train)
+        if X_te is not None:
+            X_te[te_present] = te.transform(X_te[te_present].astype(str))
+        encoders['te'] = te
+
+    return X_tr, X_te, encoders
 
 
 
@@ -45,7 +95,6 @@ def svr_mrmr(
     Returns: results_df, feature_freq, selected_features_per_fold
     """
     from feature_engine.selection import MRMR
-    from model_elasticnet import prep_for_mrmr
     from sklearn.model_selection import train_test_split
     from collections import Counter
     import optuna, warnings, statistics
@@ -67,7 +116,19 @@ def svr_mrmr(
     X = df_combined[feature_cols].copy()
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+    
+    # Precompute OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    # Build full list of encoded feature names (for feature frequency tracking)
+    all_enc_cols = []
+    for c in feature_cols:
+        if c in OHE_COLS:
+            for v in sorted(X[c].dropna().astype(str).unique()):
+                all_enc_cols.append(f"{c}_{v}")
+        else:
+            all_enc_cols.append(c)
+
 
     p = len(feature_cols)
     print(f"\n{'='*80}")
@@ -101,9 +162,17 @@ def svr_mrmr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # ── Step 1: Tune MRMR params on 75-25 split of X_train ──────────────
-        X_train_mrmr = prep_for_mrmr(X_train, cat_cols, random_state)
+        # ── Encode categoricals (fit on train only) ────────────────────────
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
+        # Impute 
+        X_train_mrmr, _ = preprocess.impute_iterative(
+            X_train_enc.astype(float), ex_cols=None, iterations=10,
+            random_state=random_state, verbose=False)
+    
+
+         # ── Step 1: Tune mrmr parameters on 75-25 split of X_train ─────────────────────────
         X_tr_mrmr, X_val_mrmr, y_tr, y_val = train_test_split(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
@@ -129,6 +198,7 @@ def svr_mrmr(
             scaler_probe = StandardScaler()
             X_tr_s  = scaler_probe.fit_transform(X_tr_mrmr[sel_cols])
             X_val_s = scaler_probe.transform(X_val_mrmr[sel_cols])
+
             probe = SVR(kernel='rbf')
             probe.fit(X_tr_s, y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_s)))
@@ -149,20 +219,26 @@ def svr_mrmr(
                         'max_depth':        [best_mrmr['max_depth']],
                         'min_samples_leaf': [best_mrmr['min_samples_leaf']]},
             cv=5, regression=True, random_state=random_state, n_jobs=-1)
+        
         mrmr_full.fit(X_train_mrmr, y_train_fit)
         selected_cols = list(mrmr_full.transform(X_train_mrmr).columns)
         selected_features_per_fold.append(selected_cols)
         print(f"  {len(selected_cols)} selected features: {selected_cols}")
 
-        # ── Encode + impute + scale ───────────────────────────────────────────
-        X_train_sel = X_train[selected_cols].copy()
-        X_test_sel  = X_test[selected_cols].copy()
+        # Select encoded features (encoding already done above)
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
 
-        cats_sel = [c for c in cat_cols if c in selected_cols]
-        if cats_sel:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-            X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
+        # Impute
+        X_train_imp, imputer = preprocess.impute_iterative(
+            X_train_sel, ex_cols=None, iterations=10,
+            random_state=random_state, verbose=False)
+        X_train_imp = pd.DataFrame(
+            X_train_imp, columns=selected_cols, index=X_train_sel.index)
+        
+        X_test_imp = pd.DataFrame(
+            imputer.transform(X_test_sel),
+            columns=selected_cols, index=X_test_sel.index)
 
         X_train_sel = X_train_sel.astype(float)
         X_test_sel  = X_test_sel.astype(float)
@@ -174,12 +250,15 @@ def svr_mrmr(
         X_test_imp  = pd.DataFrame(
             imputer.transform(X_test_sel), columns=selected_cols, index=X_test_sel.index)
 
+        # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train_sel.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test_sel.index)
-
+            scaler.fit_transform(X_train_imp),
+            columns=selected_cols, index=X_train_sel.index)
+        X_test_scaled = pd.DataFrame(
+            scaler.transform(X_test_imp),
+            columns=selected_cols, index=X_test_sel.index)
+        
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
 
         # ── Step 3: Inner CV Optuna for SVR HPs ──────────────────────────────
@@ -242,6 +321,7 @@ def svr_mrmr(
         mv, sv = mean_row[m], std_row[m]
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f})")
 
+    # ── Feature frequency ─────────────────────────────────────────────────────
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
@@ -292,8 +372,11 @@ def svr_threshold_analysis(
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-
+    # Precompute OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    
+    
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
 
@@ -306,18 +389,20 @@ def svr_threshold_analysis(
     for step in steps:
         is_last = False
         if step == 0:
-            selected_cols = feature_cols.copy()
+            selected_cols = feature_freq.index.tolist()
             thresh_label  = 'all'
             pct_str = ' '
             current = 0
         else:
             selected_cols = feature_freq[feature_freq >= step].index.tolist()
             current = step
-        
-            # If empty at step, try step + 1
+            
+             # If empty at step, try step + 1
             if len(selected_cols) == 0:
                 selected_cols = feature_freq[feature_freq >= step + 1].index.tolist()
                 current = step + 1
+                thresh_label = f'>={current}/20'
+                pct_str = f'{current/20*100:.0f}%'
             
             # If still empty, skip
             if len(selected_cols) == 0:
@@ -350,19 +435,16 @@ def svr_threshold_analysis(
                     index=y_train.index)
             else:
                 pt_fold, y_train_fit = None, y_train
+         
+            # Encode (fit on train only)
+            X_train_enc, X_test_enc, _ = encode_categoricals(
+                X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-            X_train_sel = X_train[selected_cols].copy()
-            X_test_sel  = X_test[selected_cols].copy()
+            # Select encoded features
+            X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+            X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
 
-            cats_sel = [c for c in cat_cols if c in selected_cols]
-            if cats_sel:
-                oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-                X_train_sel[cats_sel] = oe.fit_transform(X_train_sel[cats_sel].astype(str))
-                X_test_sel[cats_sel]  = oe.transform(X_test_sel[cats_sel].astype(str))
-
-            X_train_sel = X_train_sel.astype(float)
-            X_test_sel  = X_test_sel.astype(float)
-
+            # Impute
             X_train_imp, imputer = preprocess.impute_iterative(
                 X_train_sel, ex_cols=None, iterations=10,
                 random_state=random_state, verbose=False)
@@ -371,7 +453,8 @@ def svr_threshold_analysis(
             X_test_imp = pd.DataFrame(
                 imputer.transform(X_test_sel),
                 columns=selected_cols, index=X_test_sel.index)
-
+            
+            # Scale
             scaler = StandardScaler()
             X_train_sc = pd.DataFrame(
                 scaler.fit_transform(X_train_imp),
@@ -474,15 +557,24 @@ def run_tuned_svr(
 
     y = df_combined[target_col].copy()
     valid = y.notna()
+    
+    # feature_list contains encoded column names (e.g. target_volume_side_L);
+    # we need ALL original columns so encode_categoricals can produce them.
+    exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
+               'pain_reduction_pct', 'pain_under_load_reduction',
+               'pain_under_load_reduction_pct'}
+    all_feature_cols = [c for c in df_combined.columns if c not in exclude]
+    X = df_combined[all_feature_cols].copy()
 
-    selected_cols = [f for f in feature_list if f in df_combined.columns]
-    X = df_combined[selected_cols].copy()
+    selected_cols =  list(feature_list)
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
     patient_id_map = df_combined.loc[valid, 'Patient'].reset_index(drop=True)
 
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
-
+    # OHE categories for consistent encoding across folds
+    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
+                for c in OHE_COLS if c in X.columns]
+    
     print(f"\n{'='*65}")
     print(f"  SVR (RBF) + Optuna — {target_col}")
     print(f"  n={len(X)}, p={len(selected_cols)}")
@@ -513,29 +605,33 @@ def run_tuned_svr(
         else:
             pt_fold, y_train_fit = None, y_train
 
-        # 1. Encode
-        if cat_cols:
-            oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-            X_train[cat_cols] = oe.fit_transform(X_train[cat_cols].astype(str))
-            X_test[cat_cols]  = oe.transform(X_test[cat_cols].astype(str))
-        X_train = X_train.astype(float)
-        X_test  = X_test.astype(float)
+        # Encode (fit on train only)
+        X_train_enc, X_test_enc, _ = encode_categoricals(
+            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        # 2. Impute
+        # Select encoded features
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
+
+        # Impute
         X_train_imp, imputer = preprocess.impute_iterative(
-            X_train, ex_cols=None, iterations=10,
+            X_train_sel, ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test), columns=selected_cols, index=X_test.index)
+        X_train_imp = pd.DataFrame(
+            X_train_imp, columns=selected_cols, index=X_train_sel.index)
+        X_test_imp = pd.DataFrame(
+            imputer.transform(X_test_sel),
+            columns=selected_cols, index=X_test_sel.index)
 
-        # 3. Scale
+        # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp), columns=selected_cols, index=X_train.index)
-        X_test_scaled  = pd.DataFrame(
-            scaler.transform(X_test_imp), columns=selected_cols, index=X_test.index)
-
+            scaler.fit_transform(X_train_imp),
+            columns=selected_cols, index=X_train_sel.index)
+        X_test_scaled = pd.DataFrame(
+            scaler.transform(X_test_imp),
+            columns=selected_cols, index=X_test_sel.index)
+        
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_svr(itr, ival, params):
@@ -608,35 +704,35 @@ def run_tuned_svr(
     results_df  = pd.concat(
         [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
 
-    n_outer = len(fold_results)
     print(f"\n{'='*65}\n  SUMMARY — {target_col}\n{'='*65}")
     for m in metric_cols:
         mv, sv = mean_row[m], std_row[m]
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
-    # Final model: median HPs, trained on full X
-    X_final = X.copy()
-    if cat_cols:
-        oe_final = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-        X_final[cat_cols] = oe_final.fit_transform(X_final[cat_cols].astype(str))
-    X_final = X_final.astype(float)
-
-    X_final_imp, _ = preprocess.impute_iterative(
-        X_final, ex_cols=None, iterations=10,
-        random_state=random_state, verbose=False)
-    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final.index)
-
-    scaler_final = StandardScaler()
-    X_final = pd.DataFrame(
-        scaler_final.fit_transform(X_final_imp),
-        columns=selected_cols, index=X_final_imp.index)
-
+    # Final model
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
             pt_final.fit_transform(y.values.reshape(-1, 1)).ravel(), index=y.index)
     else:
         pt_final, y_final_fit = None, y
+
+    # Encode full dataset
+    X_final_enc, _, _ = encode_categoricals(
+        X, y_final_fit, random_state=random_state, ohe_categories=ohe_cats)
+    X_final_sel = X_final_enc[selected_cols].copy().astype(float)
+
+    # Impute
+    X_final_imp, _ = preprocess.impute_iterative(
+        X_final_sel, ex_cols=None, iterations=10,
+        random_state=random_state, verbose=False)
+    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final_sel.index)
+
+    # Scale
+    scaler_final = StandardScaler()
+    X_final = pd.DataFrame(
+        scaler_final.fit_transform(X_final_imp),
+        columns=selected_cols, index=X_final_imp.index)
 
     hp_final = {
         k: statistics.median([p[k] for p in best_model_params_list])

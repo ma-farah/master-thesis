@@ -160,11 +160,12 @@ def elasticnet_mrmr(
         X_train_enc, X_test_enc, _ = encode_categoricals(
             X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        # ── Step 1: Tune mrmr parameters on 75-25 split of X_train ─────────────────────────
+        # ── Impute ─────────────────────────
         X_train_mrmr, _ = preprocess.impute_iterative(
             X_train_enc.astype(float), ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
-
+        
+        # ── Step 1: Tune mrmr parameters on 75-25 split of X_train ─────────────────────────
         X_tr_mrmr, X_val_mrmr, y_tr, y_val = train_test_split(
             X_train_mrmr, y_train_fit, test_size=0.25, random_state=random_state)
 
@@ -189,10 +190,14 @@ def elasticnet_mrmr(
 
             if len(sel_cols) == 0:
                 return 1e6
+            
+            scaler_probe = StandardScaler()
+            X_tr_s  = scaler_probe.fit_transform(X_tr_mrmr[sel_cols])
+            X_val_s = scaler_probe.transform(X_val_mrmr[sel_cols])
 
             probe = ElasticNet(max_iter=5000, random_state=random_state)
-            probe.fit(X_tr_mrmr[sel_cols], y_tr)
-            return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
+            probe.fit(X_tr_s, y_tr)
+            return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_s)))
 
         mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
         mrmr_study.optimize(
@@ -231,6 +236,7 @@ def elasticnet_mrmr(
             random_state=random_state, verbose=False)
         X_train_imp = pd.DataFrame(
             X_train_imp, columns=selected_cols, index=X_train_sel.index)
+        
         X_test_imp = pd.DataFrame(
             imputer.transform(X_test_sel),
             columns=selected_cols, index=X_test_sel.index)
@@ -243,6 +249,7 @@ def elasticnet_mrmr(
         X_test_scaled = pd.DataFrame(
             scaler.transform(X_test_imp),
             columns=selected_cols, index=X_test_sel.index)
+        
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
         # ── Step 3: Inner CV Optuna for ElasticNet HPs ───────────────────────
         inner_splits = list(inner_cv.split(X_train_scaled))
@@ -356,10 +363,10 @@ def elasticnet_threshold_analysis(
     valid = y.notna()
     X, y  = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    # OHE categories for consistent encoding across folds
+    # Precompute OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
-
+ 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
 
@@ -372,8 +379,8 @@ def elasticnet_threshold_analysis(
     for step in steps:
         is_last = False
         if step == 0:
-            # All encoded features
-            selected_cols = list(feature_freq.index)
+            # all encoded features
+            selected_cols = feature_freq.index.tolist()
             thresh_label  = 'all'
             pct_str = ' '
             current = 0
@@ -385,10 +392,12 @@ def elasticnet_threshold_analysis(
             if len(selected_cols) == 0:
                 selected_cols = feature_freq[feature_freq >= step + 1].index.tolist()
                 current = step + 1
+                thresh_label = f'>={current}/20'
+                pct_str = f'{current/20*100:.0f}%'
 
             # If still empty, skip
             if len(selected_cols) == 0:
-                print(f"\n  No features at threshold {step} or {step + 1}. Skipping.")
+                print(f"\n  No features at threshold {step} or {step + 1}.. Skipping.")
                 continue
 
             thresh_label = f'>={step}/20'
@@ -701,7 +710,7 @@ def run_tuned_elasticnet(
     else:
         pt_final, y_final_fit = None, y
 
-    # Encode full dataset (fit on all data)
+    # Encode full dataset 
     X_final_enc, _, _ = encode_categoricals(
         X, y_final_fit, random_state=random_state, ohe_categories=ohe_cats)
     X_final_sel = X_final_enc[selected_cols].copy().astype(float)
