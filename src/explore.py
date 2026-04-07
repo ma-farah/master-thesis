@@ -446,7 +446,7 @@ def spearman_correlation(df, ex_cols, name, n_top=40):
     return spearman_matrix, spearman_pairs
 
 
-def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
+def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, plot=True):
     """Spearman correlation between each immunological feature and pain_scale.
     """
     print("\nSpearman Correlations - Immunological Features x pain_scale")
@@ -482,17 +482,18 @@ def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im):
     _print_table(pos, "Positive Spearman Correlations: Immunological Features x pain_scale")
     _print_table(neg, "Negative Spearman Correlations: Immunological Features x pain_scale")
 
-    def _bar_plot(df, title, color):
-        fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
-        ax.barh(df['Feature'][::-1], df['rho'][::-1], color=color)
-        ax.set_xlabel('Spearman rho')
-        ax.set_title(title)
-        plt.tight_layout()
-        plt.show()
+    if plot:
+        def _bar_plot(df, title, color):
+            fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
+            ax.barh(df['Feature'][::-1], df['rho'][::-1], color=color)
+            ax.set_xlabel('Spearman rho')
+            ax.set_title(title)
+            plt.tight_layout()
+            plt.show()
 
-    _bar_plot(results[results['rho'] > 0.1],
+        _bar_plot(results[results['rho'] > 0.1],
               'Positive Spearman Correlations: Immunological Features x pain_scale (rho > 0.1)', 'skyblue')
-    _bar_plot(neg,
+        _bar_plot(neg,
               'Negative Spearman Correlations: Immunological Features x pain_scale', 'navy')
 
     return results
@@ -554,7 +555,7 @@ def phik_correlation(df, ex_cols, num_cols, name, n_top=30):
 
 
 # between clinical features and pain_scale
-def phik_correlation_pain(df, target, ex_cols, name, num_cols):
+def phik_correlation_pain(df, target, ex_cols, name, num_cols, plot=True):
     """PhiK correlation between every feature and a single column."""
 
     print(f"\nPhiK — Features × {target} ({name} Dataset)")
@@ -581,22 +582,23 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     nonzero = result[result['phik'] > 0].reset_index(drop=True)
     zero_n  = (result['phik'] == 0).sum()
 
-    print(f"  Features: {len(result)}     computable (phik > 0): {len(nonzero)}  "
-          f"   skipped (phik = 0): {zero_n}")
+    print(f"  Features: {len(result)}     withc phik > 0: {len(nonzero)}  "
+          f"   Features with phik = 0: {zero_n}")
 
     print(f"\nPhik Correlations: All Clinical features x  '{target}'")
     print(f"  {'Feature':<35}  {'phik':>6}")
     print("  " + "-" * 45)
-    for _, row in nonzero.iterrows():
+    for _, row in result.iterrows():
         print(f"  {row['Feature']:<35}  {row['phik']:>6.3f}")
 
-    fig, ax = plt.subplots(figsize=(9, 0.45 * len(nonzero) + 1.5))
-    ax.barh(nonzero['Feature'][::-1], nonzero['phik'][::-1], color='turquoise')
-    ax.set_xlabel('PhiK')
-    ax.set_xlim(0, 1)
-    ax.set_title(f'Phik Correlations: Clinical Dataset x  {target}')
-    plt.tight_layout()
-    plt.show()
+    if plot:
+        fig, ax = plt.subplots(figsize=(9, 0.45 * len(result) + 1.5))
+        ax.barh(result['Feature'][::-1], result['phik'][::-1], color='turquoise')
+        ax.set_xlabel('PhiK')
+        ax.set_xlim(0, 1)
+        ax.set_title(f'Phik Correlations: Clinical Dataset x {target}')
+        plt.tight_layout()
+        plt.show()
 
     return result
 
