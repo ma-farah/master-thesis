@@ -626,7 +626,7 @@ def standardize_pain_points(series):
         ('Neck',            ['nacken']),
         ('Shoulder',        ['schulter']),
         ('Upper Arm',       ['oberarm']),
-        ('Forearm',         ['unterarm']),
+        ('Under Arm',       ['unterarm']),
         ('Elbow',           ['ellenbogen', 'ellbogen', 'ellenbogengelenk']),
         ('Arm',             [r'\barm\b']),
         ('Wrist',           ['handgelenk', 'hangelenk']),

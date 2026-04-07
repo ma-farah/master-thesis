@@ -178,90 +178,6 @@ def create_model_datasets(df1, df2, targets, timepoints,
 
 
 
-
-def feature_target_correlation(df_model, target_cols, num_cols, ex_cols=None, n_top=20):
-    """Pearson (numeric) + PhiK (categorical) correlation between features and each target.
-
-    Parameters
-    ----------
-    df_model    : pd.DataFrame   model datasets (combined)
-    target_cols : list[str]      target columns to correlate against
-    num_cols    : list[str]      numeric/interval columns for phik interval_cols
-    ex_cols     : list[str]      extra columns to exclude from features
-    n_top       : int            top positive + top negative to show for Pearson (default 20)
-    """
-    import phik as _phik
-
-    always_exclude = set(list(target_cols) + ['Patient', 'Timepoint'] + (ex_cols or []))
-
-    num_feat_cols = [c for c in df_model.select_dtypes(include='number').columns
-                     if c not in always_exclude]
-    cat_feat_cols = [c for c in df_model.select_dtypes(include=['category', 'object']).columns
-                     if c not in always_exclude]
-
-    print(f"\nFeature–target correlations Combined Datasets: (Pearson: {len(num_feat_cols)} numeric | "
-          f"PhiK: {len(cat_feat_cols)} categorical)\n")
-
-    for target in target_cols:
-        print(f"{'='*60}")
-        print(f"  Target: {target}")
-        print(f"{'='*60}")
-
-        # ── Pearson (numeric) ─────────────────────────────────────
-        sub = df_model[[target] + num_feat_cols].dropna(subset=[target])
-        pearson_records = []
-        for col in num_feat_cols:
-            vals = sub[[target, col]].dropna()
-            if len(vals) < 5:
-                continue
-            r = stats.pearsonr(vals[col], vals[target]).statistic
-            pearson_records.append({'Feature': col, 'r': r})
-
-        pearson_df = (pd.DataFrame(pearson_records)
-                      .sort_values('r', ascending=False)
-                      .reset_index(drop=True))
-
-        top_pos = pearson_df.head(n_top)
-        top_neg = pearson_df.tail(n_top).sort_values('r')
-
-        print(f"\n  Pearson Correlations Combined Dataset - Numeric Features: top {n_top} positive:")
-        print(f"  {'Feature':<40}  {'r':>7}")
-        print("  " + "-" * 50)
-        for _, row in top_pos.iterrows():
-            print(f"  {row['Feature']:<40}  {row['r']:>7.3f}")
-
-        print(f"\n  Pearson Correlations Combined Dataset - Numeric Features: top {n_top} negative:")
-        print(f"  {'Feature':<40}  {'r':>7}")
-        print("  " + "-" * 50)
-        for _, row in top_neg.iterrows():
-            print(f"  {row['Feature']:<40}  {row['r']:>7.3f}")
-
-        # ── PhiK (categorical) ────────────────────────────────────
-        if cat_feat_cols:
-            df_phik = df_model[[target] + cat_feat_cols].copy()
-            for c in df_phik.select_dtypes(['category', 'object']).columns:
-                df_phik[c] = df_phik[c].astype(str).replace('nan', np.nan)
-
-            interval_cols = [c for c in num_cols if c == target]
-            phik_matrix   = df_phik.phik_matrix(interval_cols=interval_cols)
-
-            phik_df = (phik_matrix[[target]]
-                       .drop(index=target, errors='ignore')
-                       .rename(columns={target: 'phik'})
-                       .reset_index()
-                       .rename(columns={'index': 'Feature'})
-                       .sort_values('phik', ascending=False)
-                       .reset_index(drop=True))
-
-            print(f"\n  PhiK Correlations Combined Dataset — Categorical Features:")
-            print(f"  {'Feature':<40}  {'phik':>6}")
-            print("  " + "-" * 50)
-            for _, row in phik_df.iterrows():
-                print(f"  {row['Feature']:<40}  {row['phik']:>6.3f}")
-
-        print()
-
-
 # BASELINE CATBOOST MODEL
 # ___________________________
 def run_baseline_catboost(df_model, target_col, name,
@@ -463,6 +379,7 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     plt.show()
     
     return shap_values
+
 def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features'):
     """
     Example on Multiple Model plots usage:

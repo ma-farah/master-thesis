@@ -601,8 +601,13 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols):
     return result
 
 
-def target_correlation(df, target_col, ex_cols, name, use_phik=False, n_top=40):
-    """Feature vs target. Spearman for numeric, Phik for categorical (if use_phik=True)."""
+def target_correlation(df, target_col, ex_cols, name, plot=True):
+    """Feature vs target. Spearman for numeric, PhiK for categorical.
+
+    Parameters
+    ----------
+    plot : bool   If True (default), produce bar plots. If False, only print tables.
+    """
 
     print(f"\nTarget Correlation ({name})    Target: {target_col}")
 
@@ -622,7 +627,7 @@ def target_correlation(df, target_col, ex_cols, name, use_phik=False, n_top=40):
                         'Correlation': round(rho, 4), 'Abs_correlation': round(abs(rho), 4),
                         'p_value': round(pval, 4)})
 
-    if cat_feat and use_phik:
+    if cat_feat:
         pm = sub[cat_feat + [target_col]].phik_matrix(interval_cols=[target_col])
         for col in cat_feat:
             if col in pm.index:
@@ -639,10 +644,35 @@ def target_correlation(df, target_col, ex_cols, name, use_phik=False, n_top=40):
         for _, r in df.iterrows():
             print(f"  {r['Feature']:<45} {r['Method']:<10} {r['Correlation']:>12.4f}")
 
-    pos = results[results['Correlation'] >  0.05].head(n_top)
-    neg = results[results['Correlation'] < -0.05].sort_values('Correlation').head(n_top)
+    pos = results[(results['Method'] == 'Spearman') & (results['Correlation'] >  0.05)]
+    neg = results[(results['Method'] == 'Spearman') & (results['Correlation'] < -0.05)].sort_values('Correlation')
     _print_corr_table(pos, f"Positive Correlations with {target_col} (> 0.05)")
     _print_corr_table(neg, f"Negative Correlations with {target_col} (< -0.05)")
+
+    phik_res = results[results['Method'] == 'Phik'].sort_values('Correlation', ascending=False)
+    nonzero  = phik_res[phik_res['Correlation'] > 0]
+    if not phik_res.empty:
+        print(f"\n  PhiK Correlations — Categorical Features × {target_col}:")
+        print(f"  {'Feature':<40}  {'phik':>6}")
+        print("  " + "-" * 50)
+        for _, row in phik_res.iterrows():
+            print(f"  {row['Feature']:<40}  {row['Correlation']:>6.3f}")
+
+    if plot:
+        def _bar_plot(df, title, color, xlabel):
+            if df.empty:
+                return
+            fig, ax = plt.subplots(figsize=(9, 0.45 * len(df) + 1.5))
+            ax.barh(df['Feature'].values[::-1], df['Correlation'].values[::-1], color=color)
+            ax.set_xlabel(xlabel)
+            ax.set_title(title)
+            plt.tight_layout()
+            plt.show()
+
+        pos_plot = results[(results['Method'] == 'Spearman') & (results['Correlation'] > 0.1)]
+        _bar_plot(pos_plot, f'Positive Spearman Correlations: Features × {target_col} (rho > 0.1)', 'skyblue', 'Spearman rho')
+        _bar_plot(neg,     f'Negative Spearman Correlations: Features × {target_col}', 'navy',     'Spearman rho')
+        _bar_plot(phik_res, f'PhiK Correlations: Categorical Features × {target_col}',  'turquoise', 'PhiK')
 
     return results
 
