@@ -6,11 +6,10 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 import joblib
 import contextlib, io
 import preprocess
-from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder
 
 
 
@@ -21,6 +20,12 @@ BINARY_MAPS = {
 }
 OHE_COLS        = ['target_volume_side']
 TARGET_ENC_COLS = ['diagnosis', 'target_volume']
+
+# After encoding, these columns are still discrete (0/1) and should be
+# flagged as categorical for HGBR so it uses equality splits, not ordered.
+# Target-encoded cols become continuous floats → NOT included here.
+CATEGORICAL_AFTER_ENC = list(BINARY_MAPS.keys())  # ['gender', 'overweight']
+# OHE columns are added dynamically (e.g. target_volume_side_B, _L, _R)
 
 
 def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
@@ -113,8 +118,6 @@ def hgbr_mrmr(
     X = df_combined[feature_cols].copy()
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
 
-    cat_cols =  X.select_dtypes(include=['category', 'object']).columns.tolist()
-    
     # Precompute OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
@@ -221,9 +224,12 @@ def hgbr_mrmr(
         # Select encoded features (encoding already done)
         X_train_sel = X_train_enc[selected_cols].copy().astype(float)
         X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
-        
-        cats_sel = [c for c in cat_cols if c in selected_cols]
-        cat_indices    = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
+
+        # Binary + OHE columns are discrete (0/1) → tell HGBR to use equality splits
+        ohe_expanded = [c for c in selected_cols
+                        if any(c.startswith(f"{o}_") for o in OHE_COLS)]
+        cat_names = [c for c in CATEGORICAL_AFTER_ENC if c in selected_cols] + ohe_expanded
+        cat_indices = [selected_cols.index(c) for c in cat_names] if cat_names else None
 
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
 
@@ -292,7 +298,7 @@ def hgbr_mrmr(
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
+        .reindex(all_enc_cols, fill_value=0)
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
@@ -343,8 +349,6 @@ def hgbr_threshold_analysis(
     # Precompute OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
-    
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -352,9 +356,9 @@ def hgbr_threshold_analysis(
     sweep_results = []
     total_start   = time.time()
 
-    last_count = int(feature_freq[feature_freq > 0].max())   
+    last_count = int(feature_freq[feature_freq > 0].max())
     steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    
+
     for step in steps:
         is_last = False
         if step == 0:
@@ -412,9 +416,12 @@ def hgbr_threshold_analysis(
             # Select encoded features
             X_train_sc = X_train_enc[selected_cols].copy().astype(float)
             X_test_sc  = X_test_enc[selected_cols].copy().astype(float)
-                                                                  
-            cats_sel = [c for c in cat_cols if c in selected_cols]
-            cat_indices = [selected_cols.index(c) for c in cats_sel] if cats_sel else None
+
+            # Binary + OHE columns are discrete (0/1) → equality splits
+            ohe_expanded = [c for c in selected_cols
+                            if any(c.startswith(f"{o}_") for o in OHE_COLS)]
+            cat_names = [c for c in CATEGORICAL_AFTER_ENC if c in selected_cols] + ohe_expanded
+            cat_indices = [selected_cols.index(c) for c in cat_names] if cat_names else None
 
             inner_splits = list(inner_cv.split(X_train_sc))
             def _fit_inner(itr, ival, params):
@@ -527,8 +534,12 @@ def run_tuned_hgbr(
     # OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
-    
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+
+    # Binary + OHE columns are discrete (0/1) → equality splits
+    ohe_expanded = [c for c in selected_cols
+                    if any(c.startswith(f"{o}_") for o in OHE_COLS)]
+    cat_names = [c for c in CATEGORICAL_AFTER_ENC if c in selected_cols] + ohe_expanded
+    cat_indices = [selected_cols.index(c) for c in cat_names] if cat_names else None
 
     print(f"\n{'='*65}")
     print(f"  HGBR + Optuna — {target_col}")
@@ -538,8 +549,6 @@ def run_tuned_hgbr(
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
-
-    cat_indices = [selected_cols.index(c) for c in cat_cols] if cat_cols else None
 
     fold_results           = []
     best_model_params_list = []

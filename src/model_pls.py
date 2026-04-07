@@ -114,7 +114,6 @@ def pls_mrmr(
     X = df_combined[feature_cols].copy()
 
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     # Precompute OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
@@ -311,7 +310,7 @@ def pls_mrmr(
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
+        .reindex(all_enc_cols, fill_value=0)
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
@@ -361,8 +360,6 @@ def pls_threshold_analysis(
     # Precompute OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
- 
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     inner_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
@@ -561,8 +558,6 @@ def run_tuned_pls(
     # OHE categories for consistent encoding across folds
     ohe_cats = [sorted(X[c].dropna().astype(str).unique())
                 for c in OHE_COLS if c in X.columns]
-    
-    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
 
     print(f"\n{'='*65}")
     print(f"  PLSRegression + Optuna — {target_col}")

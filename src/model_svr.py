@@ -6,11 +6,10 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 import joblib
 import contextlib, io
 import preprocess
-from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 
 
 
@@ -235,20 +234,9 @@ def svr_mrmr(
             random_state=random_state, verbose=False)
         X_train_imp = pd.DataFrame(
             X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        
         X_test_imp = pd.DataFrame(
             imputer.transform(X_test_sel),
             columns=selected_cols, index=X_test_sel.index)
-
-        X_train_sel = X_train_sel.astype(float)
-        X_test_sel  = X_test_sel.astype(float)
-
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp  = pd.DataFrame(
-            imputer.transform(X_test_sel), columns=selected_cols, index=X_test_sel.index)
 
         # Scale
         scaler = StandardScaler()
@@ -325,7 +313,7 @@ def svr_mrmr(
     freq = Counter(f for fold in selected_features_per_fold for f in fold)
     feature_freq = (
         pd.Series(dict(freq), name='selection_count')
-        .reindex(feature_cols, fill_value=0)
+        .reindex(all_enc_cols, fill_value=0)
         .sort_values(ascending=False))
     feature_freq.index.name = 'feature'
 
