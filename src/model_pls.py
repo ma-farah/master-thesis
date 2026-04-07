@@ -6,10 +6,12 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
 from sklearn.model_selection import RepeatedKFold
 from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.cross_decomposition import PLSRegression
 import joblib
 import contextlib, io
 import preprocess
+from skrub import TableReport
 
 
 
@@ -35,6 +37,19 @@ def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
     X_tr = X_train.copy()
     X_te = X_test.copy() if X_test is not None else None
     encoders = {}
+
+    cat_cols = list(BINARY_MAPS.keys()) + OHE_COLS + TARGET_ENC_COLS
+    present_cat_cols = [c for c in cat_cols if c in X_tr.columns]
+
+    if present_cat_cols:
+        # Vi bruker 'most_frequent' siden missing-andelen er lav
+        imputer = SimpleImputer(strategy='most_frequent')
+        
+        # Fit på train, transform på begge
+        X_tr[present_cat_cols] = imputer.fit_transform(X_tr[present_cat_cols])
+        if X_te is not None:
+            X_te[present_cat_cols] = imputer.transform(X_te[present_cat_cols])
+        encoders['cat_imputer'] = imputer
 
     # 1. Binary mapping
     for col, mapping in BINARY_MAPS.items():
@@ -162,7 +177,7 @@ def pls_mrmr(
         # ── Encode categoricals (fit on train only) ────────────────────────
         X_train_enc, X_test_enc, _ = encode_categoricals(
             X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
-
+     
         # ── Impute ─────────────────────────
         X_train_mrmr, _ = preprocess.impute_iterative(
             X_train_enc.astype(float), ex_cols=None, iterations=10,

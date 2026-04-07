@@ -10,7 +10,7 @@ import joblib
 import contextlib, io
 import preprocess
 from sklearn.preprocessing import OneHotEncoder, TargetEncoder
-
+from sklearn.impute import SimpleImputer
 
 
 # ── Encoding constants ──────────────────────────────────────────────────────
@@ -42,6 +42,20 @@ def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
     X_te = X_test.copy() if X_test is not None else None
     encoders = {}
 
+    cat_cols = list(BINARY_MAPS.keys()) + OHE_COLS + TARGET_ENC_COLS
+    present_cat_cols = [c for c in cat_cols if c in X_tr.columns]
+
+    if present_cat_cols:
+        # Vi bruker 'most_frequent' siden missing-andelen er lav
+        imputer = SimpleImputer(strategy='most_frequent')
+        
+        # Fit på train, transform på begge
+        X_tr[present_cat_cols] = imputer.fit_transform(X_tr[present_cat_cols])
+        if X_te is not None:
+            X_te[present_cat_cols] = imputer.transform(X_te[present_cat_cols])
+        encoders['cat_imputer'] = imputer
+
+        
     # 1. Binary mapping
     for col, mapping in BINARY_MAPS.items():
         if col in X_tr.columns:
