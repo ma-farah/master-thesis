@@ -576,19 +576,19 @@ def run_tuned_hgbr(
             X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
         # Select encoded features
-        X_train_scaled = X_train_enc[selected_cols].copy().astype(float)
-        X_test_scaled  = X_test_enc[selected_cols].copy().astype(float)
+        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
+        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
 
-        inner_splits = list(inner_cv.split(X_train_scaled))
+        inner_splits = list(inner_cv.split(X_train_sel))
 
         def _fit_inner_hgbr(itr, ival, params):
             m = HistGradientBoostingRegressor(**params, loss='squared_error',
                                              categorical_features=cat_indices,
                                              random_state=random_state)
-            m.fit(X_train_scaled.iloc[itr], y_train_fit.iloc[itr])
+            m.fit(X_train_sel.iloc[itr], y_train_fit.iloc[itr])
             return np.sqrt(mean_squared_error(
                 y_train_fit.iloc[ival],
-                m.predict(X_train_scaled.iloc[ival])))
+                m.predict(X_train_sel.iloc[ival])))
 
         def model_objective(trial):
             params = dict(
@@ -618,9 +618,9 @@ def run_tuned_hgbr(
         fold_model = HistGradientBoostingRegressor(**best_model_params, loss='squared_error',
                                                   categorical_features=cat_indices,
                                                   random_state=random_state)
-        fold_model.fit(X_train_scaled, y_train_fit)
+        fold_model.fit(X_train_sel, y_train_fit)
 
-        preds_raw = fold_model.predict(X_test_scaled)
+        preds_raw = fold_model.predict(X_test_sel)
         preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                  if pt_fold is not None else preds_raw)
 
