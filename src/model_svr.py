@@ -179,8 +179,8 @@ def svr_mrmr(
         X_train_enc, X_test_enc, _ = encode_categoricals(
             X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        # Impute 
-        X_train_mrmr, _ = preprocess.impute_iterative(
+        # Impute (full encoded set; save imputer for test transform)
+        X_train_mrmr, full_imputer = preprocess.impute_iterative(
             X_train_enc.astype(float), ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
     
@@ -238,29 +238,21 @@ def svr_mrmr(
         selected_features_per_fold.append(selected_cols)
         print(f"  {len(selected_cols)} selected features: {selected_cols}")
 
-        # Select encoded features (encoding already done above)
-        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
-        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
-
-        # Impute
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(
-            X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp = pd.DataFrame(
-            imputer.transform(X_test_sel),
-            columns=selected_cols, index=X_test_sel.index)
+        # Select from already-imputed data; transform test with same imputer
+        X_train_sel = X_train_mrmr[selected_cols]
+        arr = full_imputer.transform(X_test_enc.astype(float))
+        X_test_mrmr = pd.DataFrame(arr, columns=X_train_mrmr.columns, index=X_test_enc.index)
+        X_test_sel  = X_test_mrmr[selected_cols]
 
         # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp),
+            scaler.fit_transform(X_train_sel),
             columns=selected_cols, index=X_train_sel.index)
         X_test_scaled = pd.DataFrame(
-            scaler.transform(X_test_imp),
+            scaler.transform(X_test_sel),
             columns=selected_cols, index=X_test_sel.index)
-        
+
         print('     Running 20 Inner Folds, 50 Optuna Trials...')
 
         # ── Step 3: Inner CV Optuna for SVR HPs ──────────────────────────────
@@ -442,27 +434,22 @@ def svr_threshold_analysis(
             X_train_enc, X_test_enc, _ = encode_categoricals(
                 X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-            # Select encoded features
-            X_train_sel = X_train_enc[selected_cols].copy().astype(float)
-            X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
-
-            # Impute
-            X_train_imp, imputer = preprocess.impute_iterative(
-                X_train_sel, ex_cols=None, iterations=10,
+            # Impute full encoded set (fit on train only), then select
+            X_train_mrmr, full_imputer = preprocess.impute_iterative(
+                X_train_enc.astype(float), ex_cols=None, iterations=10,
                 random_state=random_state, verbose=False)
-            X_train_imp = pd.DataFrame(
-                X_train_imp, columns=selected_cols, index=X_train_sel.index)
-            X_test_imp = pd.DataFrame(
-                imputer.transform(X_test_sel),
-                columns=selected_cols, index=X_test_sel.index)
-            
+            arr = full_imputer.transform(X_test_enc.astype(float))
+            X_test_mrmr = pd.DataFrame(arr, columns=X_train_mrmr.columns, index=X_test_enc.index)
+            X_train_sel = X_train_mrmr[selected_cols]
+            X_test_sel  = X_test_mrmr[selected_cols]
+
             # Scale
             scaler = StandardScaler()
             X_train_sc = pd.DataFrame(
-                scaler.fit_transform(X_train_imp),
+                scaler.fit_transform(X_train_sel),
                 columns=selected_cols, index=X_train_sel.index)
             X_test_sc = pd.DataFrame(
-                scaler.transform(X_test_imp),
+                scaler.transform(X_test_sel),
                 columns=selected_cols, index=X_test_sel.index)
 
             inner_splits = list(inner_cv.split(X_train_sc))
@@ -611,29 +598,24 @@ def run_tuned_svr(
         X_train_enc, X_test_enc, _ = encode_categoricals(
             X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
 
-        # Select encoded features
-        X_train_sel = X_train_enc[selected_cols].copy().astype(float)
-        X_test_sel  = X_test_enc[selected_cols].copy().astype(float)
-
-        # Impute
-        X_train_imp, imputer = preprocess.impute_iterative(
-            X_train_sel, ex_cols=None, iterations=10,
+        # Impute full encoded set (fit on train only), then select
+        X_train_mrmr, full_imputer = preprocess.impute_iterative(
+            X_train_enc.astype(float), ex_cols=None, iterations=10,
             random_state=random_state, verbose=False)
-        X_train_imp = pd.DataFrame(
-            X_train_imp, columns=selected_cols, index=X_train_sel.index)
-        X_test_imp = pd.DataFrame(
-            imputer.transform(X_test_sel),
-            columns=selected_cols, index=X_test_sel.index)
+        arr = full_imputer.transform(X_test_enc.astype(float))
+        X_test_mrmr = pd.DataFrame(arr, columns=X_train_mrmr.columns, index=X_test_enc.index)
+        X_train_sel = X_train_mrmr[selected_cols]
+        X_test_sel  = X_test_mrmr[selected_cols]
 
         # Scale
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(
-            scaler.fit_transform(X_train_imp),
+            scaler.fit_transform(X_train_sel),
             columns=selected_cols, index=X_train_sel.index)
         X_test_scaled = pd.DataFrame(
-            scaler.transform(X_test_imp),
+            scaler.transform(X_test_sel),
             columns=selected_cols, index=X_test_sel.index)
-        
+
         inner_splits = list(inner_cv.split(X_train_scaled))
 
         def _fit_inner_svr(itr, ival, params):
@@ -722,19 +704,18 @@ def run_tuned_svr(
     # Encode full dataset
     X_final_enc, _, _ = encode_categoricals(
         X, y_final_fit, random_state=random_state, ohe_categories=ohe_cats)
-    X_final_sel = X_final_enc[selected_cols].copy().astype(float)
 
-    # Impute
-    X_final_imp, _ = preprocess.impute_iterative(
-        X_final_sel, ex_cols=None, iterations=10,
+    # Impute full encoded set, then select
+    X_final_mrmr, _ = preprocess.impute_iterative(
+        X_final_enc.astype(float), ex_cols=None, iterations=10,
         random_state=random_state, verbose=False)
-    X_final_imp = pd.DataFrame(X_final_imp, columns=selected_cols, index=X_final_sel.index)
+    X_final_sel = X_final_mrmr[selected_cols]
 
     # Scale
     scaler_final = StandardScaler()
     X_final = pd.DataFrame(
-        scaler_final.fit_transform(X_final_imp),
-        columns=selected_cols, index=X_final_imp.index)
+        scaler_final.fit_transform(X_final_sel),
+        columns=selected_cols, index=X_final_sel.index)
 
     hp_final = {
         k: statistics.median([p[k] for p in best_model_params_list])
