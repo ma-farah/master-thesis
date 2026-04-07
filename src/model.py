@@ -393,11 +393,7 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
     if isinstance(sweep_dfs, pd.DataFrame):
         sweep_dfs = {'Model': sweep_dfs}
 
-    # Sample viridis at spread-out positions for bigger contrast between middle colors
-    cmap = plt.cm.viridis
-    n = len(sweep_dfs)
-    positions = [0.0, 0.45, 0.75, 1.0] if n == 4 else list(np.linspace(0, 1, n))
-    model_colors = [cmap(p) for p in positions]
+    model_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd'][:len(sweep_dfs)]
 
     metrics = ['RMSE', 'MAE', 'R2']
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
