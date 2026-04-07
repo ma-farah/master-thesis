@@ -415,7 +415,7 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
     first_df = next(iter(sweep_dfs.values()))
     x_vals   = first_df['threshold']
     x_labels = first_df['threshold_label']
-    axes[-1].set_xlabel('Threshold')
+    axes[-1].set_xlabel('Feature-Frequency Threshold')
     axes[-1].set_xticks(x_vals)
     axes[-1].set_xticklabels(labels=x_labels, fontsize=8, rotation=45, ha='right')
 
