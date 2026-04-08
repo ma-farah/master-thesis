@@ -183,8 +183,7 @@ def create_model_datasets(df1, df2, targets, timepoints,
 def run_baseline_catboost(df_model, target_col, name,
                            n_splits=5, n_repeats=5, random_state=42,
                            target_transformer=None):
-    """Baseline CatBoostRegressor with RepeatedKFold cross-validation.
-
+    """Baseline CatBoostRegressor with 5x5 RepeatedKFold cross-validation.
     """
     y = df_model[target_col].copy()
     exclude      = ['Patient', 'Timepoint', target_col,
@@ -201,16 +200,14 @@ def run_baseline_catboost(df_model, target_col, name,
     cat_cols = X.select_dtypes(include=['object']).columns.tolist()
 
     print(f"\n{'='*65}")
-    print(f"  CatBoost Regressor Baseline — {name}")
+    print(f"  CatBoostRegressor — {name}")
     print(f"  Target : {target_col}")
     print(f"  Samples: {len(X)},  Features: {len(feature_cols)}")
-    print(f"  CV     : {n_splits}-fold × {n_repeats} repeats = {n_splits * n_repeats} fits")
+    print(f"  CV     : 5 splits x 5 repeats = 25 fits")
     print(f"{'='*65}")
 
     rkf          = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
     fold_results = []
-    y_pred_sum   = pd.Series(0.0, index=range(len(X)))
-    y_pred_count = pd.Series(0,   index=range(len(X)))
 
     for fold, (train_idx, test_idx) in enumerate(rkf.split(X)):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
@@ -234,25 +231,21 @@ def run_baseline_catboost(df_model, target_col, name,
         preds     = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                      if pt_fold is not None else preds_raw)
 
-        # Average predictions across repeats
-        y_pred_sum.iloc[test_idx]   += preds
-        y_pred_count.iloc[test_idx] += 1
-
         mae  = mean_absolute_error(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         r2   = r2_score(y_test, preds)
-        fold_results.append({'Fold': fold + 1, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
+        fold_results.append({'Fold': fold + 1, 'MAE': mae, 'RMSE': rmse, 'R2': r2})
         print(f"  Fold {fold+1:>2}: MAE={mae:.3f}  RMSE={rmse:.3f}  R²={r2:.3f}")
 
-    y_pred = y_pred_sum / y_pred_count  # averaged across repeats
-
     results_df  = pd.DataFrame(fold_results)
-    metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
+    metric_cols = ['MAE', 'RMSE', 'R2']
     mean_row    = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
     std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
     results_df  = pd.concat([results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+    results_df.insert(0, 'Model', f"CatBoost Baseline: {name},  target: {target_col}")
 
-    print(f"\n  Summary ({n_splits}x{n_repeats} CV:")
+
+    print(f"\n  Summary CatBoost Baseline - {name} (5x5 CV):")
     for m in metric_cols:
         mv = results_df.loc[results_df['Fold'] == 'Mean', m].iloc[0]
         sv = results_df.loc[results_df['Fold'] == 'Std',  m].iloc[0]
