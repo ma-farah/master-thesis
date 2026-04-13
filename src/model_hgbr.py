@@ -212,10 +212,17 @@ def hgbr_mrmr(
             probe = HistGradientBoostingRegressor(max_iter=300, loss='squared_error', random_state=random_state)
             probe.fit(X_tr_mrmr[sel_cols], y_tr)
             return np.sqrt(mean_squared_error(y_val, probe.predict(X_val_mrmr[sel_cols])))
+        
+        def mrmr_callback(study, trial):
+            if trial.state.name == 'COMPLETE':
+                print(f"    MRMR Trial {trial.number+1:>2}/{N_TRIALS_MRMR}: "
+                      f"RMSE={trial.value:.4f}  {trial.params}")
 
         mrmr_study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_state))
-        mrmr_study.optimize(mrmr_objective, n_trials=N_TRIALS_MRMR, show_progress_bar=False)
-
+        mrmr_study.optimize(
+                mrmr_objective, n_trials=N_TRIALS_MRMR, callbacks=[mrmr_callback],
+                show_progress_bar=False)
+        
         best_mrmr = mrmr_study.best_params
         best_k    = best_mrmr['K']
         best_mrmr_params_per_fold.append(best_mrmr)
