@@ -12,8 +12,6 @@ dependencies:
   - scipy
   - skrub
   - scikit-learn        
-  - prince
-  - miceforest
   - hoggorm
   - matplotlib
   - seaborn
@@ -27,6 +25,7 @@ dependencies:
   - optuna             
   - pip
   - pip:
+      - feature-engine
       - scikit-na
       - hoggormplot
       - adjustText
@@ -34,4 +33,4 @@ dependencies:
       - git+https://github.com/khliland/missing-methods.git
       - git+https://github.com/NMBU-Data-Science/RENT.git
 
-  # last updated 05.03.2026
+  # last updated 15.04.2026
