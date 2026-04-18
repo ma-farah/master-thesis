@@ -285,9 +285,8 @@ IM_CONFIRMED_OUTLIERS = [
     (159, 2),
     (109, 5),
     (266, 4),
-    (255, 1),  
+    (254, 1),   # fjerne
     (229, 2)] 
-
 
 
 def remove_outlier_observations(df, outliers=None, verbose=True):
@@ -990,20 +989,21 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     _pt = df.drop_duplicates(subset=['Patient'])
     if verbose:
         print('Parsing and Transforming Clinical columns: \nUnique Value Counts before and after')
-        print("\n--- diagnosis (BEFORE) ---")
+        print(f"\n--- diagnosis (BEFORE, {_pt['diagnosis'].nunique()} unique values) ---")
         print(_pt['diagnosis'].value_counts(dropna=False).to_string())
     df['diagnosis'] = standardize_diagnosis(df['diagnosis'])
     if verbose:
         _pt_after = df.drop_duplicates(subset=['Patient'])
-        print("\n--- diagnosis (AFTER) ---")
+        print(f"\n--- diagnosis (AFTER, {_pt_after['diagnosis'].nunique()} unique values) ---")
         print(_pt_after['diagnosis'].value_counts().to_dict())
       
 
     # 2 — target_volume: standardize body part; keep side as separate column
     if verbose:
         _tv_pt = df.drop_duplicates(subset=['Patient'])
-        print("\n--- target_volume (BEFORE) ---")
-        print(_tv_pt['target_volume'].value_counts(dropna=False).head(20).to_string())
+        _tv_n_unique = _tv_pt['target_volume'].nunique()
+        print(f"\n--- target_volume (BEFORE, {_tv_n_unique} unique values) ---")
+        print(_tv_pt['target_volume'].value_counts(dropna=False).to_string())
     df['target_volume'], df['target_volume_side'] = standardize_target_volume(df['target_volume'])
     df = move_column_after(df, 'target_volume_side', 'target_volume')
 
@@ -1020,12 +1020,12 @@ def parse_transform_cl(df_cl_clean, verbose=True):
 
     if verbose:
         _tv_after = df.drop_duplicates(subset=['Patient'])['target_volume']
-        print("\n--- target_volume (AFTER) ---")
+        print(f"\n--- target_volume (AFTER, {_tv_after.nunique()} unique values) ---")
         print(_tv_after.value_counts().to_dict())
 
     # 3 — pain_points
     if verbose:
-        print("\n--- pain_points (BEFORE) ---")
+        print("\n--- pain_points (BEFORE) ---") 
         print(df['pain_points'].value_counts(dropna=False).head(20).to_string())
     df['pain_points'] = standardize_pain_points(df['pain_points'])
     if verbose:
@@ -1035,44 +1035,47 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     # 4 — cumulative_dose
     if 'cumulative_dose' in df.columns:
         if verbose:
-            print("\n--- cumulative_dose (BEFORE) ---")
+            print(f"\n--- cumulative_dose (BEFORE, {df['cumulative_dose'].nunique()} unique values) ---")
             print(df['cumulative_dose'].value_counts(dropna=False).to_string())
         df['cumulative_dose'] = pd.to_numeric(
             df['cumulative_dose'].apply(parse_cumulative_dose), errors='coerce'
         )
         if verbose:
-            print("\n--- cumulative_dose (AFTER) ---")
+            print(f"\n--- cumulative_dose (AFTER, {df['cumulative_dose'].nunique()} unique values) ---")
             print(sorted(df['cumulative_dose'].dropna().unique()))
 
     # 5 — gender: 'w' -> 'f'
     if 'gender' in df.columns:
         if verbose:
-            print("\n--- gender (BEFORE) ---")
+            print(f"\n--- gender (BEFORE, {df['gender'].nunique()} unique values) ---")
             print(df['gender'].value_counts(dropna=False).to_string())
         df['gender'] = df['gender'].replace('w', 'f')
         if verbose:
-            print("\n--- gender (AFTER) ---")
+            print(f"\n--- gender (AFTER, {df['gender'].nunique()} unique values) ---")
             print(df['gender'].value_counts().to_dict())
 
     # 6 — overweight_bmi -> overweight + bmi
     if 'overweight_bmi' in df.columns:
         if verbose:
-            print("\n--- overweight_bmi (BEFORE) ---")
-            print(df['overweight_bmi'].value_counts(dropna=False).head(20).to_string())
+            _owbmi_n_unique = df['overweight_bmi'].nunique()
+            print(f"\n--- overweight_bmi (BEFORE, {_owbmi_n_unique} unique values) ---")
+            print(df['overweight_bmi'].value_counts(dropna=False).to_string())
         df = split_bmi_column(df)
         if verbose:
-            print("\n--- overweight / bmi (AFTER) ---")
-            print(f"  overweight: {df['overweight'].value_counts().to_dict()}")
-            bmi_valid = df['bmi'].dropna()
+            _pt_ow = df.drop_duplicates(subset=['Patient'])
+            print(f"\n--- overweight / bmi (AFTER, {_pt_ow['overweight'].nunique()} unique overweight values, "
+                  f"{_pt_ow['bmi'].nunique()} unique bmi values) ---")
+            print(f"  overweight (unique patients): {_pt_ow['overweight'].value_counts(dropna=False).to_dict()}")
+            bmi_valid = _pt_ow['bmi'].dropna()
             if len(bmi_valid) > 0:
-                print(f"  bmi: range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
-                      f"{df['bmi'].isna().sum()} missing")
+                print(f"  bmi (unique patients): range {bmi_valid.min():.1f}–{bmi_valid.max():.1f}, "
+                      f"{_pt_ow['bmi'].isna().sum()} missing")
 
     # 7 — previous_therapy -> binary indicator columns
     if 'previous_therapy' in df.columns:
         if verbose:
             print("\n--- previous_therapy (BEFORE) ---")
-            print(df['previous_therapy'].value_counts(dropna=False).head(20).to_string())
+            print(df['previous_therapy'].value_counts(dropna=False).to_string())
         df = encode_therapy_columns(df)
         if verbose:
             therapy_cols = [f'previous_therapy_{i}' for i in range(1, 8)
