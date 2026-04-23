@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+from polars import groups
 import seaborn as sns
 import phik
 from missing_methods import pca as mm_pca, rv2 as mm_rv2
@@ -325,6 +326,15 @@ def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 
     groups          = [plot_df.loc[plot_df['diagnosis'] == dx, target_col].values
                        for dx in order]
     groups          = [g for g in groups if g.std() > 0]
+
+    levene_stat, levene_p = stats.levene(*groups)
+    print(f"\nLevene's test: W={levene_stat:.3f}, p={levene_p:.3f}")
+
+    if levene_p < 0.05:
+        print(" NB! ANOVA assumption violated: Variance inbetween groups are significantaly different!")
+    elif levene_p >= 0.05:
+        print(" Variance is not significantly different,  ANOVA- homogeneity assumptions hold.")
+
     f_stat, p_anova = stats.f_oneway(*groups)
 
     # Print summary table
