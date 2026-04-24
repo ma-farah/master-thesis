@@ -745,36 +745,25 @@ def run_tuned_elasticnet(
             patient_err_df, scaler_final)
 
 
-
 def run_dummy_enet(
-    df_combined, feature_list, target_col='pain_reduction_pct', random_state=42,
-    target_transformer=None
-):
-    """always predicts the training-set mean."""
+    df_combined, target_col='pain_reduction_pct', random_state=42,
+    target_transformer=None):
+    """Always predicts the training-set mean."""
     from sklearn.dummy import DummyRegressor
     from sklearn.base import clone
-
     y = df_combined[target_col].copy()
     valid = y.notna()
-
     exclude = {'Patient', 'Timepoint', target_col, 'pain_reduction',
                'pain_reduction_pct', 'pain_under_load_reduction',
                'pain_under_load_reduction_pct'}
     all_feature_cols = [c for c in df_combined.columns if c not in exclude]
     X = df_combined[all_feature_cols].copy()
-    selected_cols = list(feature_list)
-
     X, y = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
-    ohe_cats = [sorted(X[c].dropna().astype(str).unique())
-                for c in OHE_COLS if c in X.columns]
-
     outer_cv = RepeatedKFold(n_splits=4, n_repeats=5, random_state=random_state)
     fold_results = []
-
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X), start=1):
         X_train, X_test = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
         if target_transformer is not None:
             pt_fold = clone(target_transformer)
             y_train_fit = pd.Series(
@@ -782,40 +771,22 @@ def run_dummy_enet(
                 index=y_train.index)
         else:
             pt_fold, y_train_fit = None, y_train
-
-        X_train_enc, X_test_enc, _ = encode_categoricals(
-            X_train, y_train_fit, X_test, random_state, ohe_categories=ohe_cats)
-
-        X_train_imp, full_imputer = preprocess.impute_iterative(
-            X_train_enc.astype(float), ex_cols=None, iterations=10,
-            random_state=random_state, verbose=False)
-        arr = full_imputer.transform(X_test_enc.astype(float))
-        X_test_imp = pd.DataFrame(arr, columns=X_train_imp.columns, index=X_test_enc.index)
-
-        X_train_sel = X_train_imp[selected_cols]
-        X_test_sel  = X_test_imp[selected_cols]
-
         dummy = DummyRegressor(strategy='mean')
-        dummy.fit(X_train_sel, y_train_fit)
-
-        preds_raw = dummy.predict(X_test_sel)
+        dummy.fit(X_train, y_train_fit)
+        preds_raw = dummy.predict(X_test)
         preds = (pt_fold.inverse_transform(preds_raw.reshape(-1, 1)).ravel()
                  if pt_fold is not None else preds_raw)
-
         mae  = mean_absolute_error(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         r2   = r2_score(y_test, preds)
         fold_results.append({'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
-
     results_df  = pd.DataFrame(fold_results)
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
     mean_row    = {'Fold': 'Mean', **{m: results_df[m].mean() for m in metric_cols}}
     std_row     = {'Fold': 'Std',  **{m: results_df[m].std()  for m in metric_cols}}
     results_df  = pd.concat(
-        [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
-
+            [results_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
     print(f"\n{'='*65}\n  Dummy Regressor — {target_col}\n{'='*65}")
     for m in metric_cols:
         print(f"    {m:<5}: {mean_row[m]:.3f} ± {std_row[m]:.4f}")
-
     return results_df
