@@ -11,6 +11,8 @@ from missing_methods.sk import StandardScaler as MM_StandardScaler
 from adjustText import adjust_text as _adj
 from itertools import combinations as _combns
 from scipy import stats
+import matplotlib.ticker as mticker
+import pingouin as pg
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -214,195 +216,128 @@ def plot_clinical_distributions(df_cl_vis):
 
     plt.tight_layout()
     plt.show()
-
-
-
-
-def t_test_pain_reduction(df_cl_vis):
+    
+def pain_by_diagnosis(df, timepoints=[1, 2, 3, 4, 5],
+                      patient_col='Patient', tp_col='Timepoint',
+                      pain_col='pain_scale', diag_col='diagnosis',
+                      figsize=(12, 5)):
     """
-    One-sample t-test for wether the mean pain_scale reduction is significantly
-    greater than zero for each baseline-vs-followup timepoint pair 
-    H1: reduction > 0, using significance level at 0.05
-
+    One boxplot per timepoint showing pain_scale distribution by diagnosis group.
     """
-    followups = sorted(df_cl_vis['Timepoint'].dropna().unique().astype(int))
-    followups = [t for t in followups if t > 1]
-    pairs     = [(1, t) for t in followups]
+    for t in timepoints:
+        sub = (df[df[tp_col] == t][[patient_col, pain_col, diag_col]]
+               .drop_duplicates(patient_col)
+               .dropna(subset=[pain_col, diag_col]))
 
-    records = []
-    for t_a, t_b in pairs:
-        t1 = (df_cl_vis[df_cl_vis['Timepoint'] == t_a][['Patient', 'pain_scale']]
-              .drop_duplicates('Patient').dropna()
-              .rename(columns={'pain_scale': 'pain_t1'}))
-        
-        t2 = (df_cl_vis[df_cl_vis['Timepoint'] == t_b][['Patient', 'pain_scale']]
-              .drop_duplicates('Patient').dropna()
-              .rename(columns={'pain_scale': f'pain_t{t_b}'}))
+        counts  = sub[diag_col].value_counts()
+        plot_df = sub.copy()
 
-        df_r        = t1.merge(t2, on='Patient')
-        df_r['red'] = df_r['pain_t1'] - df_r[f'pain_t{t_b}']
-        vals        = df_r['red'].dropna()
+        # Sort by median pain descending
+        order = (plot_df.groupby(diag_col)[pain_col]
+                 .median().sort_values(ascending=False).index.tolist())
 
-        t_stat, p_two = stats.ttest_1samp(vals, popmean=0)
-        p_one         = p_two / 2
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.boxplot(data=plot_df, x=diag_col, y=pain_col, order=order,
+                    palette='mako', width=0.5,
+                    flierprops=dict(marker='o', markersize=4, alpha=0.5), ax=ax)
+        sns.stripplot(data=plot_df, x=diag_col, y=pain_col, order=order,
+                      color='black', alpha=0.3, size=3, jitter=True, ax=ax)
 
-        records.append({
-            'Comparison': f'T1 -> T{t_b}',
-            'n'         : len(vals),
-            'Mean'      : round(vals.mean(), 3),
-            'std'       : round(vals.std(), 3),
-            't'         : round(t_stat, 3),
-            'p-value'   : f'{p_one:.2e}',
-        })
+        # Annotate n per group
+        for i, dx in enumerate(order):
+            n = counts[dx]
+            ax.text(i, ax.get_ylim()[0] - 0.3, f'n={n}',
+                    ha='center', va='top', fontsize=9, color='grey')
 
-    result_df = pd.DataFrame(records)
+        ax.set_xlabel('Diagnosis', fontsize=12)
+        ax.set_ylabel(f'{pain_col} (0–10)', fontsize=12)
+        ax.set_title(f'{pain_col} by Diagnosis — T{t}')
+        ax.tick_params(axis='x', rotation=35)
+        ax.set_ylim(-0.5, 11)
+        plt.tight_layout()
+        plt.show()
 
-    cols   = result_df.columns.tolist()
-    widths = {'Comparison': 13, 'n': 6, 'Mean': 8, 'std': 7, 't': 8, 'p-value': 10}
-    header = '  '.join(f'{c:>{widths[c]}}' for c in cols)
-
-    print("\nOne-sample t-test — pain_scale reduction (H0: μ = 0,  H1: μ > 0)\n"
-    "significance level α = 0.05")
-    print(header)
-    print('_' * 66)
-    for _, row in result_df.iterrows():
-        print('  '.join(f'{str(row[c]):>{widths[c]}}' for c in cols))
-
-    return result_df
-
-
-
-def plot_diagnosis_reduction(df_cl_vis, col, timepoints, min_n=10, figsize=(14, 6)):
+def friedman_pain_trajectory(df, timepoints=[1,2,3,4],
+                              patient_col='Patient', tp_col='Timepoint',
+                              pain_col='pain_scale', figsize=(10,6)):
     """
-    Boxplot of pain reduction by diagnosis, computed from df_cl_vis. 
-
-    Matches patients present at both timepoints, computes reduction as
-    col(t_a) - col(t_b), filters to diagnosis groups with enough patients,
-    then runs one-way ANOVA and eventually Tukey HSD post-hoc for significant tests
-
-    Parameters
-    ----------
-    df_cl_vis  : pd.DataFrame  cleaned clinical dataset
-    col        : str           column to compute reduction from, e.g. 'pain_scale'
-    timepoints : list[int]     [t_a, t_b], reduction = col_ta - col_tb
-    min_n      : int           minimum patients per diagnosis group (default 10)
-    figsize    : tuple
+    Friedman repeated-measures test on pain_scale, post-hoc consecutive
+    Wilcoxon (Holm-corrected), descriptive table, and trajectory figure.
+    Filters to complete cases wtih pain_scale value at all timepoints in given list.
     """
-    from statsmodels.stats.multicomp import pairwise_tukeyhsd
-    from statannotations.Annotator import Annotator
-    from itertools import combinations
+    # 1 — Complete cases
+    sets   = [set(df.loc[(df[tp_col]==t) & df[pain_col].notna(), patient_col]) for t in timepoints]
+    common = set.intersection(*sets)
+    dl = (df[df[patient_col].isin(common) & df[tp_col].isin(timepoints)]
+          [[patient_col, tp_col, pain_col]]
+          .drop_duplicates([patient_col, tp_col]).dropna(subset=[pain_col]).copy())
 
-    t_a, t_b     = timepoints[0], timepoints[1]
-    target_col   = f'{col}_reduction'
-    tp_label     = f'T{t_a}-T{t_b}'
+    # 2 — Descriptive stats
+    desc = (dl.groupby(tp_col)[pain_col]
+            .agg(n='count', Median='median', Mean='mean', SD='std',
+                 Q1=lambda x: x.quantile(.25), Q3=lambda x: x.quantile(.75))
+            .loc[timepoints].round(2))
+    print(f"\n{'='*65}")
+    print(f"FRIEDMAN TEST: {pain_col} Trajectory -  n = {len(common)} from T1-T4")
+    print(f"{'='*65}\n{desc}\n")
 
-    # 1 — Extract col + diagnosis at t_a; col at t_b; match on Patient
-    ta = (df_cl_vis[df_cl_vis['Timepoint'] == t_a][['Patient', 'diagnosis', col]]
-          .drop_duplicates('Patient').dropna(subset=[col]))
-    tb = (df_cl_vis[df_cl_vis['Timepoint'] == t_b][['Patient', col]]
-          .drop_duplicates('Patient').dropna(subset=[col]))
+    # 3 — Friedman test
+    dl_f = dl.copy(); dl_f[tp_col] = dl_f[tp_col].astype(str)
+    fr = pg.friedman(data=dl_f, dv=pain_col, within=tp_col, subject=patient_col)
+    W, Q, p = fr['W'].values[0], fr['Q'].values[0], fr['p_unc'].values[0]
+    print(f"Friedman  Q({int(fr['ddof1'].values[0])}) = {Q:.3f},  p = {p:.2e},  W = {W:.4f}\n")
 
-    merged = ta.merge(tb, on='Patient', suffixes=(f'_t{t_a}', f'_t{t_b}'))
-    merged[target_col] = merged[f'{col}_t{t_a}'] - merged[f'{col}_t{t_b}']
-    merged = merged.dropna(subset=[target_col, 'diagnosis'])
-    merged['diagnosis'] = merged['diagnosis'].astype(str)
+    # 4 Post-hoc consecutive Wilcoxon (pingouin 0.6.1: returns W_val, p_val, RBC, CLES)
+    rows = []
+    for i in range(len(timepoints)-1):
+        a, b = timepoints[i], timepoints[i+1]
+        pa = dl.loc[dl[tp_col]==a].set_index(patient_col)[pain_col].sort_index()
+        pb = dl.loc[dl[tp_col]==b].set_index(patient_col)[pain_col].sort_index()
+        idx = pa.index.intersection(pb.index)
+        w = pg.wilcoxon(pa[idx].values, pb[idx].values, alternative='greater')
+        rows.append({'Pair': f'T{a}→T{b}',
+                     'Median_Diff': round((pa[idx]-pb[idx]).median(), 2),
+                     'W': round(w['W_val'].values[0],1), 'p': w['p_val'].values[0],
+                     'RBC': round(w['RBC'].values[0],3),  'CLES': round(w['CLES'].values[0],3)})
+    post = pd.DataFrame(rows)
+    reject, p_holm = pg.multicomp(post['p'].values, method='holm')
+    post['p_holm'], post['sig'] = p_holm, reject
+    print(f"Post-hoc (Holm-corrected):\n{post.to_string(index=False)}\n")
 
-    print(f"\nPatients with {col} at both T{t_a} and T{t_b}: {len(merged)}")
-
-    # 2 — Filter to diagnosis groups with enough patients
-    counts   = merged['diagnosis'].value_counts()
-    valid_dx = counts[counts >= min_n].index.tolist()
-    plot_df  = merged[merged['diagnosis'].isin(valid_dx)].copy()
-
-    print(f"Diagnosis-groups with n ≥ {min_n}: {valid_dx}")
-
-    # Sort by median descending
-    order = (plot_df.groupby('diagnosis')[target_col]
-                    .median()
-                    .sort_values(ascending=False)
-                    .index.tolist())
-
-    # 3 — One-way ANOVA (exclude groups with zero variance this causes F=nan)
-    groups          = [plot_df.loc[plot_df['diagnosis'] == dx, target_col].values
-                       for dx in order]
-    groups          = [g for g in groups if g.std() > 0]
-
-    levene_stat, levene_p = stats.levene(*groups)
-    print(f"\nLevene's test: W={levene_stat:.3f}, p={levene_p:.3f}")
-
-    if levene_p < 0.05:
-        print(" NB! ANOVA assumption violated: Variance inbetween groups are significantaly different!")
-    elif levene_p >= 0.05:
-        print(" Variance is not significantly different,  ANOVA- homogeneity assumptions hold.")
-
-    f_stat, p_anova = stats.f_oneway(*groups)
-
-    # Print summary table
-    widths = {'Diagnosis': 18, 'n': 5, 'Mean': 8, 'std': 7, 'F': 7, 'p-value': 10}
-    header = '  '.join(f'{c:<{widths[c]}}' if c == 'Diagnosis' else f'{c:>{widths[c]}}' for c in widths)
-
-    print(f"\nOne-way ANOVA — {col} reduction by diagnosis ({tp_label})\n")
-    print(header)
-    print('_' * 65)
-    for dx in order:
-        vals = plot_df.loc[plot_df['diagnosis'] == dx, target_col].dropna()
-        print(f"  {dx:<{widths['Diagnosis']}}  {len(vals):>{widths['n']}}  {vals.mean():>{widths['Mean']}.3f}  "
-              f"{vals.std():>{widths['std']}.3f}  {f_stat:>{widths['F']}.3f}  "
-              f"{p_anova:>{widths['p-value']}.3f}")
-
-    # 4 — Tukey HSD post-hoc
-    tukey    = pairwise_tukeyhsd(plot_df[target_col], plot_df['diagnosis'])
-    tukey_df = pd.DataFrame(
-        data    = tukey._results_table.data[1:],
-        columns = tukey._results_table.data[0],
-    )
-    pval_map = {}
-    for _, row in tukey_df.iterrows():
-        pval_map[(row['group1'], row['group2'])] = row['p-adj']
-        pval_map[(row['group2'], row['group1'])] = row['p-adj']
-
-    all_pairs = list(combinations(order, 2))
-    sig_pairs = [(a, b) for a, b in all_pairs if pval_map.get((a, b), 1.0) < 0.05]
-    sig_pvals = [pval_map[(a, b)] for a, b in sig_pairs]
-
-    # 5 — Plot
+    # 5 — Figure
     fig, ax = plt.subplots(figsize=figsize)
-    sns.boxplot(
-        data=plot_df, x='diagnosis', y=target_col,
-        order=order, palette='mako', width=0.5,
-        flierprops=dict(marker='o', markersize=4, alpha=0.5), ax=ax,
-    )
-    sns.stripplot(
-        data=plot_df, x='diagnosis', y=target_col,
-        order=order, color='black', alpha=0.3, size=3, jitter=True, ax=ax,
-    )
+    meds, x = desc['Median'].values, range(len(timepoints))
 
-    # 6 — Annotate only significant Tukey pairs 
-    if sig_pairs:
-        annotator = Annotator(ax, sig_pairs, data=plot_df,
-                              x='diagnosis', y=target_col, order=order)
-        annotator.configure(text_format='star', loc='inside', verbose=False)
-        annotator.set_pvalues_and_annotate(sig_pvals)
+    for pid in common:
+        d = dl[dl[patient_col]==pid].sort_values(tp_col)
+        ax.plot(x, d[pain_col].values, color="#00356A", alpha=0.15, lw=0.7)
 
-    # 7 — Labels
-    anova_str = f"ANOVA F={f_stat:.2f}, p={p_anova:.3f}"
-    ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Diagnosis', fontsize=12)
-    ax.set_ylabel(f'{col} reduction ({tp_label})', fontsize=12)
-    ax.set_title(f'{col} Reduction by Diagnosis — {tp_label}\n'
-                 f'(n ≥ {min_n} per group; {anova_str}; Tukey HSD brackets = p<0.05)',
-                 fontsize=12)
-    ax.tick_params(axis='x', rotation=35)
+    ax.fill_between(x, desc['Q1'], desc['Q3'], alpha=.25, color='steelblue', label='IQR')
+    ax.plot(x, meds, 'o-', color='#1a3a5c', lw=2.5, ms=8, zorder=5, label='Median')
+    ax.plot(x, desc['Mean'], 's--', color='#c0392b', lw=1.5, ms=6, zorder=5, alpha=.7, label='Mean')
 
-    for i, dx in enumerate(order):
-        n = counts[dx]
-        ax.text(i, ax.get_ylim()[0] - 0.15, f'n={n}',
-                ha='center', va='top', fontsize=8, color='gray')
+    for i, m in enumerate(meds):
+        ax.annotate(f'{m:.1f}', (i,m), xytext=(12,8), textcoords='offset points',
+                    fontsize=10, fontweight='bold', color='#1a3a5c')
 
+    y_br = desc['Q3'].max() + 0.8
+    for i, row in post.iterrows():
+        s = '***' if row['p_holm']<.001 else '**' if row['p_holm']<.01 else '*' if row['p_holm']<.05 else 'ns'
+        ax.annotate(s, (i+.5, y_br), ha='center', fontsize=11, fontweight='bold',
+                    color='#1a3a5c' if row['p_holm']<.05 else 'grey')
+
+    ax.set(xticks=x, ylim=(-.5,11), xlabel='Timepoint', ylabel=f'{pain_col} (0–10)')
+    ax.set_xticklabels([f'T{t}' for t in timepoints])
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(2))
+    ax.legend(loc='upper right'); ax.grid(axis='y', alpha=.3)
+    p_s = f'{p:.2e}' if p<.001 else f'{p:.4f}'
+    ax.set_title(f'Pain Scale Trajectory (n={len(common)})\n'
+                 f'Friedman χ²({int(fr["ddof1"].values[0])})={Q:.2f}, p={p_s}, W={W:.3f}',
+                 fontsize=12, pad=12)
     plt.tight_layout()
-    plt.show()
+    return fr, post, fig
 
-    return fig
+
 
 # ── Spearman correlation ──────────────────────────────────────────────────────
 # immunological x immunological
@@ -856,36 +791,39 @@ def pca_per_timepoint(df, timepoints, ex_cols, name, ncomp=10):
     return pca_store
 
 
-def plot_loadings(pca_store, timepoints=[1, 2], top_n=15):
-    """Bar plot of top loadings for PC1 and PC2."""
-    for t in timepoints:
-        d        = pca_store[t]
-        loadings = d['loadings']
-        features = d['feat_names']
-        exp      = d['exp']
+def plot_loadings(loadings, feat_names, exp_pct, label, top_n=20):
+    """Bar plot of top loadings for PC1 and PC2 (for trajectory PCA).
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        fig.suptitle(f'Top {top_n} loadings at T{t}', fontsize=13, fontweight='bold')
+    Parameters
+    ----------
+    loadings   : np.ndarray   (n_features, n_components)
+    feat_names : list[str]
+    exp_pct    : np.ndarray   explained variance % per PC
+    label      : str          e.g. 'T1 → T2'
+    top_n      : int
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(f'Top {top_n} Loadings — {label}', fontsize=13, fontweight='bold')
 
-        for pc_i, ax in enumerate(axes):
-            vals    = loadings[:, pc_i]
-            top_idx = np.argsort(np.abs(vals))[::-1][:top_n]
-            # Sort by actual value so positive/negative bars are grouped
-            top_idx = top_idx[np.argsort(vals[top_idx])]
+    for pc_i, ax in enumerate(axes):
+        vals    = loadings[:, pc_i]
+        top_idx = np.argsort(np.abs(vals))[::-1][:top_n]
+        top_idx = top_idx[np.argsort(vals[top_idx])]
 
-            names  = [features[i] for i in top_idx]
-            values = vals[top_idx]
-            colors = ['steelblue' if v >= 0 else 'coral' for v in values]
+        names  = [feat_names[i] for i in top_idx]
+        values = vals[top_idx]
+        colors = ['steelblue' if v >= 0 else 'coral' for v in values]
 
-            ax.barh(range(len(names)), values, color=colors, edgecolor='white', linewidth=0.5)
-            ax.set_yticks(range(len(names)))
-            ax.set_yticklabels(names, fontsize=9)
-            ax.set_xlabel('Loading')
-            ax.set_title(f'PC{pc_i+1} ({exp[pc_i]:.1f}% variance)')
-            ax.axvline(0, color='grey', lw=0.5)
+        ax.barh(range(len(names)), values, color=colors, edgecolor='white', linewidth=0.5)
+        ax.set_yticks(range(len(names)))
+        ax.set_yticklabels(names, fontsize=9)
+        ax.set_xlabel('Loading')
+        ax.set_title(f'PC{pc_i+1} ({exp_pct[pc_i]:.1f}% variance)')
+        ax.axvline(0, color='grey', lw=0.5)
 
-        plt.tight_layout()
-        plt.show()
+    plt.tight_layout()
+    plt.show()
+    return fig
 
 
 def pca_colored(pca_store, timepoints, color_configs, name, color_source_df):
@@ -1074,7 +1012,7 @@ def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random
 # ── Trajectory PCA — immunological  ───────────────────────────────────
 
 def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
-    """Trajectory PCA, stacking two timepoints together and drawing arrows for patient trajectories..
+    """Trajectory PCA, stacking two timepoints together and drawing arrows for patient trajectories
 
     Parameters
     ----------
@@ -1144,17 +1082,18 @@ def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
         for i in top_idx:
             print(f"  {patient_ids[i]:>10}"
                   f"  {sc_a[i,0]:>9.3f}  {sc_a[i,1]:>9.3f}"
-                  f"  {sc_b[i,0]:>9.3f}  {sc_b[i,1]:>9.3f}")
-             
+                  f"  {sc_b[i,0]:>9.3f}  {sc_b[i,1]:>9.3f}"
+                  f"  {traj_len[i]:>13.3f}")
 
-        # Top 10 loadings
+        # Top 20 loadings
         for pc_i, pc_name in enumerate(['PC1', 'PC2']):
             abs_l  = np.abs(loadings[:, pc_i])
-            top10l = np.argsort(abs_l)[::-1][:10]
-            print(f"\n  Top 10 loadings for {pc_name} ({label}):")
+            top20l = np.argsort(abs_l)[::-1][:20]
+            print(f"\n  Top 20 loadings for {pc_name} ({label}):")
             print(f"  {'Feature':>40}  {'Loading':>10}")
-            for k in top10l:
+            for k in top20l:
                 print(f"  {feat_names[k]:>40}  {loadings[k, pc_i]:>10.4f}")
+        plot_loadings(loadings, feat_names, exp_pct, label)
 
         # Trajectory score plot
         label_idx = np.argsort(traj_len)[::-1][:20]
@@ -1195,6 +1134,8 @@ def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
         ax.legend(loc='best')
         plt.tight_layout()
         plt.show()
+
+
 
 
 # ── MFA — immunological  ─────────────────────────────────────────────
@@ -1292,6 +1233,3 @@ def mfa_im(df, timepoints, ex_cols, ncomp=5):
         for k in top10l:
             print(f"  {feat_names[k]:>45}  {loadings[k, pc_i]:>10.4f}")
 
-
-
-# ── Immunological features × pain_scale (Pearson) ────────────────────────────
