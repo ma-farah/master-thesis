@@ -543,7 +543,7 @@ def run_tuned_svr(
       2. Train final fold model on X_train → evaluate on X_test
       3. Final model: median HPs across outer folds, trained on full X
 
-    Returns: results_df, final_model, X_final, y_pred, patient_err_df, scaler_final
+    Returns: results_df, final_model, X_final, y_pred, patient_err_df, patient_heatmap_df, scaler_final
     """
     import optuna, warnings, statistics
 
@@ -671,9 +671,13 @@ def run_tuned_svr(
         fold_results.append({
             'Fold': outer_fold, 'MAE': mae, 'MSE': rmse**2, 'RMSE': rmse, 'R2': r2})
 
+        repeat = (outer_fold - 1) // 4 + 1
         for idx, true_val, pred_val in zip(test_idx, y_test.values, preds):
             patient_errors.append({
                 'Patient':   patient_id_map[idx],
+                'repeat':    repeat,
+                'true_val':  true_val,
+                'pred_val':  pred_val,
                 'abs_error': abs(true_val - pred_val),
             })
 
@@ -682,11 +686,19 @@ def run_tuned_svr(
 
     print(f"\n  Training time: {(time.time()-start)/60:.1f} min")
 
-    patient_err_df = (pd.DataFrame(patient_errors)
-                      .groupby('Patient')['abs_error']
-                      .agg(mean_mae='mean', n_folds='count')
+    _raw = pd.DataFrame(patient_errors)
+    patient_err_df = (_raw.groupby('Patient')
+                      .agg(mean_mae=('abs_error', 'mean'),
+                           mean_true=('true_val', 'mean'),
+                           mean_pred=('pred_val', 'mean'),
+                           n_folds=('abs_error', 'count'))
                       .sort_values('mean_mae', ascending=False)
-                      .round({'mean_mae': 2}))
+                      .round({'mean_mae': 2, 'mean_true': 2, 'mean_pred': 2}))
+    patient_heatmap_df = (_raw.pivot_table(index='Patient', columns='repeat',
+                                           values='abs_error', aggfunc='mean')
+                          .rename(columns=lambda r: f'Repeat {r}')
+                          .loc[patient_err_df.index]
+                          .round(2))
 
     results_df  = pd.DataFrame(fold_results)
     metric_cols = ['MAE', 'MSE', 'RMSE', 'R2']
@@ -741,4 +753,4 @@ def run_tuned_svr(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            patient_err_df, scaler_final)
+            patient_err_df, patient_heatmap_df, scaler_final)

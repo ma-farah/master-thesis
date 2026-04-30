@@ -216,31 +216,45 @@ def plot_clinical_distributions(df_cl_vis):
 
     plt.tight_layout()
     plt.show()
-    
-def pain_by_diagnosis(df, timepoints=[1, 2, 3, 4, 5],
-                      patient_col='Patient', tp_col='Timepoint',
-                      pain_col='pain_scale', diag_col='diagnosis',
-                      figsize=(12, 5)):
-    """
-    One boxplot per timepoint showing pain_scale distribution by diagnosis group.
-    """
-    for t in timepoints:
-        sub = (df[df[tp_col] == t][[patient_col, pain_col, diag_col]]
-               .drop_duplicates(patient_col)
-               .dropna(subset=[pain_col, diag_col]))
 
-        counts  = sub[diag_col].value_counts()
-        plot_df = sub.copy()
 
-        # Sort by median pain descending
-        order = (plot_df.groupby(diag_col)[pain_col]
+def pain_reduction_by_diagnosis(df, timepoints=[1, 2, 3, 4, 5],
+                                patient_col='Patient', tp_col='Timepoint',
+                                pain_col='pain_scale', diag_col='diagnosis',
+                                figsize=(12, 5)):
+    """
+    One boxplot per follow-up timepoint showing pain reduction from baseline (T1)
+    by diagnosis group. Reduction = T1 - Tx (positive = improvement).
+    Matches patients present at both T1 and Tx.
+    """
+    baseline = timepoints[0]
+    followups = timepoints[1:]
+
+    bl = (df[df[tp_col] == baseline][[patient_col, pain_col, diag_col]]
+          .drop_duplicates(patient_col)
+          .dropna(subset=[pain_col, diag_col])
+          .rename(columns={pain_col: 'pain_baseline'}))
+
+    for t in followups:
+        fu = (df[df[tp_col] == t][[patient_col, pain_col]]
+              .drop_duplicates(patient_col)
+              .dropna(subset=[pain_col])
+              .rename(columns={pain_col: 'pain_followup'}))
+
+        merged = bl.merge(fu, on=patient_col)
+        merged['reduction'] = merged['pain_baseline'] - merged['pain_followup']
+
+        counts = merged[diag_col].value_counts()
+
+        # Sort by median reduction descending
+        order = (merged.groupby(diag_col)['reduction']
                  .median().sort_values(ascending=False).index.tolist())
 
         fig, ax = plt.subplots(figsize=figsize)
-        sns.boxplot(data=plot_df, x=diag_col, y=pain_col, order=order,
+        sns.boxplot(data=merged, x=diag_col, y='reduction', order=order,
                     palette='mako', width=0.5,
                     flierprops=dict(marker='o', markersize=4, alpha=0.5), ax=ax)
-        sns.stripplot(data=plot_df, x=diag_col, y=pain_col, order=order,
+        sns.stripplot(data=merged, x=diag_col, y='reduction', order=order,
                       color='black', alpha=0.3, size=3, jitter=True, ax=ax)
 
         # Annotate n per group
@@ -249,13 +263,15 @@ def pain_by_diagnosis(df, timepoints=[1, 2, 3, 4, 5],
             ax.text(i, ax.get_ylim()[0] - 0.3, f'n={n}',
                     ha='center', va='top', fontsize=9, color='grey')
 
+        ax.axhline(0, color='grey', linewidth=0.8, linestyle='--')
         ax.set_xlabel('Diagnosis', fontsize=12)
-        ax.set_ylabel(f'{pain_col} (0–10)', fontsize=12)
-        ax.set_title(f'{pain_col} by Diagnosis — T{t}')
+        ax.set_ylabel(f'Pain Reduction (T{baseline} − T{t})', fontsize=12)
+        ax.set_title(f'Pain Reduction from Baseline (T1) by Diagnosis — T{baseline}→T{t}')
         ax.tick_params(axis='x', rotation=35)
-        ax.set_ylim(-0.5, 11)
         plt.tight_layout()
         plt.show()
+
+
 
 def friedman_pain_trajectory(df, timepoints=[1,2,3,4],
                               patient_col='Patient', tp_col='Timepoint',

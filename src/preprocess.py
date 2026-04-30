@@ -275,9 +275,7 @@ def fix_dtypes_im(df_im_vis, verbose=True):
 
 # ── Outlier removal (after PyOD + review with dataset-owner) ─────────────────────────────
 
-# Confirmed outlier observations from PyOD ensemble and discussion,
-# Each entry is a (Patient, Timepoint) pair — only that specific observation
-# is removed, not all timepoints for that patient.
+# 6 PyOD flagged outliers removed + 2 additional patients with found abnormal measurement (also flagged)
 IM_CONFIRMED_OUTLIERS = [
     (221, 2),
     (163, 1),
@@ -285,7 +283,7 @@ IM_CONFIRMED_OUTLIERS = [
     (159, 2),
     (109, 5),
     (266, 4),
-    (254, 1),   # fjerne
+    (254, 1),   
     (229, 2)] 
 
 
