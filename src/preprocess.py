@@ -135,6 +135,15 @@ IM_EXCLUDED_COLUMNS = [
 
 # Empty rows at the bottom of dataset
 IM_EMPTY_ROW_INDICES = list(range(823, 829)) 
+PRE_EXCLUDED = [
+    # Excluded by Ausschluss keyword
+    2, 13, 26, 27, 28, 37, 39, 40, 41, 44, 46, 50, 57, 67,
+    68, 71, 74, 75, 79, 85, 96, 98, 100, 168, 216, 260, 264, 265,
+    # Excluded as multi-body-part patients
+    3, 45, 184, 149, 150, 162, 179, 156, 54, 47,
+    # out-of-range values in questionarre data 
+    219
+]
 
 
 def drop_rename_cols_im(df_im_vis, verbose=True):

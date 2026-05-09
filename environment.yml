@@ -31,6 +31,5 @@ dependencies:
       - adjustText
       - six
       - git+https://github.com/khliland/missing-methods.git
-      - git+https://github.com/NMBU-Data-Science/RENT.git
 
-  # last updated 15.04.2026
+  # last updated 08.05.2026
