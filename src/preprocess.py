@@ -142,8 +142,7 @@ PRE_EXCLUDED = [
     # Excluded as multi-body-part patients
     3, 45, 184, 149, 150, 162, 179, 156, 54, 47,
     # out-of-range values in questionarre data 
-    219
-]
+    219]
 
 
 def drop_rename_cols_im(df_im_vis, verbose=True):
@@ -233,7 +232,7 @@ def clean_im(df_im, verbose=True):
     
     # 1 — drop predetermined excluded columns + rename date column
     if verbose:
-        print("  [1] Dropping Pre-Determined Columns:")
+        print("  [1] Dropping Pre-Determined Columns/Patients:")
     df_im_vis = drop_rename_cols_im(df_im_vis, verbose=verbose)
 
     # 2 — replace German NaN markers
@@ -288,7 +287,7 @@ def fix_dtypes_im(df_im_vis, verbose=True):
 IM_CONFIRMED_OUTLIERS = [
     (221, 2),
     (163, 1),
-    (150, 1),
+    (150, 1), # not present after removing pre-determined patients based on exlucsion criteria
     (159, 2),
     (109, 5),
     (266, 4),
