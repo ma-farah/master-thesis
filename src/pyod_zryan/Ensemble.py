@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.utils import check_array
 
-from pyod_zyran.base import BaseDetector
+from pyod_zryan.base import BaseDetector
 
 class Ensemble(BaseDetector):
 

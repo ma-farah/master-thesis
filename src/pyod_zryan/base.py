@@ -22,8 +22,8 @@ from sklearn.utils import deprecated
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
 
-from pyod_zyran.sklearn_base import _pprint
-from pyod_zyran.utility import precision_n_scores
+from pyod_zryan.sklearn_base import _pprint
+from pyod_zryan.utility import precision_n_scores
 
 
 @six.add_metaclass(abc.ABCMeta)

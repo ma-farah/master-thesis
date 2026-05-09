@@ -833,29 +833,14 @@ def pca_colored(pca_store, timepoints, color_configs, name, color_source_df):
 # ── PyOD Zryan outlier detection ──────────────────────────────────────────────
 
 def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random_state=42):
-    """Ensemble outlier detection using Zryan approach. Code is adapted from Zryan´s original github repo:
+    """Ensemble outlier detection using approach developed by Zryan Rzgar Hassan Mustafa. Code is adapted from Zryan´s original gitlab repo:
+    https://gitlab.com/zryan.rz/master_outlier_detection_h23
 
     Pipeline:
       1. Scale feature columns with StandardScaler.
       2. GEC selects 6 most dissimilar algorithms from a candidate pool of 11.
       3. visualiser_OD fits ensemble, aggregates median probability + confidence, plots.
       4. Print summary; return outlier candidate DataFrame.
-
-    Requires df_imputed (no NaN in feature_cols) — run after impute_miceforest or
-    impute_median.
-
-    Parameters
-    ----------
-    df_imputed   : pd.DataFrame  imputed dataset, with numeric features only
-    feature_cols : list[str]     feature columns
-    contamination: float
-    name         : str           label for print headers
-    random_state : int
-
-    Returns
-    -------
-    no_od_df          : pd.DataFrame  flagged-by-N-algorithms summary
-    outlier_candidates: pd.DataFrame  high probability + confidence observations
     """
     import sys
     import random
@@ -874,8 +859,8 @@ def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random
     from pyod.models.copod import COPOD as COPOD_od
     from pyod.models.lscp import LSCP
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from pyod_zyran.GEC import calculate_GEC
-    from pyod_zyran.Visualisering import visualiser_OD
+    from pyod_zryan.GEC import calculate_GEC
+    from pyod_zryan.Visualisering import visualiser_OD
 
     if not hasattr(np, 'bool'):
         np.bool = bool
