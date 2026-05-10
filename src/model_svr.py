@@ -712,7 +712,7 @@ def run_tuned_svr(
         mv, sv = mean_row[m], std_row[m]
         print(f"    {m:<5}: {mv:.3f} ± {sv:.4f}")
 
-    # Final model
+    # Final model for SHAP analysis only
     if target_transformer is not None:
         pt_final    = clone(target_transformer)
         y_final_fit = pd.Series(
