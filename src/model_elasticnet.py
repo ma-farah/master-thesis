@@ -754,7 +754,7 @@ def run_tuned_elasticnet(
               if pt_final is not None else y_pred_raw)
 
     return (results_df, final_model, X_final, y_pred,
-            patient_err_df, patient_heatmap_df, scaler_final)
+            patient_err_df, patient_heatmap_df, scaler_final, patient_errors)
 
 
 def run_dummy_enet(
