@@ -904,7 +904,7 @@ def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
 
     cum_col   = sns.color_palette("crest", 1)[0]
     _mako5    = sns.color_palette("mako", 5)
-    tp_colors = {1: _mako5[0], 2: _mako5[2], 3: _mako5[4]}
+    tp_colors = {1: 'steelblue', 2: 'tomato', 3: 'limegreen'}
     tp_labels = {1: "T1", 2: "T2", 3: "T3"}
 
     def _filter_tp(tp, patients):
@@ -996,9 +996,7 @@ def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
 
         texts = []
         for i in label_idx:
-            mx = (sc_a[i, 0] + sc_b[i, 0]) / 2
-            my = (sc_a[i, 1] + sc_b[i, 1]) / 2
-            texts.append(ax.text(mx, my, str(patient_ids[i]),
+            texts.append(ax.text(sc_b[i, 0], sc_b[i, 1], str(patient_ids[i]),
                                  fontsize=8, fontweight='bold', color='black', zorder=5))
         _adj(texts, ax=ax, expand=(1.5, 1.5),
              arrowprops=dict(arrowstyle="-", color="grey", lw=0.6))
