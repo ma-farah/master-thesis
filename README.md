@@ -11,7 +11,7 @@ immunological and clinical features from data collected in the prospective IMMO-
 (ElasticNet, SVR, PLSR, and HGBR) were developed at three post-treatment timepoints (T2, T3, T4) and evaluated 
 through nested cross-validation, with Optuna hyperparameter optimization and MRMR feature selection. 
 
-Results show that all models yielded $R^2$ values close to zero or negative across all timepoints, meaning the models 
+Results show that all models yielded R-squared values close to zero or negative across all timepoints, meaning the models 
 were not able to capture the variation in the target and learn predictive signals. Several of the models performed worse than a constant-mean model, which only outputs the mean target-value across the training samples as predictions. These results indicate that the immunological and clinical features available in data do not support patient-level prediction of pain change. 
 Alternative modeling formulations and integration of psychosocial and behavioral pain measurements alongside immunological data are suggestions for future work.
 
