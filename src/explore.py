@@ -1,3 +1,5 @@
+# All functions related to EDA - distrubution plots, correlation analysis, PCA, RV2 matrix etc.
+
 # imports
 import pandas as pd
 import numpy as np
@@ -22,15 +24,6 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 def load_data(data_path=None):
     """Load immunological and clinical sheets from LDRT_raw.xlsx.
-
-    Parameters
-    ----------
-    data_path : str or Path, optional
-
-    Returns
-    -------
-    df_im : pd.DataFrame   raw immunological dataset 
-    df_cl : pd.DataFrame   raw clinical dataset 
     """
     if data_path is None:
         data_path = Path(__file__).resolve().parents[1] / "data" / "LDRT_raw.xlsx"
@@ -45,11 +38,6 @@ def load_data(data_path=None):
 
 def dataset_overview(df, name):
     """Print basic statistics for a dataset.
-
-    Parameters
-    ----------
-    df            : pd.DataFrame
-    name          : str   label used in print headers (e.g. 'Immunological')
     """
     print(f"\n{'='*60}")
     print(f"Raw {name} Dataset Overview")
@@ -90,11 +78,6 @@ def dataset_overview(df, name):
 
 def patient_timepoint_summary(df, name):
     """Print cumulative patient coverage across timepoints and plot a bar plot.
-
-    Parameters
-    ----------
-    df            : pd.DataFrame
-    name          : str   label used in titles
     """
 
     timepoint_col='Timepoint'
@@ -141,14 +124,10 @@ def patient_timepoint_summary(df, name):
     plt.show()
 
 
-# ── Clinical distribution plots ───────────────────────────────────────────────
+# Clinical dataset distribution plots ───────────────────────────────────────────────
 
 def plot_clinical_distributions(df_cl_vis):
     """Plot baseline demographic and pain distributions for the clinical dataset
-
-    Parameters
-    ----------
-    df_cl_vis : pd.DataFrame   cleaned clinical dataset
     """
     print('Clinical dataset - Distribution Plots')
 
@@ -273,7 +252,7 @@ def pain_reduction_by_diagnosis(df, timepoints=[1, 2, 3, 4, 5],
 
 
 # ── Spearman correlation ──────────────────────────────────────────────────────
-# immunological x immunological
+# immunological features with immunolgocal features
 def spearman_correlation(df, ex_cols, name, n_top=40):
     """Compute pairwise Spearman rho on numeric columns.
     """
@@ -377,7 +356,7 @@ def spearman_correlation_pain(df_cl_vis, df_im_vis, ex_cols_im, plot=True):
     return results
 
 
-# ── Phik correlation — clinical dataset ──────────────────────────────
+# Phik correlation — clinical dataset ──────────────────────────────
 def phik_correlation(df, ex_cols, num_cols, name, n_top=30):
     """Suited for combined or clinical datasets with categorical and numeric features.
     """
@@ -483,10 +462,6 @@ def phik_correlation_pain(df, target, ex_cols, name, num_cols, plot=True):
 
 def target_correlation(df, target_col, ex_cols, name, plot=True):
     """Feature vs target. Spearman for numeric, PhiK for categorical.
-
-    Parameters
-    ----------
-    plot : bool   If True (default), produce bar plots. If False, only print tables.
     """
 
     print(f"\nTarget Correlation ({name})    Target: {target_col}")
@@ -559,22 +534,14 @@ def target_correlation(df, target_col, ex_cols, name, plot=True):
 
 
 # ── RV2 matrix ────────────────────────────────────────────────────────────────
-
 def rv2_matrix(df, timepoints, ex_cols, name):
     """Compute pairwise RV2 similarity matrix across timepoints.
+    Uses missing-methods library  to handle missing values
 
-    Uses missing-methods and therefore handles NaN natively.
-
-    Parameters
-    ----------
     df         : pd.DataFrame   dataframe
     timepoints : list[int]      list of timepoints to include
     ex_cols    : list[str]      list of columns to exclude (for dataset with mixed types, exclude categorical columns)
     name       : str            label for titles and prints
-   
-    Returns
-    -------
-    rv2_df : pd.DataFrame  symmetric RV2 matrix with T-labels
 
     """
     dfs_tp  = {t: df[df['Timepoint'] == t] for t in timepoints}
@@ -622,7 +589,6 @@ def rv2_matrix(df, timepoints, ex_cols, name):
 
 
 # ── PCA per timepoint ─────────────────────────────────────────────────────────
-
 def pca_per_timepoint(df, timepoints, ex_cols, name, ncomp=10):
     """Run PCA per timepoint, plot scree + score plots, print loadings.
 
@@ -759,6 +725,7 @@ def plot_loadings(loadings, feat_names, exp_pct, label, top_n=20):
     return fig
 
 
+# PCA colored with clinical variables
 def pca_colored(pca_store, timepoints, color_configs, name, color_source_df):
     """PCA score plots colored by clinical variables.
     """
@@ -839,7 +806,7 @@ def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random
     Pipeline:
       1. Scale feature columns with StandardScaler.
       2. GEC selects 6 most dissimilar algorithms from a candidate pool of 11.
-      3. visualiser_OD fits ensemble, aggregates median probability + confidence, plots.
+      3. visualiser_OD fits ensemble, aggregates median probability + confidence, plots results.
       4. Print summary; return outlier candidate DataFrame.
     """
     import sys
@@ -931,14 +898,7 @@ def run_pyod_zryan(df_imputed, feature_cols, contamination=0.05, name='', random
 
 def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
     """Trajectory PCA, stacking two timepoints together and drawing arrows for patient trajectories
-
-    Parameters
-    ----------
-    df      : pd.DataFrame   dataframe (not imputed)
-    pairs   : list of tuples  (tp_a, tp_b, arrow_color, label)
-              e.g. [(1, 2, color, 'T1 → T2'), ...]
-    ex_cols : list[str]
-    ncomp   : int
+    Only on immunolgical dataset
     """
     print("\nTrajectory PCA — immunological dataset")
 
@@ -1053,101 +1013,4 @@ def trajectory_pca_im(df, pairs, ex_cols, ncomp=10):
         plt.tight_layout()
         plt.show()
 
-
-
-
-# ── MFA — immunological  ─────────────────────────────────────────────
-
-def mfa_im(df, timepoints, ex_cols, ncomp=5):
-    """Plotting Multiple Factor Analysis, 
-
-    Each timepoint is a block, normalised by sqrt(first eigenvalue), then stacked
-    horizontally for a joint PCA. Uses missing-methods so no imputation is required.
-
-    Parameters
-    ----------
-    df         : pd.DataFrame  df_im_vis (NOT imputed)
-    timepoints : list[int]     timepoints to include (e.g. [1, 2, 3])
-    ex_cols    : list[str]
-    ncomp      : int
-    """
-    tp_label = '+'.join(f"T{t}" for t in timepoints)
-    print(f"\nMFA {tp_label} — immunological dataset")
-
-    pt_sets      = {t: set(df[df['Timepoint'] == t]['Patient']) for t in timepoints}
-    patients_mfa = set.intersection(*pt_sets.values())
-    n_mfa        = len(patients_mfa)
-    print(f"  Patients with all timepoints ({tp_label}): {n_mfa}")
-
-    def _get_block(tp):
-        return (df[(df['Timepoint'] == tp) & (df['Patient'].isin(patients_mfa))]
-                .sort_values('Patient').reset_index(drop=True))
-
-    blocks      = {t: _get_block(t) for t in timepoints}
-    patient_ids = blocks[timepoints[0]]['Patient'].values
-    feat_cols   = [c for c in blocks[timepoints[0]].columns if c not in ex_cols]
-    feat_names  = [f"T{t}_{c}" for t in timepoints for c in feat_cols]
-
-    def _mfa_normalise(X):
-        Xs   = MM_StandardScaler().fit_transform(X)
-        lam1 = mm_pca(Xs, ncomp=1)['explained'][0]
-        return Xs / np.sqrt(lam1)
-
-    X_mfa = np.hstack([
-        _mfa_normalise(blocks[t][feat_cols].values.astype(float))
-        for t in timepoints
-    ])
-
-    res      = mm_pca(X_mfa, ncomp=ncomp)
-    scores   = res['scores']
-    loadings = res['loadings']
-    exp      = res['explained'] / res['explained'].sum() * 100
-
-    # Scree plot
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(range(1, ncomp + 1), exp,
-           color=sns.color_palette("mako", ncomp), label="Per-PC %")
-    ax.plot(range(1, ncomp + 1), np.cumsum(exp),
-            marker="o", color=sns.color_palette("crest", 1)[0],
-            linewidth=1.5, label="Cumulative %")
-    ax.set_xticks(range(1, ncomp + 1))
-    ax.set_xlabel("Principal Components.")
-    ax.set_ylabel("Explained Variance (%)")
-    ax.set_title(f"Scree Plot for MFA of Immunological Dataset {tp_label})")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # Score plot of top 20 furthest from origin
-    dist  = np.sqrt(scores[:, 0]**2 + scores[:, 1]**2)
-    top20 = np.argsort(dist)[::-1][:20]
-
-    fig, ax = plt.subplots(figsize=(9, 7))
-    ax.scatter(scores[:, 0], scores[:, 1],
-               c=[sns.color_palette("mako", 1)[0]],
-               s=40, zorder=3, edgecolors='white', linewidth=0.4, alpha=0.85,
-               label=f"Patients (n={n_mfa})")
-    texts = [ax.text(scores[i, 0], scores[i, 1], str(patient_ids[i]),
-                     fontsize=7, fontweight='bold', color='black', zorder=5)
-             for i in top20]
-    _adj(texts, ax=ax, expand=(1.5, 1.5),
-         arrowprops=dict(arrowstyle="-", color="grey", lw=0.5))
-    ax.axhline(0, color='grey', lw=0.5, linestyle='--')
-    ax.axvline(0, color='grey', lw=0.5, linestyle='--')
-    ax.set_xlabel(f"PC1 ({exp[0]:.1f}% variance)")
-    ax.set_ylabel(f"PC2 ({exp[1]:.1f}% variance)")
-    ax.set_title(f"MFA Score Plot For Immunological Dataset {tp_label}\n"
-                 f"top 20 furthest from origin labelled)")
-    ax.legend(loc='best')
-    plt.tight_layout()
-    plt.show()
-
-    # Top 10 loadings for PC1 and PC2
-    for pc_i, pc_name in enumerate(['PC1', 'PC2']):
-        abs_l  = np.abs(loadings[:, pc_i])
-        top10l = np.argsort(abs_l)[::-1][:10]
-        print(f"\n  Top 10 loadings — {pc_name} (MFA {tp_label}):")
-        print(f"  {'Feature':>45}  {'Loading':>10}")
-        for k in top10l:
-            print(f"  {feat_names[k]:>45}  {loadings[k, pc_i]:>10.4f}")
 

@@ -21,11 +21,8 @@ BINARY_MAPS = {
 OHE_COLS        = ['target_volume_side']
 TARGET_ENC_COLS = ['diagnosis', 'target_volume']
 
-# After encoding, these columns are still discrete (0/1) and should be
-# flagged as categorical for HGBR so it uses equality splits, not ordered.
-# Target-encoded cols become continuous floats → NOT included here.
 CATEGORICAL_AFTER_ENC = list(BINARY_MAPS.keys())  # ['gender', 'overweight']
-# OHE columns are added dynamically (e.g. target_volume_side_B, _L, _R)
+
 
 
 def encode_categoricals(X_train, y_train, X_test=None, random_state=42,
@@ -339,7 +336,7 @@ def hgbr_threshold_analysis(
     random_state=42, target_transformer=None):
     """HGBR + Optuna nested CV across feature-frequency threshold subsets.
 
-    Evaluates subsets (all features → most-frequent features) with outer 4×5=20 CV
+    Evaluates up to 11 subsets (all features → most-frequent features) with outer 4×5=20 CV
     and inner 4×5=20 CV + Optuna (50 trials). Use the returned sweep_df to plot and
     choose a feature threshold, then pass the chosen feature list to run_tuned_hgbr.
 
@@ -528,7 +525,7 @@ def run_tuned_hgbr(
     """HGBR + Optuna nested CV on a fixed feature list.
       1. Inner CV (4×5=20) + Optuna (50 trials) tunes max_depth, learning_rate, min_samples_leaf, l2_regularization
       2. Train final fold model on X_train → evaluate on X_test
-      3. Final model: median HPs across outer folds, trained on full X
+      3. Saves a model in order to run SHAP analysis (median HPs across outer folds, trained on full X)
 
     Returns: results_df, final_model, X_final, y_pred, patient_err_df, patient_heatmap_df, scaler_final
     """

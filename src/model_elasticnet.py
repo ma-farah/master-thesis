@@ -92,7 +92,7 @@ def elasticnet_mrmr(
     target_transformer=None,
 ):
     """ElasticNet with MRMR (K + RFCQ params tuned by Optuna) inside each outer CV fold.
-      1. Tune K and RFCQ params (n_estimators, max_depth, min_samples_leaf) via Optuna with 50 trials
+      1. Tune K and RFCQ params (n_estimators, max_depth, min_samples_leaf) via Optuna with 20 trials
          on a 75-25 split of X_train. K candidates: all features 40, 30, 20, 10 features.
       2. Re-run MRMR on full X_train with best K + best RFCQ params -> selected feature subset for an outer fold
       3. Inner CV (4x5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters
@@ -344,7 +344,7 @@ def elasticnet_threshold_analysis(
     random_state=42, target_transformer=None):
     """ElasticNet + Optuna nested CV across feature-frequency threshold subsets.
 
-    Evaluates 11 subsets (all features -> most-frequent features) with outer 4x5=20 CV
+    Evaluate up to 11 subsets (all features -> most-frequent features) with outer 4x5=20 CV
     and inner 4x5=20 CV + Optuna (50 trials). Use the returned sweep_df to plot and
     choose a feature threshold, then pass the chosen feature list to run_tuned_elasticnet.
 
@@ -538,10 +538,9 @@ def run_tuned_elasticnet(
 ):
     """ElasticNet with Optuna nested CV.
       Runs Elasticnet model on a selected sets of features, after feature selection and feature-threshold analysis.
-      SHAP analysis is performed on the final model.
       1. Inner CV (4x5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters on X_train
       2. Train final fold model on X_train -> evaluate on X_test
-      3. Final model: median HPs across outer folds, trained on full X
+      3. Saves a model in order to run SHAP analysis (median HPs across outer folds, trained on full X)
 
     Returns: results_df, final_model, X_final, y_pred, patient_err_df, patient_heatmap_df, scaler_final
     """
@@ -757,6 +756,7 @@ def run_tuned_elasticnet(
             patient_err_df, patient_heatmap_df, scaler_final, patient_errors)
 
 
+# dummy model
 def run_dummy_enet(
     df_combined, target_col='pain_reduction_pct', random_state=42,
     target_transformer=None):

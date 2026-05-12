@@ -1,4 +1,5 @@
-# Modeling functions for merging datasets, create targets, baseline modeling, shap plotting
+# Modeling functions for merging datasets, create targets, baseline modeling, shap values and plotting
+
 import time
 import optuna
 import pandas as pd
@@ -28,7 +29,7 @@ MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 #_________________________________________________________________________________________
 
 def construct_datasets_targets(df1, column_name, timepoints):
-    """Computing per-patient regression targets from a clinical column across two timepoints.
+    """ Computing per-patient regression targets from a clinical column across two timepoints.
     Only patients that :
       - have a non-NaN measurement at T_a
       - have a non-NaN measurement at T_b
@@ -105,11 +106,9 @@ def create_model_datasets(df1, df2, targets, timepoints,
     df1              : pd.DataFrame  First dataset (immunological)
     df2              : pd.DataFrame  Second dataset (clinical) — ignored if single_dataset=True
     targets          : pd.DataFrame  Output from construct_datasets_targets()
-    timepoints       : list[int]     One timepoint → raw features; two → difference features
+    timepoints       : list[int]     One timepoint given -> raw features; two timepoints -> difference features
     single_dataset   : bool          If True, merge only df1 with targets
-    include_baseline : bool          If True, include the baseline pain value for the target
-    target_col       : str           Required when include_baseline=True - name of baseline column
-
+    include_baseline : bool          If True, include the baseline pain value for the target in the dataset
     Returns
     -------
     df_combined : pd.DataFrame  — features + target columns, one row per patient
@@ -254,7 +253,7 @@ def run_baseline_catboost(df_model, target_col, name,
     return results_df
 
 
-
+# Functions for plotting SHAP values
 def plot_shap_hgbr(model, X):
     """SHAP bar + beeswarm plots for HGBR model."""
     import shap
@@ -373,9 +372,15 @@ def plot_shap_pls(model, X, scaler, n_background=20):
     
     return shap_values
 
+# --------------------------------------------------------------------------------------------------
+# Function for plotting feature selections and performance metrics across feature-frequency thresholds
 def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features'):
     """
-    Example on Multiple Model plots usage:
+    Plot the results from the modelname_threshold_analysis() functions
+    in model_elasticnet.py, model_pls.py, model_svr.py and model_hgbr.py
+    Input can be a single dataframe or a dictionary of all dataframes.
+
+    Example on multiple dataframe usage:
     plot_sweep({
         'ElasticNet': sweep_df_en,
         'PLSR':       sweep_df_pls,
@@ -420,10 +425,6 @@ def plot_sweep(sweep_dfs, title='Performance Metrics against Selected Features')
 def plot_feature_frequency(feature_freq, name, top=20):
     """Bar plot of feature selection frequency across outer folds.
     Plots top n features. 
-
-    Parameters:
-        feature_freq : pd.Series  — selection counts per feature
-        name         : str        — plot title suffix
     """
     import matplotlib.pyplot as plt
     n_outer = 20  # outer folds
@@ -453,20 +454,16 @@ def plot_feature_frequency(feature_freq, name, top=20):
     plt.tight_layout()
     plt.show()
 
-
+# Compute stability of feature selections
 def jaccard_scores(selected_features_per_fold, name=''):
     """Compute pairwise Jaccard similarity across all outer fold feature sets.
+    Takes the list selected_per_fold returned by the function modelanme_mrmr() 
+    in model_elasticnet.py, model_pls.py, model_svr.py and model_hgbr.py files.
 
-    Parameters
     ----------
     selected_features_per_fold : list of lists   feature sets from each outer fold
     name                       : str              label for print output
 
-    Returns
-    -------
-    jaccard_matrix : pd.DataFrame   n_folds × n_folds pairwise Jaccard matrix
-    mean_jaccard   : float          mean pairwise Jaccard (excluding diagonal)
-    std_jaccard    : float          std of pairwise Jaccard values
     """
     from itertools import combinations
 
@@ -516,8 +513,9 @@ def jaccard_scores(selected_features_per_fold, name=''):
     return jaccard_matrix
 
 
+# Pairwise comparision of model performance metrics in each outer fold
 def pairwise_metric_comparison(results_dict, alpha=0.05):
-    """Pairwise paired t-test across model metrics RMSE, MAE and R2."""
+    """ Pairwise paired t-test across model metrics RMSE, MAE and R2 in each outer fold"""
     from itertools import combinations
     model_names = list(results_dict.keys())
     n_models    = len(model_names)

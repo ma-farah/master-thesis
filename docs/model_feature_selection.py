@@ -12,6 +12,24 @@ import contextlib, io
 import preprocess
 
 
+# Exploring RFE and RENT for feature selection
+
+# Old preprocessing for exploring feature selection methods.
+# Intially developed with simple encoding and imputation, not used for final modeling.
+def prep_for_mrmr(X_train, cat_cols, random_state=42):
+    """OrdinalEncode + IterativeImpute for MRMR."""
+    out = X_train.copy()
+
+    cats = [c for c in cat_cols if c in out.columns]
+    if cats:
+        oe = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        out[cats] = oe.fit_transform(out[cats].astype(str))
+
+    out, _ = preprocess.impute_iterative(
+        out.astype(float), ex_cols=None, iterations=10,
+        random_state=random_state, verbose=False)
+    return out
+
 
 #_________________________________________________________________________________________________
 # ElasticNet + RFE
@@ -22,13 +40,7 @@ def elasticnet_rfe(
     target_transformer=None,
 ):
     """ElasticNet with RFE (n_features_to_select + step tuned by Optuna) inside each outer CV fold.
-      1. Tune n_features_to_select and step via Optuna (20 trials) on a 75-25 split of X_train.
-         n_features_to_select candidates: [40, 30, 20, 10]. step: float in (0.0, 1.0).
-         RFE estimator: Ridge (stable coef_ for feature ranking, decoupled from final ElasticNet).
-      2. Re-run RFE on full X_train with best params -> selected feature subset for the outer fold.
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters.
 
-    Returns: results_df, feature_freq, selected_features_per_fold
     """
     from sklearn.linear_model import ElasticNet, Ridge
     from sklearn.feature_selection import RFE
@@ -86,7 +98,11 @@ def elasticnet_rfe(
                 pt_fold.fit_transform(y_train.values.reshape(-1, 1)).ravel(),
                 index=y_train.index)
         else:
+
             pt_fold, y_train_fit = None, y_train
+
+        # Note: prep_for_mrmr function is an old encoding + imputation pipeline
+        # Developed using simple imputer and median imputation just for exploring fs methods
 
         # ── Step 1: Tune RFE params on 75-25 split of X_train ───────────────
         X_train_rfe = prep_for_mrmr(X_train, cat_cols, random_state)  # encode + impute
@@ -250,11 +266,6 @@ def elasticnet_rent(
     tau_3=0.975, target_transformer=None,
 ):
     """ElasticNet with RENT (C, l1_ratio, τ₁ tuned by Optuna) inside each outer CV fold.
-      1. Tune RENT HPs (C, l1_ratio, τ₁) via Optuna (20 trials) on a 75-25 split of X_train.
-      2. Re-run RENT on full X_train with best HPs -> selected feature subset for the outer fold.
-      3. Inner CV (4×5=20) + Optuna (50 trials) tunes ElasticNet hyperparameters.
-
-    Returns: results_df, feature_freq, selected_features_per_fold
     """
     from sklearn.linear_model import ElasticNet
     from RENT import RENT

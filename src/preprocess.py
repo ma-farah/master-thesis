@@ -1,5 +1,6 @@
-# functions for preprocessing data
-# imports
+# Functions for all pre-processing steps applied to the Dataset
+
+
 import pandas as pd
 import numpy as np
 import re
@@ -9,13 +10,7 @@ from skrub import TableReport
 
 # Helper function: replace missing value markers
 def replace_missing_markers(df, skip_cols=None, verbose=False):
-    """Replace German missing-value strings with NaN in all object columns.
-
-    Handles all capitalisation and punctuation variants of:
-      - 'k.A.' (keine Angabe — no data entered)
-      - 'n.D.' (nicht durchgeführt — not performed)
-
-    Parameters
+    """Replace  missing-value strings with NaN.
     ----------
     df        : pd.DataFrame  
     skip_cols : iterable of str -  optional columns to skip
@@ -39,17 +34,12 @@ def replace_missing_markers(df, skip_cols=None, verbose=False):
 
 def remove_nan_cols(df, id_cols=None, threshold=0.25, verbose=True):
     """Remove feature columns with more than `threshold` fraction of NaN values.
-
-    Parameters
     ----------
     df        : pd.DataFrame
-    id_cols   : list of str  columns to exclude from NaN check (default: Patient, Timepoint
-    threshold : float        NaN fraction cutoff (default 0.25)
-    verbose   : bool
+    id_cols   : list of str   columns to exclude removal (default: Patient, Timepoint
+    threshold : float         NaN fraction cutoff (default 0.25)
+    verbose   : bool          Set to True to print dropped columns and counts
 
-    Returns
-    -------
-    pd.DataFrame — copy with high-NaN columns removed
     """
     if id_cols is None:
         id_cols = ['Patient', 'Timepoint']
@@ -130,11 +120,12 @@ IM_EXCLUDED_COLUMNS = [
     "mDC-1_CD86+",
     "mDC-2_CD86+",
     "pDC_CD86+",
-    "Basophils.1",   # duplicate column
+    "Basophils.1",   
 ]
 
 # Empty rows at the bottom of dataset
 IM_EMPTY_ROW_INDICES = list(range(823, 829)) 
+# Known patients to exclude from analysis
 PRE_EXCLUDED = [
     # Excluded by Ausschluss keyword
     2, 13, 26, 27, 28, 37, 39, 40, 41, 44, 46, 50, 57, 67,
@@ -212,20 +203,6 @@ def drop_empty_rows_im(df_im_vis, verbose=True):
 
 def clean_im(df_im, verbose=True):
     """Full cleaning pipeline for the raw immunological dataset.
-    -----
-    1. Drop pre-determined excluded columns + rename Messdatum to Date
-    2. Replace German NaN markers (k.A. / n.D. variants)
-    3. Drop known empty rows (bottom of Excel dataset and rows with no data)
-    4. Fix dtypes: Date → datetime, Patient/Timepoint → Int64, features → float64
-
-    Parameters
-    ----------
-    df_im   : pd.DataFrame    raw immunological data
-    verbose : bool            set to False to silence all outprints
-
-    Returns
-    -------
-    df_im_vis  : copy of cleaned dataset
     """
 
     df_im_vis = df_im.copy()
@@ -281,9 +258,8 @@ def fix_dtypes_im(df_im_vis, verbose=True):
     return df_im_vis
 
 
-# ── Outlier removal (after PyOD + review with dataset-owner) ─────────────────────────────
 
-# 6 PyOD flagged outliers removed + 2 additional patients with found abnormal measurement (also flagged)
+# PyOD flagged outlier
 IM_CONFIRMED_OUTLIERS = [
     (221, 2),
     (163, 1),
@@ -297,17 +273,12 @@ IM_CONFIRMED_OUTLIERS = [
 
 def remove_outlier_observations(df, outliers=None, verbose=True):
     """Remove specific (patient, timepoint) observations confirmed as outliers.
-
-    Parameters
     ----------
     df             : pd.DataFrame  
     outliers       : list of (patient_id, timepoint) tuples, or None
                      defaults to IM_CONFIRMED_OUTLIERS
-    verbose        : bool
+    verbose        : bool for outprints
 
-    Returns
-    -------
-    pd.DataFrame — copy with outlier rows removed and index reset
     """
 
     if outliers is None:
@@ -336,7 +307,6 @@ def remove_outlier_observations(df, outliers=None, verbose=True):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Constants
-
 # Patient-level columns: constant across timepoints, filled only in first row
 CL_PATIENT_LEVEL_COLS = [
     'Patient', 'Unnamed: 2', 'Age at start', 'Gender', 'Weight [kg]', 'Height [cm]',
@@ -378,8 +348,6 @@ CL_PAIN_QUESTIONNAIRE_COLS = [
     'pain_under_load', 'pain_night', 'pain_daytime', 'pain_at_rest', 'morning_stiffness']
 
 
-# ── Clinical helper functions ─────────────────────────────────────────────────
-
 def move_column_after(df, col_to_move, after_col):
     """Move col_to_move to the position immediately after after_col."""
     cols = df.columns.tolist()
@@ -391,13 +359,12 @@ def extract_numeric(series):
     """Extract numeric value from ordinal questionnaire entries (scale 1–4).
 
     Handles:
-      - k.A./kA/ka                                        → NaN
-      - decimal-encoded pair     "2.3"                    → average(2, 3) = 2.5
-      - comma-separated ratings  "1,2" or "3, 4"         → average
-      - parenthetical notes stripped first:
-            "3 (abends 4)"  → "3"  → 3      (note inside parens, not a rating)
-            "3 (tag), 4 (nacht)" → "3, 4"  → 3.5  (two ratings with context)
-      - leading number with trailing text  "4 re"         → 4
+      - missing values
+      - decimal-encoded pair     "2.3"                    -> average(2, 3) = 2.5
+      - comma-separated ratings  "1,2" or "3, 4"          -> average
+      - Specific parenthetical notes:
+            "3 (abends 4)"   -> "3"  -> 3     
+      - leading number with trailing text  "4 re"         -> 4
     """
     s = series.astype(str).str.strip()
 
@@ -405,15 +372,13 @@ def extract_numeric(series):
         if val in ('nan', '', 'None', 'k.A.', 'kA', 'ka', 'k.a.'):
             return np.nan
 
-        # Strip parenthetical content so descriptive notes don't contribute numbers
-        # e.g. "3 (abends 4)" → "3",  "3 (tag), 4 (nacht)" → "3, 4"
+        # Strip comments in parentheses so notes don't contribute numbers
         val_clean = re.sub(r'\([^)]*\)', '', val).strip()
 
         # Comma-separated ratings: "1,2" or "3, 4" → average
         if re.match(r'^\d+(\s*,\s*\d+)+$', val_clean):
             return np.mean([float(x) for x in val_clean.split(',')])
 
-        # All remaining numbers (handles "2.3" → [2,3] → 2.5, "4 re" → [4] → 4)
         all_nums = re.findall(r'\b(\d+)\b', val_clean)
         if len(all_nums) > 1:
             return np.mean([float(x) for x in all_nums])
@@ -428,20 +393,19 @@ def extract_continuous(series):
     """Extract numeric value from continuous scale entries (pain_scale from 0–10).
 
     Priority order:
-      1. MW=  (Mittelwert, pre-calculated midpoint)     -> use directly
-      2. semicolon-separated  ('1,2; 8,6')              -> take first value
-      3. bilateral li/re pair ('5 (li), 8 (re)')        -> average both sides
-      4. range + parenthesised value ('4-7 (6)')        -> use parenthesised value
+      1. MW=  (Mittelwert, pre-calculated midpoint)     -> use directly (from dataset owners)
+      2. two values for left/right('5 (li), 8 (re)')    -> average both sides
+      4. range + MW in paranthesis ('4-7 (6)')          -> use MW in paranthesis 
       5. pure range ('5,5-7,5', '3-9')                  -> take midpoint
-      6. leading number with trailing text              -> use leading number
+      6. number with comments/text                      -> use number
     """
     s = series.astype(str).str.strip()
 
     def parse_entry(val):
-        if val in ('nan', '', 'None', '?', 'k.A.', 'kA', 'ka', 'k.a.'):
+        if val in ('nan', '', 'None', '?', 'k.A.', 'kA', 'ka', 'k.a.'): # removed by earlier preprocessing step replacing n.D and k.A
             return np.nan
 
-        # Correcting confirmed typo (dash used instead of a decimal point)
+        # Correcting confirmed typos (dash used instead of a decimal point)
         if val == '3-9':
             return 3.9
 
@@ -450,7 +414,7 @@ def extract_continuous(series):
         if mw:
             return float(mw.group(1).replace(',', '.'))
 
-        # 2 — semicolon-separated: take the first value  ('1,2; 8,6' → 1.2)
+        # 2 — Unique occurence take the first value  ('1,2; 8,6' -> 1.2) confirmed by datset owners
         if ';' in val:
             first = val.split(';')[0].strip()
             m = re.match(r'^(\d+[.,]?\d*)', first)
@@ -458,26 +422,25 @@ def extract_continuous(series):
                 return float(m.group(1).replace(',', '.'))
 
         # 3 — bilateral li/re: average both sides  ('5 (li), 8 (re)' → 6.5)
-        #     \b after li/re ensures 'linke' / 'rechte' are not accidentally matched
+
         lr_nums = re.findall(r'(\d+[.,]?\d*)\s*\(?(?:li|re)\b', val, re.IGNORECASE)
         if lr_nums:
             nums = [float(n.replace(',', '.')) for n in lr_nums]
             return sum(nums) / len(nums)
 
-        # 4 — range with parenthesised representative: '4-7 (6)' → 6
+        # 4 — range with parenthesised Midpoint: '4-7 (6)' → 6
         m = re.match(r'^\d+[.,]?\d*\s*[-–]\s*\d+[.,]?\d*\s*\((\d+[.,]?\d*)\)', val)
         if m:
             return float(m.group(1).replace(',', '.'))
 
-        # 5 — pure range: '5,5-7,5', '3-9' → midpoint
+        # 5 — pure range: '5,5-7,5', '3-9' -> midpoint
         m = re.match(r'^(\d+[.,]?\d*)\s*[-–]\s*(\d+[.,]?\d*)\s*$', val)
         if m:
             return (float(m.group(1).replace(',', '.')) +
                     float(m.group(2).replace(',', '.'))) / 2
 
         # 6 — leading number with any trailing text
-        #     covers: '6 (long description...)', '8 (m. Schmerzmittel 4)',
-        #             '7,3-dauernd bei Belastung, 10 aus der Ruhe', '1,6', etc.
+        #     covers: ex. '6 (long description...)'
         m = re.match(r'^(\d+[.,]?\d*)', val)
         if m:
             return float(m.group(1).replace(',', '.'))
@@ -490,7 +453,7 @@ def extract_continuous(series):
 def split_bmi_column(df, col_name='overweight_bmi'):
     """Split combined overweight/BMI column into 'overweight' (ja/nein) and 'bmi' (float).
 
-    Input format: "ja (28.5)", "nein", "n.D" (missing).
+    Input format: "ja (28.5)", "nein" etc.
     """
     col_idx = df.columns.get_loc(col_name)
     is_missing = df[col_name].str.contains(r'^n\.?D\.?$', case=False, na=True)
@@ -569,8 +532,6 @@ def standardize_target_volume(series):
 
 def standardize_diagnosis(series):
     """Standardize diagnosis column by mapping German/English variants to English names:
-
-    Combined diagnoses are mapped as 'Name1, Name2'.
     """
     diagnosis_map = [
         ('Achillodynia',            ['achillodynie', 'achilliodynie', 'achyllodynie', 'achillodynia', 'tendinitis']),
@@ -610,7 +571,7 @@ def standardize_diagnosis(series):
 def standardize_pain_points(series):
     """Standardize pain_points: map German body parts to English.
 
-    Pure number entries become NaN. Returns 'BodyPart, BodyPart' format (side stripped).
+    Pure number entries become NaN. Returns 'BodyPart, BodyPart' format if multiple bodyparts are mentioned
     """
     body_part_keywords = [
         ('Achilles Tendon', ['achillessehne']),
@@ -676,7 +637,8 @@ def standardize_pain_points(series):
 def parse_cumulative_dose(val):
     """Parse total cumulative dose from mixed format strings.
 
-    Handles: standalone values, double values "L: 3; R: 6" (sum both sides), "3(6)" (takes the parenthesized total),
+    Handles: standalone values and  double values "L: 3; R: 6" (sum both sides) 
+    "3(6)" (takes the parenthesized total)
     """
     if pd.isna(val):
         return pd.NA
@@ -698,7 +660,7 @@ def encode_therapy_columns(df, col_name='previous_therapy'):
     """Encode comma-separated therapy codes (1–7) into binary indicator columns.
 
     Input: "1,3,5" or "1,2,3 (medicine)".
-    Output: previous_therapy_1 … previous_therapy_7 (int 0/1).
+    Output: previous_therapy_1 … previous_therapy_7  (as binary 0/1).
     """
     col_idx = df.columns.get_loc(col_name)
     for i in range(1, 8):
@@ -710,15 +672,6 @@ def encode_therapy_columns(df, col_name='previous_therapy'):
 def forward_fill_clinical(df_cl, verbose=True):
     """Forward-fill clinical patient columns and extract timepoint to make a Timepoint column.
     Makes it so clinical and immunulogical dataset has the same format with one timepoint per row.
-
-    Parameters
-    ----------
-    df_cl   : pd.DataFrame   raw clinical data as loaded from Excel
-    verbose : bool
-
-    Returns
-    -------
-    pd.DataFrame — working copy with forward-filled columns and Timepoint extracted
     """
     df = df_cl.copy()
     fill_cols = [c for c in CL_PATIENT_LEVEL_COLS + ['Unnamed: 0'] if c in df.columns]
@@ -741,24 +694,14 @@ def forward_fill_clinical(df_cl, verbose=True):
 
 
 def exclude_predetermined(df_cl_clean, multi_body_patients=None, verbose=True):
-    """Exclude predetermined patients and columns.
-
-    Parameters
-    ----------
-    df_cl_clean         : pd.DataFrame
-    multi_body_patients : list of int, optional — defaults to CL_MULTI_BODY_PATIENTS
-    verbose             : bool
-
-    Returns
-    -------
-    pd.DataFrame — copy with excluded patients and predetermined columns removed
+    """Exclude predetermined patients and columns, confirmed by datasset owners
     """
     if multi_body_patients is None:
         multi_body_patients = CL_MULTI_BODY_PATIENTS
 
     df = df_cl_clean.copy()
 
-    # 1 — Ausschluss exclusion
+    # 1 — Ausschluss exclusion key word
     if 'Unnamed: 0' in df.columns:
         exclude_mask = df['Unnamed: 0'].str.contains('Ausschluss', case=False, na=False)
         excluded_patients = df.loc[exclude_mask, 'Patient'].dropna().unique()
@@ -826,16 +769,6 @@ def exclude_predetermined(df_cl_clean, multi_body_patients=None, verbose=True):
 
 def rename_columns_cl(df_cl_clean, rename_map=None, verbose=True):
     """Rename clinical columns from German to English using the CL_RENAME_MAP.
-
-    Parameters
-    ----------
-    df_cl_clean : pd.DataFrame
-    rename_map  : dict, optional — defaults to CL_RENAME_MAP
-    verbose     : bool
-
-    Returns
-    -------
-    pd.DataFrame — copy with renamed columns
     """
     if rename_map is None:
         rename_map = CL_RENAME_MAP
@@ -853,21 +786,10 @@ def rename_columns_cl(df_cl_clean, rename_map=None, verbose=True):
 
 def drop_rows_cl(df_cl_clean, verbose=True):
     """Drop empty and invalid rows from the clinical dataset.
-
-    Steps
-    -----
     1. Drop rows with no measurement date (blank rows in raw dataset)
     2. Drop rows where all questionnaire columns (complaints_since to
        improvement_percent) are NaN (empty or fully-marker-filled visits)
 
-    Parameters
-    ----------
-    df_cl_clean : pd.DataFrame
-    verbose     : bool
-
-    Returns
-    -------
-    pd.DataFrame — copy with invalid rows removed
     """
     df = df_cl_clean.copy()
 
@@ -896,24 +818,13 @@ def drop_rows_cl(df_cl_clean, verbose=True):
 
 
 def manual_corrections_cl(df_cl_clean, verbose=True):
-    """Apply known manual data corrections to the clinical dataset.
+    """Apply addtional known manual data corrections to the clinical dataset, stated by dataset owners.
 
     Corrections applied
     -------------------
     - Patient 248 T2 : pain_daytime '22' → '2'  (confirmed typo)
     - Patient 219    : removed (used a different questionnaire)
-    - Patient 89     : assign correct timepoints by date (T2 = 27.03.2019,
-                       T5 = 05.07.2019); drop unmatched row (10.05.2019)
-    - Patient 21 - 
-
-    Parameters
-    ----------
-    df_cl_clean : pd.DataFrame
-    verbose     : bool
-
-    Returns
-    -------
-    pd.DataFrame — copy with corrections applied
+    - Patient 89     : assign correct timepoints by date 
     """
     df = df_cl_clean.copy()
 
@@ -978,16 +889,8 @@ def parse_transform_cl(df_cl_clean, verbose=True):
     8.  ordinal columns -> extract_numeric values
     9.  pain_scale      -> extract_continuous values
 
-    Requires columns already renamed.
+    Requires columns already re-renamed to english
 
-    Parameters
-    ----------
-    df_cl_clean : pd.DataFrame
-    verbose     : bool         — print before/after value distributions for each column
-
-    Returns
-    -------
-    pd.DataFrame — copy with all columns parsed and transformed
     """
     df = df_cl_clean.copy()
 
@@ -1089,7 +992,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print("\n--- previous_therapy (AFTER: binary columns) ---")
             print(df[therapy_cols].sum().to_dict())
 
-    # 9 — Ordinal questionnaire columns -> extract numeric
+    # 9 — Ordinal questionnaire columns -> extract numeric data 
     ordinal_cols = ['pain_under_load', 'pain_at_rest', 'pain_daytime',
                     'pain_night', 'morning_stiffness']
     for col in ordinal_cols:
@@ -1105,7 +1008,7 @@ def parse_transform_cl(df_cl_clean, verbose=True):
             print(f"--- {col} (AFTER) ---")
             print(f"  {sorted(df[col].dropna().unique())}")
 
-    # 10 — pain_scale (continuous): German decimal comma, ranges -> midpoint
+    # 10 — pain_scale (continuous): extract numerical data
     if 'pain_scale' in df.columns:
         if verbose:
             print("\n--- pain_scale (BEFORE) ---")
@@ -1168,8 +1071,7 @@ def fix_dtypes_cl(df_cl_clean, verbose=True):
 def clean_cl(df_cl, verbose=True):
     """Full cleaning pipeline for the raw clinical dataset.
 
-    Steps
-    -----
+    Steps:
     1.  Forward-fill patient-level columns + extract Timepoint  (forward_fill_clinical)
     2.  Exclude predetermined patients + drop predetermined columns  (exclude_predetermined)
     3.  Rename columns German to English  (rename_columns_cl)
@@ -1178,19 +1080,14 @@ def clean_cl(df_cl, verbose=True):
     6.  Replace German NaN markers  (replace_missing_markers)
     7.  Drop empty rows, no date or empty questionnaire  (drop_rows_cl)
     8.  Fix dtypes  (fix_dtypes_cl)
-    9.  Return df_cl_vis with all columns
+    9.  Return df_cl_vis ready for analysis
 
-    Parameters
     ----------
     df_cl   : pd.DataFrame   raw clinical data as loaded from Excel
     verbose : bool.      -   set to False to supress all outprints 
-
-    Returns
-    -------
-    df_cl_vis : full cleaned dataset
     """
 
-    df_cl_vis = df_cl.copy()   # keep the raw input untouched!1
+    df_cl_vis = df_cl.copy()   # keep the raw input untouched
 
     if verbose:
         print("\n  [1] Forward-filling patient-level columns + extracting Timepoint column")
@@ -1238,21 +1135,6 @@ def clean_cl(df_cl, verbose=True):
 
 def impute_iterative(df, ex_cols=None, iterations=20, random_state=42, verbose=False):
     """Iterative imputation using sklearn IterativeImputer.
-    Numeric columns: IterativeImputer (BayesianRidge).
-    Categorical/object columns: SimpleImputer (Majority vote).
-
-    Parameters
-    ----------
-    df         : pd.DataFrame
-    ex_cols    : list of str or None  — columns to exclude (e.g. id columns)
-    iterations : int                  — max iterations (default 10)
-    random_state : int
-    verbose    : bool
-
-    Returns
-    -------
-    df_imputed : pd.DataFrame  — same shape as df
-    imputer    : fitted ColumnTransformer  — use imputer.transform() on test set
     """
 
     from sklearn.experimental import enable_iterative_imputer  
@@ -1282,7 +1164,7 @@ def impute_iterative(df, ex_cols=None, iterations=20, random_state=42, verbose=F
     if cat_cols:
         transformers.append((
             'cat',
-            SimpleImputer(strategy='most_frequent'),
+            SimpleImputer(strategy='most_frequent'), # categorical data is already encoded by this step, so this is not used
             cat_cols
         ))
 

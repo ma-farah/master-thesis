@@ -535,7 +535,7 @@ def run_tuned_pls(
     """PLSRegression + Optuna nested CV on a fixed feature list.
       1. Inner CV (4×5=20) + Optuna (50 trials) tunes n_components
       2. Train final fold model on X_train → evaluate on X_test
-      3. Final model: median n_components across outer folds, trained on full X
+      3. Saves a model in order to run SHAP analysis (median HPs across outer folds, trained on full X)
 
     Returns: results_df, final_model, X_final, y_pred, patient_err_df, patient_heatmap_df, scaler_final
     """
